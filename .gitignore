@@ -1,0 +1,46 @@
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Secrets — NEVER commit ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+auth.json
+credentials.json
+
+# ── Runtime data & logs ──────────────────────────────────────────────────────
+data/
+logs/
+*.log
+downloads/
+
+# ── Editor / IDE history ─────────────────────────────────────────────────────
+.history/
+.history
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── Generated launchers ──────────────────────────────────────────────────────
+run-service.vbs
+
+# ── Build / tooling / caches ─────────────────────────────────────────────────
+dist/
+build/
+out/
+coverage/
+*.tsbuildinfo
+.cache/
+.tmp/
+*.tmp
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

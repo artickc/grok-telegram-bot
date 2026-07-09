@@ -1,0 +1,74 @@
+{
+  "name": "grok-telegram-bot",
+  "version": "2.0.0",
+  "description": "Control the official Grok Build CLI from Telegram over the Agent Client Protocol (ACP). Sign in with your xAI account, switch projects, resume sessions, stream responses with diffs, queue follow-ups, manage multiple sign-ins, and run 24/7 as a cross-platform background service.",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "grok-tg": "bin/grok-tg.mjs",
+    "grok-telegram-bot": "bin/grok-tg.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "scripts",
+    "tsconfig.json",
+    ".env.example",
+    "CHANGELOG.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "prepublishOnly": "npm run typecheck",
+    "setup": "node scripts/setup.mjs",
+    "service": "tsx src/cli.ts",
+    "install:service": "tsx src/cli.ts install",
+    "uninstall:service": "tsx src/cli.ts uninstall",
+    "service:status": "tsx src/cli.ts status",
+    "service:logs": "tsx src/cli.ts logs"
+  },
+  "keywords": [
+    "grok",
+    "grok-cli",
+    "xai",
+    "telegram",
+    "telegram-bot",
+    "ai-agent",
+    "ai-coding-assistant",
+    "mobile-coding",
+    "chatops",
+    "devtools",
+    "daemon",
+    "cross-platform",
+    "grammy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artickc/grok-telegram-bot.git"
+  },
+  "homepage": "https://github.com/artickc/grok-telegram-bot#readme",
+  "bugs": {
+    "url": "https://github.com/artickc/grok-telegram-bot/issues"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "diff": "^7.0.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.30.0",
+    "tsx": "^4.19.2"
+  },
+  "optionalDependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "0.13.1"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

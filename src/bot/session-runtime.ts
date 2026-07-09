@@ -1,0 +1,1048 @@
+/**
+ * SessionRuntime — binds one Telegram chat to one Grok ACP session and drives
+ * the prompt/stream lifecycle, typing indicator, follow-up queue, live watch,
+ * and per-chat preferences (project, agent, model, reasoning). State persists
+ * to the settings store so it survives restarts.
+ */
+import { basename } from "node:path";
+import { type Api, InlineKeyboard } from "grammy";
+import { type GrokClient, isContextExhaustedError, isTransientError, type SessionMetadata } from "../grok/client.js";
+import type { AccountRotator } from "./account-rotator.js";
+import type { ContentBlock, PromptResult, SessionUpdate } from "../grok/types.js";
+import type { AppConfig } from "../config.js";
+import { reasoningDirective } from "../app/reasoning.js";
+import type { SettingsStore } from "../app/settings-store.js";
+import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
+import { createLogger } from "../logger.js";
+import { buildTranscript } from "../sessions/history.js";
+import { sessionHashtags } from "../render/hashtags.js";
+import { PROGRESS_DIRECTIVE } from "../render/progress.js";
+import { buildPriming, recentTranscript } from "./session-fork.js";
+import { TailWatcher } from "../sessions/tail.js";
+import type { HistoryEntry } from "../sessions/types.js";
+import { formatToolCall } from "../render/tool-call.js";
+import { type FileOp, fileOpFromUpdate, mergeFileOp, summarizeFileOps, summarizeFileOpsShort } from "../render/file-summary.js";
+import { isActiveStatus, renderSubagentTransition, statusKey } from "../render/subagent.js";
+import type { PendingStage, SubagentInfo } from "../grok/types.js";
+import { ResponseStreamer } from "../stream/streamer.js";
+import { extractImagePaths, sendImages } from "./image-return.js";
+import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
+import { backoffSchedule, fmtSeconds, formatErrorSummary, formatRetryNotice, RETRY_BASE_MS } from "./prompt-retry.js";
+import { sendMarkdownDoc } from "./telegram-io.js";
+import { TypingIndicator } from "./typing.js";
+
+const log = createLogger("runtime");
+
+const WATCH_ENTRY_MAX = 700;
+const WATCH_ICON: Record<string, string> = {
+  user: "\u{1F464}",
+  assistant: "\u{1F916}",
+  tool: "\u{1F527}",
+  system: "\u2139\uFE0F",
+};
+
+export type AttachResult = "resumed" | "forked";
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Continuation nudge sent to the SAME session to recover from a transient error
+ * that struck mid-stream. The partial reply + any completed tool results are
+ * already in the session history, so we ask the agent to finish WITHOUT redoing
+ * work (which is why we resume rather than re-send the original prompt).
+ */
+const RESUME_INSTRUCTION =
+  "Your previous response was interrupted by a transient service error (the model stream was throttled), " +
+  "so your last turn did not finish. Continue from exactly where you stopped and complete the response. " +
+  "Do NOT repeat any file edits, commands, or other tool calls you already completed — their results are " +
+  "already in this conversation. If you had already fully answered, just briefly conclude.";
+
+export class SessionRuntime {
+  sessionId: string | undefined;
+  cwd: string;
+  projectName: string | undefined;
+  /** Invoked whenever observable state changes (for the status panel). */
+  onStateChange: (() => void) | undefined;
+
+  private busy = false;
+  private cancelled = false;
+  private readonly queue: PromptInput[] = [];
+  private streamer: ResponseStreamer | undefined;
+  private readonly typing: TypingIndicator;
+  private shownToolIds = new Set<string>();
+  /** Files touched this turn (path -> operation), tracked even in background so
+   *  the completion message can summarise what changed. */
+  private fileOps = new Map<string, FileOp>();
+  /** The full Done/summary of the most recent finished turn, replayed when you
+   *  switch (back) into this session so you see how it ended. */
+  private lastCompletion: string | undefined;
+  /** Latest task-completion % parsed from the agent's `{progress: N%}` markers,
+   *  shown as a bar in the status panel and session cards. Reset each turn. */
+  private progress: number | undefined;
+  /** Subagent sessionId -> last status key shown this turn (dedupe). */
+  private subagentShown = new Map<string, string>();
+  private turnStartedAt = 0;
+  /** Count of completed (non-cancelled) turns this session — shown in /usage. */
+  private turnCount = 0;
+  /** Telegram message id of the current turn's prompt, so replies thread to it. */
+  private turnReplyTo: number | undefined;
+  private imageScanText = "";
+  private sentImagesThisTurn = new Set<string>();
+  private readonly listener: (sessionId: string, update: SessionUpdate) => void;
+  private primingContext: string | undefined;
+  private watcher: TailWatcher | undefined;
+  /** True when the active watch is a transient "follow" of this session's own
+   *  in-flight turn (started on switch) rather than an explicit /watch of
+   *  another session — follow-watches are auto-stopped when a new turn streams. */
+  private watchIsFollow = false;
+  private rebindPending = false;
+  private sessionLive = false;
+  /** Only the foreground runtime streams to Telegram; background ones stay quiet
+   *  (their output lands in the session's .jsonl and shows as "unread" on switch). */
+  private foreground = true;
+  private readonly restartListener: () => void;
+  /** Invoked when this runtime starts/stops a turn (for subagent attribution). */
+  onActivity: ((busy: boolean) => void) | undefined;
+  /** Invoked when this runtime adopts a *different* session id (new session or
+   *  a logical fork), so the owning ChatController can re-persist its controlled
+   *  list and mark the new session seen. */
+  onSessionChange: (() => void) | undefined;
+  /** Optional multi-account rotator: when a turn gives up, cycle through the
+   *  other saved logins once and retry on each. Injected by the registry. */
+  accountRotator: AccountRotator | undefined;
+
+  constructor(
+    private readonly api: Api,
+    private readonly chatId: number,
+    private readonly acp: GrokClient,
+    private readonly cfg: AppConfig,
+    private readonly settings: SettingsStore,
+    init?: { cwd: string; projectName?: string; sessionId?: string },
+  ) {
+    if (init) {
+      this.cwd = init.cwd;
+      this.projectName = init.projectName;
+      this.sessionId = init.sessionId;
+    } else {
+      const s = settings.get(chatId);
+      this.cwd = s.projectPath ?? cfg.workspace;
+      this.projectName = s.projectName;
+      this.sessionId = s.sessionId;
+    }
+    if (this.sessionId) this.rebindPending = true; // lazily reload on first use
+
+    this.typing = new TypingIndicator(api, chatId);
+    this.listener = (sid, update) => this.onUpdate(sid, update);
+    this.acp.on("session-update", this.listener);
+    this.restartListener = () => {
+      this.sessionLive = false;
+      if (this.sessionId) this.rebindPending = true;
+    };
+    this.acp.on("restarted", this.restartListener);
+  }
+
+  get isBusy(): boolean {
+    return this.busy;
+  }
+  get queueLength(): number {
+    return this.queue.length;
+  }
+  get isWatching(): boolean {
+    return this.watcher?.running ?? false;
+  }
+  get isForeground(): boolean {
+    return this.foreground;
+  }
+
+  /** The Done/summary of this session's most recent finished turn, if any. */
+  get lastTurnSummary(): string | undefined {
+    return this.lastCompletion;
+  }
+
+  /** Latest task-completion % (0–100) parsed this turn, or undefined if none. */
+  get taskProgress(): number | undefined {
+    return this.progress;
+  }
+
+  /** Record a new progress value and refresh the status panel / cards. The bar
+   *  is monotonic within a turn (it's reset to undefined when a new turn starts),
+   *  so a streamer recreated mid-turn can't make it jump backwards. */
+  private setProgress(pct: number): void {
+    const next = Math.max(this.progress ?? 0, pct);
+    if (next === this.progress) return;
+    this.progress = next;
+    this.changed();
+  }
+
+  /** Searchable hashtag footer for this session (project · session · model ·
+   *  reasoning) — appended to every AI-output surface for this session. */
+  get tags(): string {
+    return this.hashtags();
+  }
+
+  /** Switch live-streaming on/off. Going background seals any in-flight turn;
+   *  returning to the foreground while a turn is still running resumes RICH
+   *  live streaming (thinking / tools / prose) rather than a degraded tail. */
+  async setForeground(value: boolean): Promise<void> {
+    if (this.foreground === value) return;
+    this.foreground = value;
+    if (value) {
+      // A turn was started here and is still in flight, but its streamer was
+      // finalized when we went background. Recreate it and let onUpdate feed
+      // the remaining chunks/thoughts/tools just like a normal live turn — we
+      // own the agent's session/update events, so no tail-watch is needed.
+      if (this.busy && !this.streamer) {
+        // Any transient follow-watch of this session is now superseded.
+        if (this.watchIsFollow) this.stopWatch();
+        this.streamer = new ResponseStreamer(this.api, this.chatId, this.cfg.streamThrottleMs, this.turnReplyTo, this.hashtags(), (pct) => this.setProgress(pct), this.cfg.progressFallback, this.turnStartedAt);
+        this.typing.start();
+      }
+    } else {
+      this.typing.stop();
+      this.stopWatch();
+      if (this.streamer) {
+        await this.streamer.finalize().catch(() => {});
+        this.streamer = undefined;
+      }
+    }
+    this.changed();
+  }
+  get reasoning(): ReasoningEffort {
+    return this.settings.get(this.chatId).reasoning;
+  }
+  get agent(): string | undefined {
+    return this.settings.get(this.chatId).agent;
+  }
+  get model(): string | undefined {
+    return this.settings.get(this.chatId).model;
+  }
+
+  /** Latest context-usage % / effort / credits for the current session. */
+  contextInfo(): SessionMetadata | undefined {
+    return this.acp.metadataFor(this.sessionId);
+  }
+
+  /** Number of turns (prompts) this runtime has completed this session. */
+  get turns(): number {
+    return this.turnCount;
+  }
+
+  dispose(): void {
+    this.acp.off("session-update", this.listener);
+    this.acp.off("restarted", this.restartListener);
+    this.typing.stop();
+    this.stopWatch();
+  }
+
+  // ── sessions ───────────────────────────────────────────────────────────────
+
+  async startNewSession(cwd: string, projectName?: string): Promise<void> {
+    if (this.busy) await this.cancel();
+    await this.bindNewSession(cwd, projectName);
+  }
+
+  /**
+   * Create a fresh live session and adopt it. Does NOT cancel an in-flight turn
+   * (the caller decides), so the auto-fork-on-error path can swap to a clean
+   * session mid-turn without flagging the turn as user-cancelled.
+   */
+  private async bindNewSession(cwd: string, projectName?: string): Promise<void> {
+    this.stopWatch();
+    this.sessionId = await this.acp.newSession(cwd);
+    this.sessionLive = true;
+    this.rebindPending = false;
+    this.cwd = cwd;
+    this.projectName = projectName;
+    await this.applySessionPrefs();
+    this.persist();
+    this.sessionChanged();
+    log.info(`chat ${this.chatId} -> new session ${this.sessionId} @ ${cwd}`);
+    this.changed();
+  }
+
+  /** Ensure a session is live in the current ACP process (used before menus). */
+  async prepare(): Promise<void> {
+    await this.ensureSession();
+  }
+
+  async resumeSession(sessionId: string, cwd: string, projectName?: string): Promise<void> {
+    if (!this.acp.supportsLoadSession) {
+      throw new Error("This Grok CLI build does not support loading sessions.");
+    }
+    if (this.busy) await this.cancel();
+    this.stopWatch();
+    await this.acp.loadSession(sessionId, cwd);
+    this.sessionId = sessionId;
+    this.sessionLive = true;
+    this.rebindPending = false;
+    this.cwd = cwd;
+    this.projectName = projectName;
+    this.persist();
+    log.info(`chat ${this.chatId} -> resumed session ${sessionId} @ ${cwd}`);
+    this.changed();
+  }
+
+  async attach(
+    sessionId: string,
+    cwd: string,
+    projectName: string | undefined,
+    priorEntries: HistoryEntry[],
+  ): Promise<AttachResult> {
+    try {
+      await this.resumeSession(sessionId, cwd, projectName);
+      return "resumed";
+    } catch (err) {
+      log.warn(`load failed (${(err as Error).message}); forking ${sessionId.slice(0, 8)}`);
+      await this.startNewSession(cwd, projectName);
+      if (priorEntries.length > 0) this.primingContext = buildPriming(buildTranscript(priorEntries));
+      return "forked";
+    }
+  }
+
+  startWatch(jsonlPath: string, follow = false): void {
+    this.stopWatch();
+    this.watchIsFollow = follow;
+    this.watcher = new TailWatcher(jsonlPath, (entries) => void this.onWatchEntries(entries));
+    this.watcher.start(true);
+  }
+
+  stopWatch(): boolean {
+    if (!this.watcher) return false;
+    this.watcher.stop();
+    this.watcher = undefined;
+    this.watchIsFollow = false;
+    return true;
+  }
+
+  // ── preferences ──────────────────────────────────────────────────────────
+
+  async setModelPref(modelId: string): Promise<{ ok: boolean; error?: string }> {
+    // Persist the choice always; only talk to Grok when a session is live in
+    // the current process (set_model on an unloaded session crashes the agent).
+    this.settings.update(this.chatId, { model: modelId });
+    if (modelId && this.sessionLive && this.sessionId) {
+      if (!this.acp.hasModel(modelId)) return { ok: false, error: `unknown model: ${modelId}` };
+      try {
+        await this.acp.setModel(this.sessionId, modelId);
+      } catch (e) {
+        this.changed();
+        return { ok: false, error: (e as Error).message };
+      }
+    }
+    this.changed();
+    return { ok: true };
+  }
+
+  async setAgentPref(agent: string): Promise<void> {
+    this.settings.update(this.chatId, { agent });
+    if (agent && this.sessionLive && this.sessionId && this.acp.hasMode(agent)) {
+      try {
+        await this.acp.setMode(this.sessionId, agent);
+      } catch (e) {
+        log.warn(`set_mode(${agent}) failed: ${(e as Error).message}`);
+      }
+    }
+    this.changed();
+  }
+
+  setReasoningPref(effort: ReasoningEffort): void {
+    this.settings.update(this.chatId, { reasoning: effort });
+    this.changed();
+  }
+
+  private async applySessionPrefs(): Promise<void> {
+    const s = this.settings.get(this.chatId);
+    // Drop any persisted model the agent doesn't actually offer (an unknown id
+    // is silently accepted by set_model but then breaks the next prompt).
+    if (s.model && !this.acp.hasModel(s.model)) {
+      log.warn(`clearing invalid persisted model "${s.model}" for chat ${this.chatId}`);
+      this.settings.update(this.chatId, { model: "" });
+    }
+    const cur = this.settings.get(this.chatId);
+    // Adopt the session's current agent (mode) when the user hasn't chosen one.
+    if (!cur.agent && this.acp.currentModeId) {
+      this.settings.update(this.chatId, { agent: this.acp.currentModeId });
+    } else if (this.sessionId && cur.agent && this.acp.hasMode(cur.agent) && cur.agent !== this.acp.currentModeId) {
+      try {
+        await this.acp.setMode(this.sessionId, cur.agent);
+      } catch (e) {
+        log.debug(`apply agent failed: ${(e as Error).message}`);
+      }
+    }
+    if (this.sessionId && cur.model && this.acp.hasModel(cur.model)) {
+      try {
+        await this.acp.setModel(this.sessionId, cur.model);
+      } catch (e) {
+        log.debug(`apply model failed: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  // ── prompting ──────────────────────────────────────────────────────────────
+
+  async submit(input: PromptInput): Promise<"ran" | "queued"> {
+    await this.ensureSession();
+    if (this.busy) {
+      this.queue.push(input);
+      this.changed();
+      return "queued";
+    }
+    void this.runTurn(input);
+    return "ran";
+  }
+
+  async cancel(): Promise<boolean> {
+    if (!this.busy || !this.sessionId) return false;
+    this.cancelled = true;
+    await this.acp.cancel(this.sessionId);
+    return true;
+  }
+
+  clearQueue(): number {
+    const n = this.queue.length;
+    this.queue.length = 0;
+    this.changed();
+    return n;
+  }
+
+  drainQueueToPrompt(): PromptInput | undefined {
+    if (this.queue.length === 0) return undefined;
+    return mergeInputs(this.queue.splice(0, this.queue.length));
+  }
+
+  private async ensureSession(): Promise<void> {
+    if (this.rebindPending && this.sessionId) {
+      // The ACP process is frequently mid-restart the first time we re-bind
+      // (auto-restart after a crash, or a fresh bot boot), so a single attempt
+      // is flaky. Retry briefly before giving up.
+      if (await this.rebindWithRetries(this.sessionId)) {
+        this.sessionLive = true;
+        this.rebindPending = false;
+        await this.applySessionPrefs();
+        log.info(`chat ${this.chatId} re-bound session ${this.sessionId.slice(0, 8)}`);
+        return;
+      }
+      // The session genuinely can't be reloaded (its exclusive lock is held,
+      // or its log/metadata is gone). Never silently drop the conversation:
+      // fork a linked continuation primed with the recent transcript so the
+      // thread survives — including any question the agent had just asked.
+      // forkFromLostSession() only throws if the agent is fully down, in which
+      // case we leave rebindPending set so the next message retries cleanly.
+      await this.forkFromLostSession(this.sessionId);
+      this.rebindPending = false;
+      return;
+    }
+    if (!this.sessionId) await this.startNewSession(this.cwd, this.projectName);
+  }
+
+  /** Reload a persisted session, retrying flaky failures with a short backoff.
+   *  Returns true once loaded, false after the attempts are exhausted. */
+  private async rebindWithRetries(sessionId: string, attempts = 4): Promise<boolean> {
+    const delays = [400, 1200, 3000]; // ≈4.6s total before giving up
+    for (let i = 0; i < attempts; i++) {
+      try {
+        await this.acp.loadSession(sessionId, this.cwd);
+        return true;
+      } catch (err) {
+        log.warn(
+          `re-bind ${sessionId.slice(0, 8)} attempt ${i + 1}/${attempts} failed: ${(err as Error).message}`,
+        );
+        if (i === attempts - 1) return false;
+        await sleep(delays[Math.min(i, delays.length - 1)]!);
+      }
+    }
+    return false;
+  }
+
+  /** Continue a session we could not reload by forking a fresh one primed with
+   *  the lost session's recent transcript, so no context is dropped. */
+  private async forkFromLostSession(lostId: string): Promise<void> {
+    const transcript = recentTranscript(this.cfg.sessionsDir, lostId);
+    log.warn(
+      `chat ${this.chatId} could not reload ${lostId.slice(0, 8)}; forking a linked continuation` +
+        (transcript ? " (primed with recent transcript)" : ""),
+    );
+    await this.startNewSession(this.cwd, this.projectName); // sets a fresh, live sessionId
+    if (transcript) this.primingContext = buildPriming(transcript);
+    if (this.foreground) {
+      await this.notify(
+        transcript
+          ? "\u{1F517} Couldn't reopen the previous session, so I started a linked continuation primed with the recent transcript \u2014 we can keep going from where we left off."
+          : "\u{1F517} Couldn't reopen the previous session, so I started a fresh one here.",
+      );
+    }
+  }
+
+  private async runTurn(input: PromptInput): Promise<void> {
+    this.busy = true;
+    this.cancelled = false;
+    this.turnReplyTo = input.replyTo;
+    this.shownToolIds = new Set();
+    this.fileOps = new Map();
+    this.subagentShown = new Map();
+    this.progress = undefined; // a new turn = a new task; clear the old bar
+    // A new streamed turn supersedes any transient "follow" watch of this same
+    // session's previous in-flight turn (avoids duplicated output).
+    if (this.watchIsFollow) this.stopWatch();
+    const live = this.foreground;
+    const startedAt = Date.now();
+    this.turnStartedAt = startedAt;
+    this.streamer = live
+      ? new ResponseStreamer(this.api, this.chatId, this.cfg.streamThrottleMs, this.turnReplyTo, this.hashtags(), (pct) => this.setProgress(pct), this.cfg.progressFallback, startedAt)
+      : undefined;
+    if (live) this.typing.start();
+    this.activity(true);
+    this.changed();
+    this.imageScanText = "";
+    this.sentImagesThisTurn = new Set();
+
+    const content = buildContentBlocks(input, {
+      reasoning: reasoningDirective(this.reasoning),
+      priming: this.primingContext,
+      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+    });
+    this.primingContext = undefined;
+
+    try {
+      const outcome = await this.runPromptWithRetries(content);
+      const recovered = await this.maybeAutoFork(input, outcome);
+      let final = recovered ?? outcome;
+      // Last resort: if the turn still failed, rotate through other saved
+      // accounts (once) and retry on each until one works.
+      const rotated = await this.maybeRotateAccount(input, final);
+      if (rotated) final = rotated;
+      // A transient error that struck AFTER streaming began skips the paths
+      // above (they must not re-run already-executed tools). Recover by asking
+      // the SAME session to CONTINUE from where it stopped, with backoff.
+      const resumed = await this.maybeResumeAfterStream(final);
+      if (resumed) final = resumed;
+      const streamedOutput = this.streamer?.hasOutput ?? false;
+      // On a successful, non-cancelled turn, top the fallback bar up to 100 (a
+      // no-op when the agent reported its own progress — its value is kept).
+      if (final.result && !this.cancelled) this.streamer?.completeFallback();
+      if (this.streamer) await this.streamer.finalize();
+      if (this.foreground) await this.sendTurnImages();
+      // Always build the completion (records `lastCompletion` so switching back
+      // to this session can replay its Done + summary). Only PING the chat for
+      // the foreground turn, or a background turn when NOTIFY_OTHER_SESSIONS is on.
+      const canPing = this.foreground || this.cfg.notifyOtherSessions;
+      // A background session about to run a queued follow-up shouldn't ping its
+      // interim "Done" — only the final, queue-empty turn announces completion.
+      const hasQueued = this.queue.length > 0;
+      const switchKb = this.switchKeyboard();
+      if (final.result && !this.cancelled) this.turnCount++;
+      if (final.result || this.cancelled) {
+        const live = this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
+        const pingDone = canPing && (this.foreground || !hasQueued);
+        if (pingDone) await this.notify(live, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+      } else if (final.error) {
+        const transient = isTransientError(final.error);
+        const live = this.errorMessage(final.error, startedAt, final.attempts, transient);
+        if (canPing) await this.notify(live, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+      }
+    } catch (err) {
+      // Unexpected failure outside the prompt path (e.g. while finalizing).
+      await this.streamer?.finalize().catch(() => {});
+      const msg = `\u274C Error after ${fmtDuration(Date.now() - startedAt)}: ${(err as Error).message}`;
+      this.lastCompletion = msg;
+      if (this.foreground || this.cfg.notifyOtherSessions) {
+        const from = this.foreground ? "" : `\u{1F4E8} From other session ${this.sessionTag()}\n`;
+        await this.notify(`${from}${msg}`, { loud: true, replyTo: this.turnReplyTo, replyMarkup: this.switchKeyboard() });
+      }
+    } finally {
+      this.typing.stop();
+      this.streamer = undefined;
+      this.busy = false;
+      this.activity(false);
+      // The in-flight turn we may have been following live is over.
+      if (this.watchIsFollow) this.stopWatch();
+      // Turn ended (done / stopped / error): drop the live task-progress value so
+      // the bar is removed from the status panel, session cards and switch
+      // messages. The finished streamed bubble keeps its own (frozen) bar.
+      this.progress = undefined;
+      this.changed();
+    }
+
+    await this.flushQueue();
+  }
+
+  private activity(busy: boolean): void {
+    try {
+      this.onActivity?.(busy);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /**
+   * Show subagent ("crew") status transitions for the given (already
+   * chat-attributed) subagents, so the user sees progress while the main agent
+   * waits on them. No-op unless this runtime is the live foreground turn.
+   */
+  renderSubagents(subagents: SubagentInfo[], _pending: PendingStage[]): void {
+    if (!this.cfg.showSubagents) return;
+    if (!this.foreground || !this.busy || !this.streamer) return;
+    for (const s of subagents) {
+      const key = statusKey(s);
+      const prev = this.subagentShown.get(s.sessionId);
+      if (prev === key) continue;
+      const kind: "start" | "status" = prev === undefined && isActiveStatus(key) ? "start" : "status";
+      this.subagentShown.set(s.sessionId, key);
+      const md = renderSubagentTransition(s, kind);
+      if (md) this.streamer.addTool(md);
+    }
+  }
+
+  /**
+   * True when a prompt failure is attributable to an exhausted context window —
+   * either the error message says so, or this session's last-known context
+   * usage is at/above the configured fork threshold. Such failures won't clear
+   * by retrying the same oversized prompt (throttling on a near-full session
+   * surfaces as a plain "-32603 … throttled"), so the session must be compacted
+   * by forking a fresh, smaller continuation.
+   */
+  private isContextRelatedFailure(error: Error): boolean {
+    if (isContextExhaustedError(error)) return true;
+    const threshold = this.cfg.autoForkContextPct;
+    if (threshold <= 0) return false;
+    const pct = this.contextInfo()?.contextUsagePercentage;
+    return pct !== undefined && pct >= threshold;
+  }
+
+  /**
+   * Auto-fork-on-error recovery. When a turn fails with a *transient* error (or
+   * a context-exhaustion error) and nothing was streamed to the user, the
+   * session is throttled / context-exhausted / stuck. We "logically fork" it:
+   * open a fresh session in the same project primed with the recent transcript
+   * (the old session is dropped from this chat), then retry the SAME message
+   * once on the clean session. For context-exhausted sessions the retry backoff
+   * is skipped upstream so this fires immediately. Returns the retried outcome,
+   * or undefined when no fork was attempted.
+   */
+  private async maybeAutoFork(
+    input: PromptInput,
+    outcome: { result?: PromptResult; error?: Error; attempts: number },
+  ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
+    if (!this.cfg.autoForkOnError || !outcome.error || !this.sessionId) return undefined;
+    if (this.cancelled || (this.streamer?.hasOutput ?? false)) return undefined;
+    const contextRelated = this.isContextRelatedFailure(outcome.error);
+    if (!isTransientError(outcome.error) && !contextRelated) return undefined;
+
+    const lostId = this.sessionId;
+    const transcript = recentTranscript(this.cfg.sessionsDir, lostId);
+    if (this.foreground) {
+      const reason = contextRelated
+        ? "That session's context looks full \u2014 compacting into a fresh continuation and retrying"
+        : "That session looks exhausted or stuck \u2014 forking a fresh continuation and retrying";
+      await this.notify(
+        `\u26A0\uFE0F ${outcome.error.message}\n\n\u{1F517} ${reason}${transcript ? " (primed with the recent transcript)" : ""}\u2026`,
+        { replyTo: this.turnReplyTo },
+      );
+    }
+    try {
+      await this.bindNewSession(this.cwd, this.projectName); // new live id; old session dropped
+    } catch (e) {
+      log.warn(`auto-fork failed (agent down?): ${(e as Error).message}`);
+      return undefined;
+    }
+    log.info(
+      `chat ${this.chatId} auto-forked ${lostId.slice(0, 8)} -> ${this.sessionId!.slice(0, 8)} after ${contextRelated ? "context-exhaustion" : "transient"} error`,
+    );
+    // Reset per-turn render state so the retry streams cleanly on the new session.
+    this.shownToolIds = new Set();
+    this.subagentShown = new Map();
+    this.streamer?.setFooter(this.hashtags()); // streamed reply tags the NEW session
+    const forkContent = buildContentBlocks(input, {
+      reasoning: reasoningDirective(this.reasoning),
+      priming: transcript ? buildPriming(transcript) : undefined,
+      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+    });
+    return this.runPromptWithRetries(forkContent);
+  }
+
+  /**
+   * Auto-rotate-on-give-up. When a turn has failed (retries exhausted, auto-fork
+   * didn't recover it) and nothing was streamed, cycle through the OTHER saved
+   * accounts once — switching login + restarting the agent, then retrying the
+   * same prompt on a fresh session for each. The first account that succeeds
+   * wins and stays active; if every account fails we return a single combined
+   * error listing what each one reported. Bounded to ONE pass (no infinite
+   * loop). No-op unless the rotator is enabled and other accounts exist.
+   */
+  private async maybeRotateAccount(
+    input: PromptInput,
+    final: { result?: PromptResult; error?: Error; attempts: number },
+  ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
+    const rotator = this.accountRotator;
+    if (!rotator?.enabled() || !final.error || this.cancelled) return undefined;
+    if (this.streamer?.hasOutput ?? false) return undefined;
+    const targets = await rotator.targets().catch(() => [] as { id: string; label: string }[]);
+    if (targets.length === 0) return undefined;
+
+    const transcript = this.sessionId ? recentTranscript(this.cfg.sessionsDir, this.sessionId) : undefined;
+    const errors: string[] = [`\u2022 previous: ${final.error.message}`];
+    let last = final;
+
+    for (const t of targets) {
+      if (this.cancelled) return last;
+      if (this.foreground) {
+        await this.notify(`\u{1F501} Auto-rotating accounts \u2014 trying ${t.label}\u2026`, { replyTo: this.turnReplyTo });
+      }
+      try {
+        await rotator.activate(t.id); // switch login + restart the shared agent
+      } catch (e) {
+        errors.push(`\u2022 ${t.label}: couldn't switch \u2014 ${(e as Error).message}`);
+        continue;
+      }
+      try {
+        await this.bindNewSession(this.cwd, this.projectName); // fresh session on the new login
+      } catch (e) {
+        errors.push(`\u2022 ${t.label}: no session \u2014 ${(e as Error).message}`);
+        continue;
+      }
+      // Reset per-turn render state so the retry streams cleanly.
+      this.shownToolIds = new Set();
+      this.subagentShown = new Map();
+      this.streamer?.setFooter(this.hashtags());
+      const content = buildContentBlocks(input, {
+        reasoning: reasoningDirective(this.reasoning),
+        priming: transcript ? buildPriming(transcript) : undefined,
+        progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      });
+      log.info(`chat ${this.chatId} auto-rotating to account ${t.label}`);
+      last = await this.runPromptWithRetries(content);
+      if (last.result && !this.cancelled) {
+        if (this.foreground) await this.notify(`\u2705 Recovered on ${t.label}.`, { replyTo: this.turnReplyTo });
+        return last;
+      }
+      if (this.cancelled || (this.streamer?.hasOutput ?? false)) return last;
+      errors.push(`\u2022 ${t.label}: ${last.error?.message ?? "failed"}`);
+    }
+
+    // One full cycle done and still failing — stop with a combined report.
+    const combined = new Error(`Tried ${targets.length + 1} account(s), all failed:\n${errors.join("\n")}`);
+    return { error: combined, attempts: last.attempts };
+  }
+
+  /**
+   * Run the prompt, retrying *transient* agent errors (e.g. "high volume of
+   * traffic" / -32603) with an exponential backoff (6s → 12s → 24s → 48s → 60s,
+   * then give up). The real error is shown to the user on every failed attempt.
+   *
+   * We only retry while the turn has produced **no streamed output** (so tools
+   * aren't re-run and text isn't duplicated) and the user hasn't cancelled.
+   * Returns the result, or the last error once retries are exhausted.
+   */
+  private async runPromptWithRetries(
+    content: ContentBlock[],
+  ): Promise<{ result?: PromptResult; error?: Error; attempts: number }> {
+    const delays = this.cfg.promptRetryAttempts > 0 ? backoffSchedule(this.cfg.promptRetryAttempts) : [];
+    const totalAttempts = delays.length + 1;
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      try {
+        const result = await this.acp.prompt(this.sessionId!, content);
+        return { result, attempts: attempt };
+      } catch (err) {
+        const error = err as Error;
+        const canRecover = !this.cancelled && !(this.streamer?.hasOutput ?? false);
+        // A context-exhausted session won't recover by retrying the same
+        // oversized prompt — skip the backoff and let auto-fork compact it now.
+        const forkInstead = canRecover && this.cfg.autoForkOnError && this.isContextRelatedFailure(error);
+        const willRetry =
+          attempt <= delays.length &&
+          canRecover &&
+          !forkInstead &&
+          isTransientError(error);
+        if (!willRetry) return { error, attempts: attempt };
+        const waitMs = delays[attempt - 1]!;
+        if (this.foreground) {
+          await this.notify(formatRetryNotice(error, attempt + 1, totalAttempts, waitMs), {
+            replyTo: this.turnReplyTo,
+          });
+        }
+        if (await this.interruptibleSleep(waitMs)) return { error, attempts: attempt };
+      }
+    }
+  }
+
+  /** Sleep that returns true early if the user cancels the turn meanwhile. */
+  private async interruptibleSleep(ms: number): Promise<boolean> {
+    const step = 500;
+    for (let waited = 0; waited < ms; waited += step) {
+      if (this.cancelled) return true;
+      await sleep(Math.min(step, ms - waited));
+    }
+    return this.cancelled;
+  }
+
+  /**
+   * Recover from a transient error (throttle / internal error / dropped
+   * response stream) that struck AFTER the turn already started streaming.
+   *
+   * The pre-stream paths (retry / auto-fork / account-rotate) all bail once any
+   * output exists, because re-sending the original prompt would re-execute the
+   * tools that already ran (duplicate/destructive side effects). Instead we ask
+   * the SAME session to CONTINUE from where it stopped — its partial reply and
+   * any completed tool results are already in history, so nothing is repeated —
+   * using the same exponential backoff so a throttle has time to clear. The
+   * open streamer keeps appending, so the reply is completed in place.
+   *
+   * Returns the recovered outcome, or `undefined` when this path doesn't apply
+   * (feature off, no error, cancelled, nothing streamed, or non-transient).
+   */
+  private async maybeResumeAfterStream(
+    final: { result?: PromptResult; error?: Error; attempts: number },
+  ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
+    if (!this.cfg.resumeOnStreamError || !final.error || this.cancelled || !this.sessionId) return undefined;
+    // Only for the post-stream case; the pre-stream paths own the rest.
+    if (!(this.streamer?.hasOutput ?? false)) return undefined;
+    if (!isTransientError(final.error)) return undefined;
+    // A context-full session won't recover by continuing (it'll just throttle
+    // again each attempt) — don't burn the backoff; surface the error so the
+    // user can fork/compact. Resume targets transient throttles on a session
+    // that still has headroom.
+    if (this.isContextRelatedFailure(final.error)) return undefined;
+
+    const sessionId = this.sessionId;
+    const delays = this.cfg.promptRetryAttempts > 0 ? backoffSchedule(this.cfg.promptRetryAttempts) : [RETRY_BASE_MS];
+    const resumeContent = buildContentBlocks(textPrompt(RESUME_INSTRUCTION), {
+      reasoning: reasoningDirective(this.reasoning),
+      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+    });
+
+    let last = final;
+    let attempts = final.attempts;
+    for (let i = 0; i < delays.length; i++) {
+      if (this.cancelled) return last;
+      const waitMs = delays[i]!;
+      if (this.foreground) {
+        await this.notify(
+          `\u26A0\uFE0F ${last.error!.message}\n\n\u{1F501} The reply was cut off mid-stream \u2014 resuming in ${fmtSeconds(waitMs)} (attempt ${i + 1} of ${delays.length})\u2026`,
+          { replyTo: this.turnReplyTo },
+        );
+      }
+      if (await this.interruptibleSleep(waitMs)) return last;
+      attempts++; // this resume prompt is one more attempt for the turn
+      try {
+        const result = await this.acp.prompt(sessionId, resumeContent);
+        log.info(`chat ${this.chatId} resumed after mid-stream ${last.error!.message.slice(0, 40)} (attempt ${i + 1})`);
+        return { result, attempts };
+      } catch (err) {
+        last = { error: err as Error, attempts };
+        // If the follow-up fails for a NON-transient reason, stop early.
+        if (!isTransientError(last.error!)) return last;
+      }
+    }
+    return last;
+  }
+
+  /** Send any fresh images the agent produced this turn (screenshots, etc.). */
+  private async sendTurnImages(): Promise<void> {
+    if (!this.cfg.sendAgentImages || !this.imageScanText) return;
+    const paths = extractImagePaths(this.imageScanText, this.cwd);
+    if (paths.length === 0) return;
+    try {
+      await sendImages(this.api, this.chatId, paths, {
+        since: this.turnStartedAt,
+        already: this.sentImagesThisTurn,
+        max: this.cfg.agentImagesMax,
+      });
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /** Build the "turn finished" message and record `lastCompletion` (the full
+   *  in-session version with the file list). Foreground gets the full version;
+   *  a background turn gets a labelled "other session" ping with short counts. */
+  private completionMessage(stopReason: string | undefined, startedAt: number, streamedOutput: boolean): string {
+    const head = this.doneHead(stopReason, startedAt, streamedOutput);
+    const tags = this.hashtags();
+    const base = `${head}\n${summarizeFileOps(this.fileOps, this.cwd)}`;
+    this.lastCompletion = `${base}\n\n${tags}`; // switch-replay stays searchable
+    if (this.foreground) {
+      // The streamed response already carries the tag footer; only add tags to
+      // the Done line when there was no response to tag (tool-only / no output).
+      return streamedOutput ? base : `${base}\n\n${tags}`;
+    }
+    return `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`;
+  }
+
+  /** The compact one-line status of a finished turn (no "end_turn" noise). */
+  private doneHead(stopReason: string | undefined, startedAt: number, streamedOutput: boolean): string {
+    const elapsed = fmtDuration(Date.now() - startedAt);
+    if (this.cancelled || stopReason === "cancelled") return `\u23F9 Stopped \u00B7 ${elapsed}`;
+    const reason = stopReason && stopReason !== "end_turn" ? ` \u00B7 ${stopReason}` : "";
+    const meta = this.contextInfo();
+    const ctx = meta?.contextUsagePercentage;
+    const ctxStr = ctx !== undefined ? ` \u00B7 ctx ${ctx.toFixed(0)}%` : "";
+    // Credits consumed this turn — only shown when Grok actually reports it
+    // (not part of ACP today; degrades to nothing rather than guessing).
+    const credits = meta?.credits;
+    const creditStr = credits !== undefined ? ` \u00B7 \u{1FA99} ${fmtCredits(credits)}` : "";
+    // Only claim "no text output" when we were actually streaming (foreground).
+    const noOut = this.foreground && !streamedOutput ? " \u00B7 no text output" : "";
+    return `\u2705 Done${reason} \u00B7 ${elapsed}${ctxStr}${creditStr}${noOut}`;
+  }
+
+  /** Build the turn-failed message and record `lastCompletion`. */
+  private errorMessage(error: Error, startedAt: number, attempts: number, transient: boolean): string {
+    const summary = formatErrorSummary(error, fmtDuration(Date.now() - startedAt), attempts, transient);
+    const files = this.fileOps.size > 0 ? `\n${summarizeFileOps(this.fileOps, this.cwd)}` : "";
+    const tags = this.hashtags();
+    this.lastCompletion = `${summary}${files}\n\n${tags}`;
+    if (this.foreground) return this.lastCompletion;
+    const shortFiles = this.fileOps.size > 0 ? `\n${summarizeFileOpsShort(this.fileOps)}` : "";
+    return `\u{1F4E8} From other session ${this.sessionTag()}\n${summary}${shortFiles}\n\n${tags}`;
+  }
+
+  /** "[project · 1a2b3c4d]" — identifies which background session a ping is from. */
+  private sessionTag(): string {
+    const name = this.projectName || basename(this.cwd) || "session";
+    const id = this.sessionId ? ` \u00B7 ${this.sessionId.slice(0, 8)}` : "";
+    return `[${name}${id}]`;
+  }
+
+  /** Inline keyboard offering to switch to this session, attached to background
+   *  ("From other session") pings so you can jump straight in. Foreground turns
+   *  are already in view, so they get no button. */
+  private switchKeyboard(): InlineKeyboard | undefined {
+    if (this.foreground || !this.sessionId) return undefined;
+    return new InlineKeyboard().text("\u{1F500} Switch to this session", `run:switch:${this.sessionId}`);
+  }
+
+  /** Searchable Telegram hashtags so you can pull up every message of a session
+   *  or project by tapping the tag. */
+  private hashtags(): string {
+    return sessionHashtags({
+      projectName: this.projectName,
+      cwd: this.cwd,
+      sessionId: this.sessionId,
+    });
+  }
+
+  private async flushQueue(): Promise<void> {
+    if (this.queue.length === 0 || this.busy) return;
+    const batch = mergeInputs(this.queue.splice(0, this.queue.length));
+    if (this.foreground) await this.notify("\u25B6\uFE0F Processing queued message\u2026");
+    void this.runTurn(batch);
+  }
+
+  private onUpdate(sessionId: string, update: SessionUpdate): void {
+    if (!this.busy || sessionId !== this.sessionId) return;
+    const kind = update.sessionUpdate;
+
+    // Accumulate the turn's file-change summary + image-scan text even when this
+    // session is in the background (its output isn't streamed here, but the
+    // completion message still reports what changed / which images were made).
+    if (kind === "tool_call" || kind === "tool_call_update") {
+      if (update.rawInput) this.imageScanText += " " + JSON.stringify(update.rawInput);
+      if (update.title) this.imageScanText += " " + update.title;
+      const fo = fileOpFromUpdate(update);
+      if (fo) this.fileOps.set(fo.path, mergeFileOp(this.fileOps.get(fo.path), fo.op));
+    } else if (kind === "agent_message_chunk") {
+      const text = update.content?.text;
+      if (typeof text === "string") this.imageScanText += text;
+    }
+
+    // Only the live foreground turn streams to Telegram.
+    if (!this.foreground || !this.streamer) return;
+
+    if (kind === "agent_message_chunk") {
+      const text = update.content?.text;
+      if (typeof text === "string") this.streamer.appendOutput(text);
+      return;
+    }
+    if (kind === "agent_thought_chunk") {
+      const text = update.content?.text;
+      if (typeof text === "string") this.streamer.appendThought(text);
+      return;
+    }
+    if (kind === "tool_call" || kind === "tool_call_update") {
+      if (!this.cfg.showToolCalls) return;
+      const id = update.toolCallId || `${kind}:${update.title ?? ""}`;
+      if (this.shownToolIds.has(id)) return;
+      this.shownToolIds.add(id);
+      const md = formatToolCall(update, {
+        showDiffs: this.cfg.showEditDiffs,
+        diffMaxLines: this.cfg.diffMaxLines,
+      });
+      if (md) this.streamer.addTool(md);
+    }
+  }
+
+  private persist(): void {
+    if (!this.foreground) return; // only the foreground session is the chat's restored default
+    this.settings.update(this.chatId, {
+      projectPath: this.cwd,
+      projectName: this.projectName,
+      sessionId: this.sessionId,
+    });
+  }
+
+  private changed(): void {
+    try {
+      this.onStateChange?.();
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  private sessionChanged(): void {
+    try {
+      this.onSessionChange?.();
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  private async notify(
+    text: string,
+    opts?: { loud?: boolean; replyTo?: number; replyMarkup?: InlineKeyboard },
+  ): Promise<void> {
+    try {
+      const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
+      if (opts?.replyTo !== undefined) {
+        extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
+      }
+      if (opts?.replyMarkup) extra.reply_markup = opts.replyMarkup;
+      await this.api.sendMessage(this.chatId, text, extra);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  private async onWatchEntries(entries: HistoryEntry[]): Promise<void> {
+    const body = entries
+      .map((e) => {
+        const icon = WATCH_ICON[e.role] ?? "\u2022";
+        if (e.role === "tool") return `${icon} ${e.tool ? `\`${e.tool}\`` : "tool"}`;
+        const text = e.text.length > WATCH_ENTRY_MAX ? e.text.slice(0, WATCH_ENTRY_MAX) + " …" : e.text;
+        return `${icon} ${text}`;
+      })
+      .filter(Boolean)
+      .join("\n\n");
+    if (body.trim()) await sendMarkdownDoc(this.api, this.chatId, `${body}\n\n${this.tags}`);
+  }
+}
+
+/** Format an elapsed duration compactly (e.g. "8s", "2m 13s", "1h 4m"). */
+function fmtDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** Format a credits/cost figure compactly (drops noise decimals). */
+function fmtCredits(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (Number.isInteger(n)) return n.toLocaleString("en-US");
+  return n.toFixed(2);
+}
+
+/** Convenience for callers that only have text. */
+export { textPrompt };
