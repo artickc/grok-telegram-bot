@@ -161,8 +161,12 @@ export class GrokClient extends EventEmitter {
   }
 
   private async connect(): Promise<void> {
-    const args = ["agent", "stdio", "--no-auto-update"];
+    // `--always-approve` is a `grok agent` option (not `grok agent stdio`),
+    // so it must come before the `stdio` subcommand. `--no-auto-update` was
+    // removed in grok 0.2.x and causes exit code 2.
+    const args = ["agent"];
     if (this.opts.trustAllTools) args.push("--always-approve");
+    args.push("stdio");
 
     log.info(`spawning: ${this.opts.grokCliPath} ${args.join(" ")}`);
     const env = { ...process.env };

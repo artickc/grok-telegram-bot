@@ -9,6 +9,52 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-10
+
+The **"show me everything"** release — the bot now streams rich, real-time detail
+for every tool the agent calls, so you can see exactly what's happening: which
+files are being read, edited (with diffs), created, deleted or moved, which
+searches run (pattern + scope + filters), which URLs are fetched, which shell
+commands execute, and which MCP tools are invoked — each with its completion
+status (✅ / ❌ / ⏳).
+
+### Added
+
+- **🔍 Rich tool-call detail for every kind.** Previously most tool calls showed
+  only a bare icon + title line. Now each kind gets its own formatted detail:
+  - **Search** — query/pattern, search path (📂), include/exclude filters
+    (📁/🚫), case-sensitivity flag.
+  - **Read** — file path + line/offset/limit when present.
+  - **Edit** — file path + unified diff block with `+added / -removed` count.
+  - **Write / Create** — file path + content preview with automatic language
+    detection for syntax highlighting (TypeScript, Python, Go, Rust, etc.).
+  - **Delete** — the file being removed.
+  - **Move / Rename** — source path (📄) → destination path (➡️).
+  - **Execute** — the full command in a `bash` code block + working directory.
+  - **Fetch / web_fetch** — URL, HTTP method, headers, and body preview.
+  - **Web search** — query string + result count.
+  - **MCP calls** — server + method + a compact argument preview.
+  - **Generic / unknown** — description or message extracted from raw input.
+- **✅ Status visibility for completed tool calls.** `tool_call_update`
+  notifications carrying `completed` or `failed` status are now shown (previously
+  they were silently deduped away because they shared the `toolCallId` of the
+  initial `tool_call`). You now see the final ✅ or ❌ for each tool action,
+  including diffs that arrive only in the completion update.
+- **🧩 New `tool-call-detail.ts` module** — shared extractors for paths, search
+  queries, URLs, commands, file content, filters, and destination paths, with a
+  `normalizeKind()` that maps common aliases (`bash` → `execute`, `grep` →
+  `search`, `rename` → `move`, etc.) to canonical kinds.
+
+### Changed
+
+- **`formatToolCall` rewritten** from a single switch to per-kind formatter
+  functions, each producing rich RAW markdown. Uses string concatenation instead
+  of template literals to avoid backtick-in-fence escaping issues.
+- **`session-runtime.ts` dedup logic** refined: initial `tool_call` messages are
+  deduped by `toolCallId` (no duplicate); `tool_call_update` with `completed` /
+  `failed` status is shown once (keyed by `toolCallId:done`); `pending` /
+  `in_progress` updates are skipped unless they carry new `content_blocks`.
+
 ## [2.0.0] - 2026-07-09
 
 The **Grok Build** release — the bot now drives the official **xAI Grok Build

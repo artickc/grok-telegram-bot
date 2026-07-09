@@ -1,5 +1,5 @@
 /**
- * SessionRuntime — binds one Telegram chat to one Grok ACP session and drives
+ * SessionRuntime вЂ” binds one Telegram chat to one Grok ACP session and drives
  * the prompt/stream lifecycle, typing indicator, follow-up queue, live watch,
  * and per-chat preferences (project, agent, model, reasoning). State persists
  * to the settings store so it survives restarts.
@@ -54,7 +54,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const RESUME_INSTRUCTION =
   "Your previous response was interrupted by a transient service error (the model stream was throttled), " +
   "so your last turn did not finish. Continue from exactly where you stopped and complete the response. " +
-  "Do NOT repeat any file edits, commands, or other tool calls you already completed — their results are " +
+  "Do NOT repeat any file edits, commands, or other tool calls you already completed вЂ” their results are " +
   "already in this conversation. If you had already fully answered, just briefly conclude.";
 
 export class SessionRuntime {
@@ -82,7 +82,7 @@ export class SessionRuntime {
   /** Subagent sessionId -> last status key shown this turn (dedupe). */
   private subagentShown = new Map<string, string>();
   private turnStartedAt = 0;
-  /** Count of completed (non-cancelled) turns this session — shown in /usage. */
+  /** Count of completed (non-cancelled) turns this session вЂ” shown in /usage. */
   private turnCount = 0;
   /** Telegram message id of the current turn's prompt, so replies thread to it. */
   private turnReplyTo: number | undefined;
@@ -93,7 +93,7 @@ export class SessionRuntime {
   private watcher: TailWatcher | undefined;
   /** True when the active watch is a transient "follow" of this session's own
    *  in-flight turn (started on switch) rather than an explicit /watch of
-   *  another session — follow-watches are auto-stopped when a new turn streams. */
+   *  another session вЂ” follow-watches are auto-stopped when a new turn streams. */
   private watchIsFollow = false;
   private rebindPending = false;
   private sessionLive = false;
@@ -159,7 +159,7 @@ export class SessionRuntime {
     return this.lastCompletion;
   }
 
-  /** Latest task-completion % (0–100) parsed this turn, or undefined if none. */
+  /** Latest task-completion % (0вЂ“100) parsed this turn, or undefined if none. */
   get taskProgress(): number | undefined {
     return this.progress;
   }
@@ -174,8 +174,8 @@ export class SessionRuntime {
     this.changed();
   }
 
-  /** Searchable hashtag footer for this session (project · session · model ·
-   *  reasoning) — appended to every AI-output surface for this session. */
+  /** Searchable hashtag footer for this session (project В· session В· model В·
+   *  reasoning) вЂ” appended to every AI-output surface for this session. */
   get tags(): string {
     return this.hashtags();
   }
@@ -189,7 +189,7 @@ export class SessionRuntime {
     if (value) {
       // A turn was started here and is still in flight, but its streamer was
       // finalized when we went background. Recreate it and let onUpdate feed
-      // the remaining chunks/thoughts/tools just like a normal live turn — we
+      // the remaining chunks/thoughts/tools just like a normal live turn вЂ” we
       // own the agent's session/update events, so no tail-watch is needed.
       if (this.busy && !this.streamer) {
         // Any transient follow-watch of this session is now superseded.
@@ -234,7 +234,7 @@ export class SessionRuntime {
     this.stopWatch();
   }
 
-  // ── sessions ───────────────────────────────────────────────────────────────
+  // в”Ђв”Ђ sessions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
   async startNewSession(cwd: string, projectName?: string): Promise<void> {
     if (this.busy) await this.cancel();
@@ -314,7 +314,7 @@ export class SessionRuntime {
     return true;
   }
 
-  // ── preferences ──────────────────────────────────────────────────────────
+  // в”Ђв”Ђ preferences в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
   async setModelPref(modelId: string): Promise<{ ok: boolean; error?: string }> {
     // Persist the choice always; only talk to Grok when a session is live in
@@ -378,7 +378,7 @@ export class SessionRuntime {
     }
   }
 
-  // ── prompting ──────────────────────────────────────────────────────────────
+  // в”Ђв”Ђ prompting в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
   async submit(input: PromptInput): Promise<"ran" | "queued"> {
     await this.ensureSession();
@@ -425,7 +425,7 @@ export class SessionRuntime {
       // The session genuinely can't be reloaded (its exclusive lock is held,
       // or its log/metadata is gone). Never silently drop the conversation:
       // fork a linked continuation primed with the recent transcript so the
-      // thread survives — including any question the agent had just asked.
+      // thread survives вЂ” including any question the agent had just asked.
       // forkFromLostSession() only throws if the agent is fully down, in which
       // case we leave rebindPending set so the next message retries cleanly.
       await this.forkFromLostSession(this.sessionId);
@@ -438,7 +438,7 @@ export class SessionRuntime {
   /** Reload a persisted session, retrying flaky failures with a short backoff.
    *  Returns true once loaded, false after the attempts are exhausted. */
   private async rebindWithRetries(sessionId: string, attempts = 4): Promise<boolean> {
-    const delays = [400, 1200, 3000]; // ≈4.6s total before giving up
+    const delays = [400, 1200, 3000]; // в‰€4.6s total before giving up
     for (let i = 0; i < attempts; i++) {
       try {
         await this.acp.loadSession(sessionId, this.cwd);
@@ -518,7 +518,7 @@ export class SessionRuntime {
       if (resumed) final = resumed;
       const streamedOutput = this.streamer?.hasOutput ?? false;
       // On a successful, non-cancelled turn, top the fallback bar up to 100 (a
-      // no-op when the agent reported its own progress — its value is kept).
+      // no-op when the agent reported its own progress вЂ” its value is kept).
       if (final.result && !this.cancelled) this.streamer?.completeFallback();
       if (this.streamer) await this.streamer.finalize();
       if (this.foreground) await this.sendTurnImages();
@@ -527,7 +527,7 @@ export class SessionRuntime {
       // the foreground turn, or a background turn when NOTIFY_OTHER_SESSIONS is on.
       const canPing = this.foreground || this.cfg.notifyOtherSessions;
       // A background session about to run a queued follow-up shouldn't ping its
-      // interim "Done" — only the final, queue-empty turn announces completion.
+      // interim "Done" вЂ” only the final, queue-empty turn announces completion.
       const hasQueued = this.queue.length > 0;
       const switchKb = this.switchKeyboard();
       if (final.result && !this.cancelled) this.turnCount++;
@@ -594,11 +594,11 @@ export class SessionRuntime {
   }
 
   /**
-   * True when a prompt failure is attributable to an exhausted context window —
+   * True when a prompt failure is attributable to an exhausted context window вЂ”
    * either the error message says so, or this session's last-known context
    * usage is at/above the configured fork threshold. Such failures won't clear
    * by retrying the same oversized prompt (throttling on a near-full session
-   * surfaces as a plain "-32603 … throttled"), so the session must be compacted
+   * surfaces as a plain "-32603 вЂ¦ throttled"), so the session must be compacted
    * by forking a fresh, smaller continuation.
    */
   private isContextRelatedFailure(error: Error): boolean {
@@ -663,7 +663,7 @@ export class SessionRuntime {
   /**
    * Auto-rotate-on-give-up. When a turn has failed (retries exhausted, auto-fork
    * didn't recover it) and nothing was streamed, cycle through the OTHER saved
-   * accounts once — switching login + restarting the agent, then retrying the
+   * accounts once вЂ” switching login + restarting the agent, then retrying the
    * same prompt on a fresh session for each. The first account that succeeds
    * wins and stays active; if every account fails we return a single combined
    * error listing what each one reported. Bounded to ONE pass (no infinite
@@ -719,14 +719,14 @@ export class SessionRuntime {
       errors.push(`\u2022 ${t.label}: ${last.error?.message ?? "failed"}`);
     }
 
-    // One full cycle done and still failing — stop with a combined report.
+    // One full cycle done and still failing вЂ” stop with a combined report.
     const combined = new Error(`Tried ${targets.length + 1} account(s), all failed:\n${errors.join("\n")}`);
     return { error: combined, attempts: last.attempts };
   }
 
   /**
    * Run the prompt, retrying *transient* agent errors (e.g. "high volume of
-   * traffic" / -32603) with an exponential backoff (6s → 12s → 24s → 48s → 60s,
+   * traffic" / -32603) with an exponential backoff (6s в†’ 12s в†’ 24s в†’ 48s в†’ 60s,
    * then give up). The real error is shown to the user on every failed attempt.
    *
    * We only retry while the turn has produced **no streamed output** (so tools
@@ -748,7 +748,7 @@ export class SessionRuntime {
         const error = err as Error;
         const canRecover = !this.cancelled && !(this.streamer?.hasOutput ?? false);
         // A context-exhausted session won't recover by retrying the same
-        // oversized prompt — skip the backoff and let auto-fork compact it now.
+        // oversized prompt вЂ” skip the backoff and let auto-fork compact it now.
         const forkInstead = canRecover && this.cfg.autoForkOnError && this.isContextRelatedFailure(error);
         const willRetry =
           attempt <= delays.length &&
@@ -784,8 +784,8 @@ export class SessionRuntime {
    * The pre-stream paths (retry / auto-fork / account-rotate) all bail once any
    * output exists, because re-sending the original prompt would re-execute the
    * tools that already ran (duplicate/destructive side effects). Instead we ask
-   * the SAME session to CONTINUE from where it stopped — its partial reply and
-   * any completed tool results are already in history, so nothing is repeated —
+   * the SAME session to CONTINUE from where it stopped вЂ” its partial reply and
+   * any completed tool results are already in history, so nothing is repeated вЂ”
    * using the same exponential backoff so a throttle has time to clear. The
    * open streamer keeps appending, so the reply is completed in place.
    *
@@ -800,7 +800,7 @@ export class SessionRuntime {
     if (!(this.streamer?.hasOutput ?? false)) return undefined;
     if (!isTransientError(final.error)) return undefined;
     // A context-full session won't recover by continuing (it'll just throttle
-    // again each attempt) — don't burn the backoff; surface the error so the
+    // again each attempt) вЂ” don't burn the backoff; surface the error so the
     // user can fork/compact. Resume targets transient throttles on a session
     // that still has headroom.
     if (this.isContextRelatedFailure(final.error)) return undefined;
@@ -878,7 +878,7 @@ export class SessionRuntime {
     const meta = this.contextInfo();
     const ctx = meta?.contextUsagePercentage;
     const ctxStr = ctx !== undefined ? ` \u00B7 ctx ${ctx.toFixed(0)}%` : "";
-    // Credits consumed this turn — only shown when Grok actually reports it
+    // Credits consumed this turn вЂ” only shown when Grok actually reports it
     // (not part of ACP today; degrades to nothing rather than guessing).
     const credits = meta?.credits;
     const creditStr = credits !== undefined ? ` \u00B7 \u{1FA99} ${fmtCredits(credits)}` : "";
@@ -898,7 +898,7 @@ export class SessionRuntime {
     return `\u{1F4E8} From other session ${this.sessionTag()}\n${summary}${shortFiles}\n\n${tags}`;
   }
 
-  /** "[project · 1a2b3c4d]" — identifies which background session a ping is from. */
+  /** "[project В· 1a2b3c4d]" вЂ” identifies which background session a ping is from. */
   private sessionTag(): string {
     const name = this.projectName || basename(this.cwd) || "session";
     const id = this.sessionId ? ` \u00B7 ${this.sessionId.slice(0, 8)}` : "";
@@ -962,9 +962,29 @@ export class SessionRuntime {
     }
     if (kind === "tool_call" || kind === "tool_call_update") {
       if (!this.cfg.showToolCalls) return;
-      const id = update.toolCallId || `${kind}:${update.title ?? ""}`;
-      if (this.shownToolIds.has(id)) return;
-      this.shownToolIds.add(id);
+      const id = update.toolCallId || "";
+      const status = (update.status || "").toLowerCase();
+
+      if (kind === "tool_call_update") {
+        // Skip "in_progress"/"pending" duplicates of an already-shown initial call.
+        if (status === "pending" || status === "in_progress") {
+          const hasNewContent =
+            Array.isArray(update.content_blocks) && update.content_blocks.length > 0;
+          if (!hasNewContent) return;
+        }
+        // For completed/failed: show once (so the user sees the final status).
+        const doneKey = (id || update.title || "") + ":done";
+        if (status === "completed" || status === "failed") {
+          if (this.shownToolIds.has(doneKey)) return;
+          this.shownToolIds.add(doneKey);
+        }
+      } else {
+        // Initial tool_call: dedupe by id to avoid double-showing.
+        const shownKey = id || `tool_call:${update.title ?? ""}`;
+        if (this.shownToolIds.has(shownKey)) return;
+        this.shownToolIds.add(shownKey);
+      }
+
       const md = formatToolCall(update, {
         showDiffs: this.cfg.showEditDiffs,
         diffMaxLines: this.cfg.diffMaxLines,
@@ -1019,7 +1039,7 @@ export class SessionRuntime {
       .map((e) => {
         const icon = WATCH_ICON[e.role] ?? "\u2022";
         if (e.role === "tool") return `${icon} ${e.tool ? `\`${e.tool}\`` : "tool"}`;
-        const text = e.text.length > WATCH_ENTRY_MAX ? e.text.slice(0, WATCH_ENTRY_MAX) + " …" : e.text;
+        const text = e.text.length > WATCH_ENTRY_MAX ? e.text.slice(0, WATCH_ENTRY_MAX) + " вЂ¦" : e.text;
         return `${icon} ${text}`;
       })
       .filter(Boolean)
