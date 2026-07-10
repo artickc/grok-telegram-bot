@@ -17,8 +17,8 @@ account (SuperGrok / X Premium+), send a message from anywhere, and watch Grok
 plan, read files, run commands, and edit code on your machine — with live typing
 indicators, clean Telegram markdown, and unified edit diffs.
 
-Inspired by [`ajitnk-lab/kiro-acp-telegram-bot`](https://github.com/ajitnk-lab/kiro-acp-telegram-bot)
-and extended into a full multi-session client.
+A fork of [`artickc/kiro-telegram-bot`](https://github.com/artickc/kiro-telegram-bot),
+re-architected for the Grok Build CLI and extended into a full multi-session client.
 
 ---
 
