@@ -9,6 +9,14 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-07-12
+
+### Fixed
+
+- **📌 Permission prompts stay pinned** while waiting for Approve/Deny so they
+  aren't lost under streaming chat. The pin is removed on approve, deny, or
+  timeout, and the status panel is re-pinned afterwards.
+
 ## [2.2.0] - 2026-07-12
 
 The **reliable multi-account** release — account switch / auto-rotate now only
@@ -669,6 +677,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.2.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.1
 [2.2.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.0
 [2.1.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.1.0
 [2.0.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.0.0
