@@ -38,9 +38,10 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | 🧩 **MCP control** | `/mcp` lists MCP servers, **health-checks** them (which connected / failed and why), and **enables/disables** them — then restarts the agent to apply. |
 | 👥 **Subagent visibility** | When Grok delegates to subagents and waits on them, you see each one **start / work / finish** plus a live `🤖 N running` summary — and subagent permission prompts route to your chat. |
 | 📈 **Task progress bar** | The agent appends a `{progress: N%}` marker; the bot hides it and shows a **green 0–100% loading bar** on the live message, in the status panel, and on session cards (`SHOW_PROGRESS`). |
-| 🔐 **Sign in from chat** | `/reauth` signs you in without a terminal — **🔑 Sign in** runs `grok login` (any verification link/code streams to your chat), or **📥 Import** an existing on-host login; the agent restarts under the new identity. |
-| 👥 **Multiple accounts** | `/accounts` saves several Grok **sign-ins** (custom names) and switches between them in a tap — copies that login back over `~/.grok/auth.json` and restarts so sessions re-bind under the new account. |
-| 🔁 **Auto-rotate on give-up** | When a turn exhausts its retries, optionally cycle through your other saved accounts once and retry on each — the first that works wins (toggle in `/accounts`). |
+| 🔐 **Sign in from chat** | `/reauth` signs you in without a terminal — **🔑 Sign in** runs headless `grok login --device-auth` (link/code streams to your chat, no host browser), or **📥 Import** an existing on-host login; the agent restarts under the new identity. |
+| 👥 **Multiple accounts** | `/accounts` saves several Grok **sign-ins** (custom names) and switches between them in a tap — **stops the agent → replaces `~/.grok/auth.json` → restarts headlessly** (never opens a browser). |
+| 🔁 **Auto-rotate on give-up** | When a turn exhausts its retries, optionally cycle through your other saved accounts once and retry on each — the first that works wins (toggle in `/accounts`). Same headless auth.json swap. |
+| ✅ **Auto-approve tools** | By default, ACP permission prompts are auto-approved for the **session** (`AUTO_APPROVE_PERMISSIONS`). Turn both that and `GROK_TRUST_ALL_TOOLS` off for interactive Approve/Deny — those prompts are **pinned** until you act. |
 | 🪙 **Credits & usage** | The `✅ Done` line and `/usage` show credits used (when Grok reports them), turns this session, and account info. |
 | ⌨️ **Typing indicator** | Stays on for the whole turn, even through long tool chains. |
 | 📥 **Queued follow-ups** | Message while Grok is busy — it's queued and runs next. `/btw` runs it ASAP (now if idle, else right after the current task); `/flush` runs the queue now. |
@@ -62,9 +63,10 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Attach to **live** PC sessions (watch / fork) | ✅ | ❌ |
 | **Kill a session by PID** (or all at once) | ✅ | ❌ |
 | **Live task-progress bars** (`{progress: N%}`) | ✅ | ❌ |
-| **Sign in from chat** (`/reauth`) | ✅ | ❌ |
-| **Multiple saved accounts** + one-tap switch (`/accounts`) | ✅ | ❌ |
+| **Sign in from chat** (`/reauth`, device-code) | ✅ | ❌ |
+| **Multiple saved accounts** + headless one-tap switch (`/accounts`) | ✅ | ❌ |
 | **Auto-rotate accounts** when a turn gives up | ✅ | ❌ |
+| **Session auto-approve** + **pinned** interactive permissions | ✅ | ❌ |
 | Multiple isolated sessions | ✅ | ❌ (single shared) |
 | Queued follow-ups while busy | ✅ | ❌ |
 | **Scheduled tasks** (cron-like) | ✅ | ❌ |
@@ -326,9 +328,10 @@ takes precedence and the value never decreases. Disable the fallback with
 Grok Build signs in with your **xAI account** (SuperGrok / X Premium+), not an
 API key. Run **`/reauth`** to sign in without touching a terminal:
 
-- **🔑 Sign in** — runs `grok login`; if a verification link/code appears it
-  streams into the chat so you can approve it on any device. The bot then
-  restarts the agent so your next turn runs on the new identity.
+- **🔑 Sign in** — runs `grok login --device-auth` (device code, **no browser on
+  the host**). The verification link/code streams into the chat so you can
+  approve it on any device. The bot then restarts the agent under the new
+  identity.
 - **📥 Import existing** — adopt a `grok login` already done on this machine
   (`~/.grok/auth.json`).
 
@@ -338,16 +341,24 @@ It's refused while a turn is running. You can also sign in up front by running
 ## 👥 Multiple accounts
 
 **`/accounts`** manages several Grok **sign-ins** side by side. Save the current
-login as a named account (auto-named from its email, or **Save as…** with a
-custom name), rename or delete saved ones, and **switch** in a tap — the bot
-copies that account's token back over `~/.grok/auth.json` and restarts the agent
-so your next turn runs under it (the current login is snapshotted first so it's
-never lost). Snapshots live only in git-ignored per-account files.
+login as a named account (auto-named from its email when available, or
+**Save as…** with a custom name), rename or delete saved ones, and **switch** in
+a tap. Switching is deliberately headless:
+
+1. Snapshot the current login (so it isn't lost),
+2. **Stop** the shared agent,
+3. **Replace** `~/.grok/auth.json` with the saved snapshot,
+4. **Start** the agent and authenticate with `cached_token` only — never a
+   browser method like `grok.com` (which would hang a service host).
+
+The menu shows the **host Grok login** vs which saved account it matches, so a
+manual `grok login` outside the bot doesn't leave a stale “active” label.
 
 **🔁 Auto-rotate on errors** (toggle here): when a turn exhausts its retries and
-can't recover, the bot cycles through your other saved logins **once**, retrying
-the prompt on each — the first that succeeds stays active; if they all fail it
-stops after one pass. Handy when an account gets throttled or runs out of quota.
+can't recover, the bot cycles through your other saved logins **once** with the
+same stop → auth.json → start path — the first that succeeds stays active; if
+they all fail it stops after one pass. Handy when an account gets throttled or
+runs out of quota.
 
 ---
 
@@ -390,7 +401,8 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | `GROK_MODEL` | no | `grok-4.5` | Default model for new sessions. |
 | `GROK_TG_DIR` | no | `~/.grok/tg` | Folder holding this instance's `.env`, `logs/`, `data/`. Resolution: `--instance` → `GROK_TG_DIR` → a `.env` in the current folder → `~/.grok/tg`. So a `.env` created once is loaded from any startup path. |
 | `GROK_AGENT` | no | — | Custom sub-agent name (informational; Grok delegates via its own `task`/`delegate` tools). |
-| `GROK_TRUST_ALL_TOOLS` | no | `true` | Run tools without prompts. |
+| `GROK_TRUST_ALL_TOOLS` | no | `true` | Pass `--always-approve` so tools run without prompts. |
+| `AUTO_APPROVE_PERMISSIONS` | no | `true` | Auto-approve ACP `session/request_permission` (prefer “allow for this session”). Set `false` **and** `GROK_TRUST_ALL_TOOLS=false` for interactive Approve/Deny buttons (those prompts are **pinned** until you act or they time out). |
 | `PROJECT_ROOTS` | no | workspace parent + home | Roots for `/projects`. |
 | `STREAM_THROTTLE_MS` | no | `1500` | Live-edit interval while streaming. |
 | `MESSAGE_BATCH_MS` | no | `800` | Window to coalesce rapid text messages (e.g. a long message Telegram split at 4096 chars) into one prompt. `0` disables. |
@@ -486,13 +498,20 @@ the bot inherits whatever MCP servers Grok CLI is configured with.
 
 ## 🔐 Tool approvals
 
-Over ACP, Grok honors a permission mode. With `GROK_TRUST_ALL_TOOLS=true`
-(default) the bot passes `--always-approve`, so tools run without prompts. Set it
-to `false` to run in ACP **"ask"** mode: Grok sends `session/request_permission`
-before risky tools (file writes, shell commands) and the bot surfaces
-**Approve / Approve always / Deny** buttons in Telegram, sending your choice back
-(unanswered prompts eventually cancel). You can also intervene on any live turn
-with the tool stream + **⏹ Stop** (`/cancel`), which cancels that session's turn.
+Over ACP, Grok honors a permission mode. Defaults are built for unattended
+mobile use:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `GROK_TRUST_ALL_TOOLS` | `true` | Passes `--always-approve` so tools run without prompts. |
+| `AUTO_APPROVE_PERMISSIONS` | `true` | If a permission request still arrives, auto-pick **allow for this session** / always-allow. |
+
+Set **both** to `false` for ACP **"ask"** mode: Grok sends
+`session/request_permission` before risky tools and the bot surfaces
+**Approve / Allow for session / Deny** buttons. Those prompts are **pinned** so
+they aren't buried by streaming output; the pin is removed when you choose,
+or when the request times out (status panel is re-pinned). You can always
+intervene on a live turn with the tool stream + **⏹ Stop** (`/cancel`).
 
 ## 🔐 Security
 
@@ -514,10 +533,11 @@ user. See [SECURITY.md](./SECURITY.md) for the full model.
 - [x] Voice messages → speech-to-text → prompt (multi-language)
 - [x] Context-usage % in the status panel
 - [x] Inline approvals — approve/deny risky tools from buttons (non trust-all mode)
+- [x] Session auto-approve + pinned permission prompts
 - [x] Account & context usage (`/usage`)
-- [x] Multiple accounts with one-tap switch + auto-rotate on errors (`/accounts`)
-- [x] Organization / Import-from-Grok-IDE login + credits on the Done line
-- [x] Release automation — downloadable zip + CHANGELOG-driven notes on tag push
+- [x] Multiple accounts with headless one-tap switch + auto-rotate (`/accounts`)
+- [x] Device-code `/reauth` (no host browser) + real email labels from auth.json
+- [x] Rich per-kind tool-call detail (search / edit diffs / shell / MCP / …)
 - [x] README community sections — Contributors, Top Contributors, Stars, StarMapper
 - [ ] **Token & cost meter** — per-session token counts and an estimated spend tally
 - [ ] **Text-to-speech replies** — optionally speak answers back as voice notes

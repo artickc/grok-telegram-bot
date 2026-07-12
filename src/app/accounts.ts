@@ -76,17 +76,44 @@ export class AccountManager {
   }
 
   /**
-   * Id of the currently active saved account. Prefers the last switch target
-   * (`activeId`), then falls back to matching the live auth.json token hash.
+   * Id of the saved account that matches the live auth.json (if any).
+   * Token hash is authoritative — never trust a stale `activeId` when the host
+   * login has changed (e.g. `grok login` / /reauth outside this menu).
    */
   activeAccountId(): string | undefined {
     const data = this.store.get();
+    const lid = loginId();
+    if (lid) {
+      const byToken = data.accounts.find((a) => a.loginId === lid);
+      if (byToken) return byToken.id;
+      // Live login differs from every saved account (and any stale activeId).
+      return undefined;
+    }
+    // No readable token (API-key-only / missing file) — last switch target only.
     if (data.activeId && data.accounts.some((a) => a.id === data.activeId)) {
       return data.activeId;
     }
+    return undefined;
+  }
+
+  /**
+   * Last switch/save target stored by the app, even when the host Grok login
+   * no longer matches that snapshot (used only for mismatch UI copy).
+   */
+  markedActiveId(): string | undefined {
+    const id = this.store.get().activeId;
+    if (!id) return undefined;
+    return this.store.get().accounts.some((a) => a.id === id) ? id : undefined;
+  }
+
+  /** Whether the host's live login matches the saved account marked active. */
+  liveMatchesActive(): boolean {
     const lid = loginId();
-    if (!lid) return undefined;
-    return data.accounts.find((a) => a.loginId === lid)?.id;
+    if (!lid) return false;
+    const marked = this.markedActiveId();
+    if (!marked) return this.activeAccountId() !== undefined;
+    const meta = this.get(marked);
+    return !!meta?.loginId && meta.loginId === lid;
   }
 
   get(id: string): StoredAccount | undefined {
@@ -117,19 +144,32 @@ export class AccountManager {
     }
     const label = customLabel?.trim() || loginLabel() || `account ${lid.slice(0, 6)}`;
     const email = loginLabel();
-    // Match by token hash first; fall back to the currently marked active slot
-    // when the user is re-saving after a silent token refresh.
-    const existing =
-      this.store.get().accounts.find((a) => a.loginId === lid) ??
-      (this.store.get().activeId ? this.get(this.store.get().activeId!) : undefined);
+    // Match by token hash first. Only reuse the marked active slot when it is
+    // the same login (token refresh) or the same email — never overwrite a
+    // different saved account when the host is signed in as someone else.
+    const accounts = this.store.get().accounts;
+    const byToken = accounts.find((a) => a.loginId === lid);
+    const active = this.store.get().activeId ? this.get(this.store.get().activeId!) : undefined;
+    const emailKey = email?.toLowerCase();
+    const byEmail =
+      emailKey && emailKey.includes("@")
+        ? accounts.find((a) => (a.email || a.label || "").toLowerCase() === emailKey)
+        : undefined;
+    const sameActiveRefresh =
+      active &&
+      (active.loginId === lid ||
+        (!!emailKey &&
+          emailKey.includes("@") &&
+          [active.email, active.label].some((v) => (v || "").toLowerCase() === emailKey)));
+    const existing = byToken ?? (sameActiveRefresh ? active : undefined) ?? byEmail;
     const id = existing?.id ?? makeId();
     await writeFile(this.snapshotPath(id), raw, "utf-8");
     const meta: StoredAccount = {
       id,
       label: customLabel?.trim() || existing?.label || label,
       loginId: lid,
-      email: email || existing?.email,
-      startUrl: email || existing?.email,
+      email: (email && email.includes("@") ? email : undefined) || existing?.email,
+      startUrl: (email && email.includes("@") ? email : undefined) || existing?.email || existing?.startUrl,
       savedAt: new Date().toISOString(),
     };
     this.store.update((d) => {

@@ -13,6 +13,9 @@ node_modules/
 auth.json
 credentials.json
 
+# ── Local marketing drafts (not part of the published package) ───────────────
+REDDIT.md
+
 # ── Runtime data & logs ──────────────────────────────────────────────────────
 data/
 logs/

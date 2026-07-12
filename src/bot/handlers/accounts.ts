@@ -25,14 +25,28 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
   const list = deps.accounts.list();
   const acct = await deps.usage.account().catch(() => undefined);
   const active = deps.accounts.activeAccountId();
+  const marked = deps.accounts.markedActiveId();
   const loggedIn = await deps.usage.isLoggedIn().catch(() => false);
+  const liveLabel = acct?.email?.trim();
+  const activeMeta = active ? deps.accounts.get(active) : undefined;
+  const markedMeta = marked && marked !== active ? deps.accounts.get(marked) : undefined;
 
   const lines = ["\u{1F465} Grok accounts", ""];
-  if (loggedIn && acct?.email && !active) {
-    lines.push(`\u{1F7E2} Signed in as ${acct.email}`);
-    lines.push("  \u2514 Not saved yet — tap \u201C\u{1F4BE} Save current login\u201D to keep it.", "");
-  } else if (!loggedIn) {
+  if (!loggedIn) {
     lines.push("\u{1F534} Not signed in — sign in via /reauth.", "");
+  } else if (liveLabel) {
+    lines.push(`\u{1F7E2} Host Grok login: ${liveLabel}`);
+    if (activeMeta) {
+      lines.push(`  \u2514 Matches saved: ${activeMeta.label}`);
+    } else {
+      lines.push("  \u2514 Not among saved accounts — tap \u201C\u{1F4BE} Save current login\u201D.");
+      if (markedMeta) {
+        lines.push(`  \u2514 App still has ${markedMeta.label} selected — different from host login.`);
+      }
+    }
+    lines.push("");
+  } else {
+    lines.push("\u{1F7E2} Signed in (identity unknown).", "");
   }
   if (list.length === 0) {
     lines.push("No saved accounts yet.", "", "Save the current login below, or sign in via /reauth.");

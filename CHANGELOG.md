@@ -9,6 +9,27 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-07-12
+
+Patch release that hardens multi-account identity and documents the full **2.2.x**
+batch (headless rotation, session auto-approve, pinned permission prompts).
+
+### Fixed
+
+- **📧 Real account emails from `auth.json`.** Modern Grok access tokens often
+  omit the `email` claim; the bot now prefers `email` / `first_name` /
+  `last_name` written on the auth entry by `grok login`, then falls back to JWT
+  claims. `/accounts` and `/usage` show the host login correctly again.
+- **🪪 Active account = live token hash.** The marked `activeId` is no longer
+  trusted when the host login changed outside the menu (`grok login` / `/reauth`).
+  Saving never overwrites a different saved account; mismatch is shown in the
+  `/accounts` UI (“Host Grok login” vs saved).
+
+### Docs
+
+- README: headless account switch, device-code `/reauth`, auto-approve + pinned
+  permission prompts, `AUTO_APPROVE_PERMISSIONS`.
+
 ## [2.2.1] - 2026-07-12
 
 ### Fixed
@@ -677,6 +698,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.2.2]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.2
 [2.2.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.1
 [2.2.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.0
 [2.1.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.1.0
