@@ -175,9 +175,12 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
     await ctx.answerCallbackQuery({ text: "Importing…" });
     const res = await auth.importExisting();
     if (!res.ok) return void rerender(ctx, deps, `\u274C ${res.error ?? "Import failed."}`);
+    // Import reuses the live auth.json — just re-bind the agent headlessly.
     try {
-      await deps.acp.restart();
+      await deps.acp.stopAndWait();
+      await deps.acp.start();
     } catch (e) {
+      await deps.acp.start().catch(() => {});
       return void rerender(ctx, deps, `\u26A0\uFE0F Imported, but re-bind failed: ${(e as Error).message}`);
     }
     let note = `\u2705 Imported the current login${res.label ? ` (${res.label})` : ""}.`;
@@ -196,10 +199,24 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
     if (reason) return void ctx.answerCallbackQuery({ text: reason, show_alert: true });
     await ctx.answerCallbackQuery({ text: "Switching…" });
     try {
-      await deps.accounts.captureCurrent().catch(() => {}); // don't lose the current login
-      const meta = await deps.accounts.switchTo(id);
-      await ctx.editMessageText(`\u{1F504} Switching to ${meta.label}\u2026 restarting agent`).catch(() => {});
-      await deps.acp.restart();
+      // 1) Snapshot the current login so it isn't lost.
+      await deps.accounts.captureCurrent().catch(() => {});
+      const target = deps.accounts.get(id);
+      await ctx
+        .editMessageText(`\u{1F504} Switching to ${target?.label ?? "account"}\u2026 replacing auth.json + restarting agent`)
+        .catch(() => {});
+      // 2) Stop agent BEFORE writing auth.json (avoids the live process
+      //    overwriting / racing the file, and never opens a browser).
+      await deps.acp.stopAndWait();
+      let meta;
+      try {
+        meta = await deps.accounts.switchTo(id);
+        // 3) Start agent; it authenticates headlessly with cached_token.
+        await deps.acp.start();
+      } catch (e) {
+        await deps.acp.start().catch(() => {});
+        throw e;
+      }
       const note = (await deps.usage.isLoggedIn())
         ? `\u2705 Now signed in as ${meta.label}. Your next message runs on this account.`
         : `\u26A0\uFE0F Switched to ${meta.label}, but no usable login is active. ${UNSUPPORTED_LOGIN_HELP}`;

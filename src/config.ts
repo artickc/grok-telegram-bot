@@ -99,6 +99,13 @@ export interface AppConfig {
    *  --agent flag headlessly). */
   agent?: string;
   trustAllTools: boolean;
+  /**
+   * Auto-approve ACP `session/request_permission` prompts (prefer "allow for
+   * this session"). Defaults true — Telegram bots shouldn't block on tool
+   * approvals. Set false (and GROK_TRUST_ALL_TOOLS=false) for interactive
+   * Approve/Deny buttons.
+   */
+  autoApprovePermissions: boolean;
   projectRoots: string[];
   streamThrottleMs: number;
   messageBatchMs: number;
@@ -183,6 +190,8 @@ export function loadConfig(): AppConfig {
     maxToolRounds: num(process.env.GROK_MAX_TOOL_ROUNDS, 400),
     agent: process.env.GROK_AGENT?.trim() || undefined,
     trustAllTools: bool(process.env.GROK_TRUST_ALL_TOOLS, true),
+    // Default true: auto-approve with session-scope when the agent still asks.
+    autoApprovePermissions: bool(process.env.AUTO_APPROVE_PERMISSIONS, true),
     projectRoots: [...new Set(roots)],
     streamThrottleMs: num(process.env.STREAM_THROTTLE_MS, 1500),
     messageBatchMs: nonNegNum(process.env.MESSAGE_BATCH_MS, 800),

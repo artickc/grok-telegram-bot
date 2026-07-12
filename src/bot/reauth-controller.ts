@@ -233,14 +233,14 @@ export class ReauthController {
         return (
           "\u{1F510} Sign in to Grok\n\n" +
           "Grok signs in with your xAI account (SuperGrok / X Premium+).\n\n" +
-          "\u2022 \u{1F511} Sign in \u2014 runs `grok login`; if a link/code appears, open it to approve.\n" +
+          "\u2022 \u{1F511} Sign in \u2014 runs `grok login --device-auth` (no browser); open the link/code here to approve.\n" +
           "\u2022 \u{1F4E5} Import existing \u2014 use a `grok login` already done on this machine."
         );
       case "login": {
-        const lines = ["\u{1F511} Signing in to Grok\u2026", ""];
+        const lines = ["\u{1F511} Signing in to Grok (device code, no browser)\u2026", ""];
         if (s.url) lines.push(`\u{1F517} Open this link to approve:\n${s.url}`, "");
         if (s.code) lines.push(`\u{1F522} Verification code: ${s.code}`, "");
-        if (!s.url && !s.code) lines.push("Starting sign-in (a browser may open on the host)\u2026", "");
+        if (!s.url && !s.code) lines.push("Starting headless device-code sign-in\u2026", "");
         lines.push(`${loader} Waiting\u2026`);
         return lines.join("\n");
       }
