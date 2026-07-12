@@ -153,6 +153,20 @@ export class StatusPanel {
       log.debug("status create/pin failed:", (err as Error).message);
     }
   }
+
+  /**
+   * Re-pin the existing status panel (if any). Used after a temporary pin
+   * (e.g. a permission prompt) is unpinned so the status panel stays visible.
+   */
+  async ensurePinned(chatId: number): Promise<void> {
+    const id = this.settings.get(chatId).statusMessageId;
+    if (!id) return;
+    try {
+      await this.api.pinChatMessage(chatId, id, { disable_notification: true });
+    } catch (err) {
+      log.debug("status re-pin failed:", (err as Error).message);
+    }
+  }
 }
 
 function isNotModified(err: unknown): boolean {

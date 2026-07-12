@@ -125,8 +125,12 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
 
   // Permission handling: default is auto-approve (prefer "this session" / always).
   // Interactive Approve/Deny buttons only when both trust-all and auto-approve are off.
+  // Interactive prompts are pinned so they aren't lost in a busy chat; on
+  // settle we re-pin the status panel (private chats keep a single pin).
   const autoApprovePerms = cfg.autoApprovePermissions || cfg.trustAllTools;
-  const permissions = new PermissionService(bot.api, registry, autoApprovePerms);
+  const permissions = new PermissionService(bot.api, registry, autoApprovePerms, {
+    onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
+  });
   acp.permissionHandler = (p) => permissions.handle(p);
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
@@ -147,9 +151,14 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   });
 
   bot.callbackQuery(/^perm:(\d+):(\d+)$/, async (ctx) => {
+    // resolveChoice unpins the prompt; we then rewrite it to the chosen label.
     const label = permissions.resolveChoice(ctx.match![1]!, Number(ctx.match![2]));
     await ctx.answerCallbackQuery({ text: label ?? "Expired" });
-    await ctx.editMessageText(label ? `\u{1F510} ${label}` : "\u{1F510} (expired)").catch(() => {});
+    await ctx
+      .editMessageText(label ? `\u{1F510} ${label}` : "\u{1F510} (expired)", {
+        reply_markup: { inline_keyboard: [] },
+      })
+      .catch(() => {});
   });
 
   bot.callbackQuery(/^permsw:(\d+)$/, async (ctx) => {

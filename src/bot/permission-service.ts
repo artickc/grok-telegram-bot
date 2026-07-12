@@ -2,6 +2,9 @@
  * PermissionService — turns Grok's ACP `session/request_permission` into either
  * an automatic session-level approval (default) or inline Approve/Deny buttons.
  *
+ * Interactive prompts are **pinned** so they stay visible while the chat is
+ * busy streaming other messages, then **unpinned** on approve / deny / timeout.
+ *
  * Auto-approve prefers "allow for this session" / "always allow" options so the
  * agent stops re-prompting mid-turn. Interactive mode is only used when
  * auto-approve is off (GROK_TRUST_ALL_TOOLS=false and AUTO_APPROVE_PERMISSIONS=false).
@@ -31,6 +34,16 @@ interface Pending {
   sessionId: string;
   messageId?: number;
   timer: NodeJS.Timeout;
+  /** True once the message has been pinned (so we know to unpin on settle). */
+  pinned: boolean;
+}
+
+export interface PermissionServiceOptions {
+  /**
+   * Called after a permission prompt is unpinned (approve / deny / timeout).
+   * Use to re-pin the status panel if Telegram only keeps one pin per chat.
+   */
+  onUnpinned?: (chatId: number) => void | Promise<void>;
 }
 
 export class PermissionService {
@@ -38,13 +51,16 @@ export class PermissionService {
   private seq = 0;
   /** When true, every permission request is auto-approved (session-scope preferred). */
   autoApprove: boolean;
+  private readonly onUnpinned?: (chatId: number) => void | Promise<void>;
 
   constructor(
     private readonly api: Api,
     private readonly registry: RuntimeRegistry,
     autoApprove = true,
+    opts?: PermissionServiceOptions,
   ) {
     this.autoApprove = autoApprove;
+    this.onUnpinned = opts?.onUnpinned;
   }
 
   /** Handle a permission request: auto-approve (default), ask the chat, or allow if unattended. */
@@ -78,6 +94,7 @@ export class PermissionService {
     if (canSwitch) kb.text(`\u{1F500} Switch to ${label}`, `permsw:${reqId}`);
 
     let messageId: number | undefined;
+    let pinned = false;
     try {
       const msg = await this.api.sendMessage(
         chatId,
@@ -88,6 +105,14 @@ export class PermissionService {
         },
       );
       messageId = msg.message_id;
+      // Pin so the prompt stays visible while the chat streams other messages.
+      // disable_notification:true — the send already notified; no second ping.
+      try {
+        await this.api.pinChatMessage(chatId, messageId, { disable_notification: true });
+        pinned = true;
+      } catch (e) {
+        log.warn("failed to pin permission prompt:", (e as Error).message);
+      }
     } catch (e) {
       log.warn("failed to send permission prompt:", (e as Error).message);
       return autoDecideSession(params);
@@ -95,11 +120,21 @@ export class PermissionService {
 
     return new Promise<PermissionOutcome>((resolve) => {
       const timer = setTimeout(() => {
+        const p = this.pending.get(reqId);
+        if (!p) return;
         this.pending.delete(reqId);
-        void this.api.editMessageText(chatId, messageId!, "\u231B Approval timed out \u2014 denied.").catch(() => {});
+        void this.finishPrompt(p, "\u231B Approval timed out \u2014 denied.");
         resolve({ outcome: { outcome: "cancelled" } });
       }, TIMEOUT_MS);
-      this.pending.set(reqId, { resolve, options: params.options, chatId, sessionId: params.sessionId, messageId, timer });
+      this.pending.set(reqId, {
+        resolve,
+        options: params.options,
+        chatId,
+        sessionId: params.sessionId,
+        messageId,
+        timer,
+        pinned,
+      });
     });
   }
 
@@ -111,9 +146,12 @@ export class PermissionService {
     this.pending.delete(reqId);
     const opt = p.options[index];
     if (!opt) {
+      void this.finishPrompt(p, "\u{1F510} (cancelled)");
       p.resolve({ outcome: { outcome: "cancelled" } });
       return undefined;
     }
+    // Unpin + mark resolved (caller typically edits the message text too).
+    void this.unpinOnly(p);
     p.resolve({ outcome: { outcome: "selected", optionId: opt.optionId } });
     return opt.name;
   }
@@ -121,6 +159,31 @@ export class PermissionService {
   /** The session a pending request belongs to (for the Switch button). */
   sessionFor(reqId: string): string | undefined {
     return this.pending.get(reqId)?.sessionId;
+  }
+
+  /** Unpin (if pinned) and optionally rewrite the prompt message. */
+  private async finishPrompt(p: Pending, text?: string): Promise<void> {
+    if (p.messageId !== undefined && text) {
+      await this.api.editMessageText(p.chatId, p.messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    }
+    await this.unpinOnly(p);
+  }
+
+  /** Unpin the permission prompt and restore the status pin if any. */
+  private async unpinOnly(p: Pending): Promise<void> {
+    if (p.pinned && p.messageId !== undefined) {
+      p.pinned = false;
+      await this.api.unpinChatMessage(p.chatId, p.messageId).catch((e) => {
+        log.debug("unpin permission prompt failed:", (e as Error).message);
+      });
+    }
+    if (this.onUnpinned) {
+      try {
+        await this.onUnpinned(p.chatId);
+      } catch (e) {
+        log.debug("onUnpinned hook failed:", (e as Error).message);
+      }
+    }
   }
 }
 
