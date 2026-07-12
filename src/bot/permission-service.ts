@@ -1,9 +1,10 @@
 /**
- * PermissionService — turns Grok's ACP `session/request_permission` into inline
- * Approve/Deny buttons. It names the session that needs approval, sends the
- * prompt WITH sound (it requires interaction), and — when the request belongs to
- * a *background* session — adds a "🔀 Switch to it" button. The Allow/Deny
- * buttons resolve the request in place, without switching.
+ * PermissionService — turns Grok's ACP `session/request_permission` into either
+ * an automatic session-level approval (default) or inline Approve/Deny buttons.
+ *
+ * Auto-approve prefers "allow for this session" / "always allow" options so the
+ * agent stops re-prompting mid-turn. Interactive mode is only used when
+ * auto-approve is off (GROK_TRUST_ALL_TOOLS=false and AUTO_APPROVE_PERMISSIONS=false).
  */
 import type { Api } from "grammy";
 import { InlineKeyboard } from "grammy";
@@ -35,17 +36,31 @@ interface Pending {
 export class PermissionService {
   private readonly pending = new Map<string, Pending>();
   private seq = 0;
+  /** When true, every permission request is auto-approved (session-scope preferred). */
+  autoApprove: boolean;
 
   constructor(
     private readonly api: Api,
     private readonly registry: RuntimeRegistry,
-  ) {}
+    autoApprove = true,
+  ) {
+    this.autoApprove = autoApprove;
+  }
 
-  /** Handle a permission request: ask the owning chat, or auto-allow if none. */
+  /** Handle a permission request: auto-approve (default), ask the chat, or allow if unattended. */
   async handle(params: RequestPermissionParams): Promise<PermissionOutcome> {
+    if (this.autoApprove) {
+      const decision = autoDecideSession(params);
+      log.info(
+        `auto-approved permission for session ${params.sessionId.slice(0, 8)} ` +
+          `(${params.toolCall?.kind ?? "tool"}: ${params.toolCall?.title ?? "?"})`,
+      );
+      return decision;
+    }
+
     const desc = this.registry.describeSession(params.sessionId);
     const chatId = desc.chatId;
-    if (chatId === undefined) return autoDecide(params); // unattended (e.g. scheduled task / orphan subagent)
+    if (chatId === undefined) return autoDecideSession(params); // unattended (scheduled / orphan)
 
     const reqId = String(++this.seq);
     const isForeground = !desc.subagent && this.registry.get(chatId).sessionId === params.sessionId;
@@ -75,7 +90,7 @@ export class PermissionService {
       messageId = msg.message_id;
     } catch (e) {
       log.warn("failed to send permission prompt:", (e as Error).message);
-      return autoDecide(params);
+      return autoDecideSession(params);
     }
 
     return new Promise<PermissionOutcome>((resolve) => {
@@ -136,14 +151,43 @@ function describe(
 
 function buttonLabel(o: { name: string; kind?: string }): string {
   const k = `${o.kind ?? ""} ${o.name}`.toLowerCase();
-  const icon = /reject|deny|no|cancel/.test(k) ? "\u26D4" : /always|all/.test(k) ? "\u2705\u267E\uFE0F" : "\u2705";
+  const icon = /reject|deny|no|cancel/.test(k) ? "\u26D4" : /always|all|session/.test(k) ? "\u2705\u267E\uFE0F" : "\u2705";
   return `${icon} ${o.name}`;
 }
 
-/** Pick an allow option when nobody can be asked (otherwise cancel). */
-function autoDecide(params: RequestPermissionParams): PermissionOutcome {
-  const allow = params.options.find((o) => /allow|approve|yes|once/i.test(`${o.kind ?? ""} ${o.name}`));
-  return allow
-    ? { outcome: { outcome: "selected", optionId: allow.optionId } }
+/**
+ * Score an allow-option. Higher is better for bot auto-approve:
+ *   4 — always allow all sessions / forever
+ *   3 — allow for this session (preferred default)
+ *   2 — allow always (unscoped)
+ *   1 — allow once / approve / yes
+ *   0 — not an allow option (reject/deny)
+ */
+function allowScore(o: { name: string; kind?: string }): number {
+  const k = `${o.kind ?? ""} ${o.name}`.toLowerCase();
+  if (/reject|deny|cancel|no\b|block/.test(k)) return 0;
+  if (/all.?sessions|always_allow_all|forever|unrestricted/.test(k)) return 4;
+  if (/this.?session|session|allow_session|always_allow_session/.test(k)) return 3;
+  if (/always|allow_always|allow.?all\b/.test(k)) return 2;
+  if (/allow|approve|yes|once|ok\b/.test(k)) return 1;
+  return 0;
+}
+
+/**
+ * Pick the best allow option, preferring "this session" / "always" so the agent
+ * stops re-prompting. Falls back to cancelled only when no allow option exists.
+ */
+export function autoDecideSession(params: RequestPermissionParams): PermissionOutcome {
+  let best: { optionId: string; score: number } | undefined;
+  for (const o of params.options) {
+    const score = allowScore(o);
+    if (score <= 0) continue;
+    if (!best || score > best.score) best = { optionId: o.optionId, score };
+  }
+  if (best) return { outcome: { outcome: "selected", optionId: best.optionId } };
+  // Last resort: first option if present (agent convention: allow first).
+  const first = params.options[0];
+  return first
+    ? { outcome: { outcome: "selected", optionId: first.optionId } }
     : { outcome: { outcome: "cancelled" } };
 }

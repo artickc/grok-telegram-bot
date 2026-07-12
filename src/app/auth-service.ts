@@ -68,7 +68,10 @@ export class AuthService {
       if (signal?.aborted) return resolve({ ok: false, code: null, cancelled: true });
       let proc;
       try {
-        proc = spawn(this.grokCliPath, ["login"], { stdio: ["ignore", "pipe", "pipe"] });
+        // Prefer device-code login so a headless/service host never opens a
+        // browser window (which hangs the bot). The verification URL + code are
+        // streamed to Telegram via onOutput.
+        proc = spawn(this.grokCliPath, ["login", "--device-auth"], { stdio: ["ignore", "pipe", "pipe"] });
       } catch (e) {
         onOutput(`error: ${(e as Error).message}`);
         return resolve({ ok: false, code: null });

@@ -13,6 +13,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createLogger } from "../logger.js";
+import { hasLogin } from "../app/grok-credentials.js";
 import { contextWindowFor, DEFAULT_MODEL, KNOWN_MODELS } from "./models.js";
 import { PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { SessionLog } from "./session-log.js";
@@ -74,6 +75,47 @@ function shortJson(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+/** Auth methods that open a browser / interactive UI — never use from the bot. */
+const BROWSER_AUTH_RE = /grok\.com|browser|oauth|interactive|web.?login/i;
+
+/**
+ * Pick a headless-safe auth method. Prefer `cached_token` (auth.json) so
+ * multi-account rotation works by swapping that file; then `xai.api_key` when
+ * an API key is configured. Never falls back to browser methods.
+ */
+export function pickHeadlessAuthMethod(
+  methods: Array<{ id: string; name?: string }>,
+  hasApiKey: boolean,
+): string | undefined {
+  const ids = methods.map((m) => m.id);
+  const safe = (id: string) => !BROWSER_AUTH_RE.test(id) && !/login|sign.?in/i.test(id);
+  if (ids.includes("cached_token") && safe("cached_token")) return "cached_token";
+  if (hasApiKey && ids.includes("xai.api_key") && safe("xai.api_key")) return "xai.api_key";
+  // Any other non-browser, non-key method the agent advertises.
+  return ids.find((id) => safe(id) && id !== "xai.api_key");
+}
+
+/** Auto-pick an allow option for permission requests (prefer session/always). */
+function pickAllowOption(
+  opts: Array<{ optionId: string; name?: string; kind?: string }>,
+): PermissionOutcome {
+  let best: { optionId: string; score: number } | undefined;
+  for (const o of opts) {
+    const k = `${o.kind ?? ""} ${o.name ?? ""}`.toLowerCase();
+    let score = 0;
+    if (/reject|deny|cancel|no\b|block/.test(k)) score = 0;
+    else if (/all.?sessions|always_allow_all|forever/.test(k)) score = 4;
+    else if (/this.?session|session|allow_session/.test(k)) score = 3;
+    else if (/always|allow_always|allow.?all\b/.test(k)) score = 2;
+    else if (/allow|approve|yes|once|ok\b/.test(k)) score = 1;
+    if (score > 0 && (!best || score > best.score)) best = { optionId: o.optionId, score };
+  }
+  if (best) return { outcome: { outcome: "selected", optionId: best.optionId } };
+  return opts[0]
+    ? { outcome: { outcome: "selected", optionId: opts[0].optionId } }
+    : { outcome: { outcome: "cancelled" } };
 }
 
 export interface GrokClientOptions {
@@ -162,9 +204,10 @@ export class GrokClient extends EventEmitter {
 
   private async connect(): Promise<void> {
     // `--always-approve` is a `grok agent` option (not `grok agent stdio`),
-    // so it must come before the `stdio` subcommand. `--no-auto-update` was
-    // removed in grok 0.2.x and causes exit code 2.
-    const args = ["agent"];
+    // so it must come before the `stdio` subcommand. `--no-leader` keeps auth
+    // process-local so swapping ~/.grok/auth.json + restart actually picks up
+    // the new token. `--no-auto-update` was removed in grok 0.2.x (exit 2).
+    const args = ["agent", "--no-leader"];
     if (this.opts.trustAllTools) args.push("--always-approve");
     args.push("stdio");
 
@@ -197,7 +240,7 @@ export class GrokClient extends EventEmitter {
     const init = (await this.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: "grok-telegram-bot", version: "2.0.0" },
+      clientInfo: { name: "grok-telegram-bot", version: "2.2.0" },
     })) as InitializeResult;
 
     this.agentInfo = init.agentInfo ?? { name: "grok" };
@@ -206,19 +249,29 @@ export class GrokClient extends EventEmitter {
     this.subagents = [];
     this.pendingStages = [];
 
-    // Authenticate: prefer the cached `grok login` token; fall back to API key.
-    const methods = new Set((init.authMethods ?? []).map((m) => m.id));
-    this.authMethodId =
-      this.opts.apiKey && methods.has("xai.api_key")
-        ? "xai.api_key"
-        : methods.has("cached_token")
-          ? "cached_token"
-          : (init.authMethods?.[0]?.id ?? undefined);
-    if (this.authMethodId) {
+    // Authenticate headlessly only. NEVER pick browser methods (e.g. "grok.com")
+    // — those open a browser and hang/kill the bot host. Prefer cached_token
+    // from ~/.grok/auth.json, then xai.api_key when configured.
+    this.authMethodId = pickHeadlessAuthMethod(init.authMethods ?? [], !!this.opts.apiKey);
+    if (!this.authMethodId) {
+      // Never fall back to browser methods (e.g. grok.com) — that opens a
+      // browser and freezes headless hosts. Boot unauthenticated so /reauth works.
+      log.warn(
+        "No headless Grok auth method available. Run `grok login` / /reauth, or set XAI_API_KEY. " +
+          "Refusing browser-based auth methods.",
+      );
+    } else {
       try {
         await this.request("authenticate", { methodId: this.authMethodId, _meta: { headless: true } });
       } catch (e) {
-        log.warn(`authenticate (${this.authMethodId}) failed: ${(e as Error).message}`);
+        const msg = (e as Error).message;
+        log.warn(`authenticate (${this.authMethodId}) failed: ${msg}`);
+        // If a login (or API key) is present, auth should have worked — surface
+        // the error so account switch/rotation doesn't silently keep a dead agent.
+        // If nothing is configured yet, soft-fail so the bot can still boot for /reauth.
+        if (hasLogin() || this.opts.apiKey) {
+          throw new Error(`Grok authenticate (${this.authMethodId}) failed: ${msg}`);
+        }
       }
     }
     log.info(`connected: ${this.agentInfo?.name ?? "grok"} ${this.agentInfo?.version ?? ""}`.trim());
@@ -519,11 +572,9 @@ export class GrokClient extends EventEmitter {
       if (method === "session/request_permission" && this.permissionHandler) {
         result = await this.permissionHandler(params as unknown as RequestPermissionParams);
       } else if (method === "session/request_permission") {
-        // No handler (trust-all): auto-approve the first option, else cancel.
-        const opts = (params.options as Array<{ optionId: string }>) ?? [];
-        result = opts[0]
-          ? { outcome: { outcome: "selected", optionId: opts[0].optionId } }
-          : { outcome: { outcome: "cancelled" } };
+        // No handler: auto-approve, preferring session-scope / always options.
+        const opts = (params.options as Array<{ optionId: string; name?: string; kind?: string }>) ?? [];
+        result = pickAllowOption(opts);
       } else {
         // We advertise no fs/terminal capabilities, so the agent shouldn't ask.
         throw new GrokError(`unsupported client method: ${method}`, -32601);

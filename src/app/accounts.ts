@@ -11,7 +11,7 @@
  * Snapshots are copies of auth.json under `<dataDir>/accounts/` (git-ignored).
  * The index stores only a label + token hash, never the token itself.
  */
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import { JsonStore } from "./json-store.js";
@@ -37,6 +37,8 @@ export interface StoredAccount {
 interface AccountsData {
   accounts: StoredAccount[];
   autoRotate?: boolean;
+  /** Explicitly tracked active account id (survives token-hash drift after refresh). */
+  activeId?: string;
 }
 
 function makeId(): string {
@@ -73,11 +75,18 @@ export class AccountManager {
     return this.store.get().accounts.find((a) => a.email === key || a.startUrl === key || a.loginId === key);
   }
 
-  /** Id of the saved account matching the currently active sign-in, by token hash. */
+  /**
+   * Id of the currently active saved account. Prefers the last switch target
+   * (`activeId`), then falls back to matching the live auth.json token hash.
+   */
   activeAccountId(): string | undefined {
+    const data = this.store.get();
+    if (data.activeId && data.accounts.some((a) => a.id === data.activeId)) {
+      return data.activeId;
+    }
     const lid = loginId();
     if (!lid) return undefined;
-    return this.store.get().accounts.find((a) => a.loginId === lid)?.id;
+    return data.accounts.find((a) => a.loginId === lid)?.id;
   }
 
   get(id: string): StoredAccount | undefined {
@@ -98,23 +107,36 @@ export class AccountManager {
     const lid = loginId();
     if (!lid) throw new Error("No browser sign-in to save (an XAI_API_KEY-only login can't be snapshotted).");
     await mkdir(this.dir, { recursive: true });
+    // Prefer a usable token in the live file; reject empty/corrupt auth.json.
+    const raw = await readFile(grokAuthPath(), "utf-8").catch(() => undefined);
+    if (!raw?.trim()) throw new Error("auth.json is empty or missing — run /reauth first.");
+    try {
+      JSON.parse(raw);
+    } catch {
+      throw new Error("auth.json is not valid JSON — run /reauth to repair it.");
+    }
     const label = customLabel?.trim() || loginLabel() || `account ${lid.slice(0, 6)}`;
     const email = loginLabel();
-    const existing = this.store.get().accounts.find((a) => a.loginId === lid);
+    // Match by token hash first; fall back to the currently marked active slot
+    // when the user is re-saving after a silent token refresh.
+    const existing =
+      this.store.get().accounts.find((a) => a.loginId === lid) ??
+      (this.store.get().activeId ? this.get(this.store.get().activeId!) : undefined);
     const id = existing?.id ?? makeId();
-    await copyFile(grokAuthPath(), this.snapshotPath(id));
+    await writeFile(this.snapshotPath(id), raw, "utf-8");
     const meta: StoredAccount = {
       id,
-      label,
+      label: customLabel?.trim() || existing?.label || label,
       loginId: lid,
-      email,
-      startUrl: email,
+      email: email || existing?.email,
+      startUrl: email || existing?.email,
       savedAt: new Date().toISOString(),
     };
     this.store.update((d) => {
       const idx = d.accounts.findIndex((a) => a.id === id);
       if (idx >= 0) d.accounts[idx] = meta;
       else d.accounts.push(meta);
+      d.activeId = id;
     });
     log.info(`captured account ${meta.label} (${id})`);
     return meta;
@@ -122,18 +144,32 @@ export class AccountManager {
 
   /**
    * Make a saved account the active sign-in by copying its snapshot over
-   * auth.json. The caller restarts the ACP agent so the new identity takes
-   * effect. Throws when the snapshot is missing.
+   * auth.json. The caller MUST stop the ACP agent first (so it cannot rewrite
+   * auth.json mid-swap), then restart after this returns. Never opens a
+   * browser — pure file replace. Throws when the snapshot is missing/invalid.
    */
   async switchTo(id: string): Promise<StoredAccount> {
     const meta = this.get(id);
     if (!meta) throw new Error("That account is no longer saved.");
     const snap = this.snapshotPath(id);
     const raw = await readFile(snap, "utf-8").catch(() => undefined);
-    if (!raw) throw new Error(`Saved login for ${meta.label} is missing — re-add it.`);
+    if (!raw?.trim()) throw new Error(`Saved login for ${meta.label} is missing — re-add it.`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`Saved login for ${meta.label} is corrupt — re-save it via /accounts.`);
+    }
+    // Sanity-check: snapshot must look like auth.json (object with at least one key).
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed as object).length === 0) {
+      throw new Error(`Saved login for ${meta.label} has no token — re-save it via /accounts.`);
+    }
     await mkdir(join(grokAuthPath(), ".."), { recursive: true });
     await writeFile(grokAuthPath(), raw, "utf-8");
-    log.info(`switched active login to ${meta.label} (${id})`);
+    this.store.update((d) => {
+      d.activeId = id;
+    });
+    log.info(`switched active login to ${meta.label} (${id}) — auth.json replaced`);
     return meta;
   }
 
@@ -156,6 +192,7 @@ export class AccountManager {
     await rm(this.snapshotPath(id), { force: true }).catch(() => {});
     this.store.update((d) => {
       d.accounts = d.accounts.filter((a) => a.id !== id);
+      if (d.activeId === id) d.activeId = undefined;
     });
     return existed;
   }

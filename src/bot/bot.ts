@@ -123,8 +123,10 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   // Auto-rotate-on-give-up: let a stuck turn cycle through other saved logins.
   registry.setAccountRotator(new AccountRotatorImpl(deps.accounts, acp));
 
-  // Inline approvals: when NOT in trust-all mode, Grok asks before risky tools.
-  const permissions = new PermissionService(bot.api, registry);
+  // Permission handling: default is auto-approve (prefer "this session" / always).
+  // Interactive Approve/Deny buttons only when both trust-all and auto-approve are off.
+  const autoApprovePerms = cfg.autoApprovePermissions || cfg.trustAllTools;
+  const permissions = new PermissionService(bot.api, registry, autoApprovePerms);
   acp.permissionHandler = (p) => permissions.handle(p);
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a

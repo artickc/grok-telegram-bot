@@ -9,6 +9,43 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-07-12
+
+The **reliable multi-account** release — account switch / auto-rotate now only
+swaps `~/.grok/auth.json` and restarts the agent headlessly (never opens a
+browser), and tool permission prompts are auto-approved for the session by
+default.
+
+### Fixed
+
+- **🔁 Account switch & auto-rotate no longer open a browser.** Switching or
+  auto-rotating accounts now: (1) stops the shared agent, (2) replaces
+  `~/.grok/auth.json` with the saved snapshot, (3) starts the agent and
+  authenticates with headless `cached_token` only. Browser auth methods such as
+  `grok.com` are never selected (they used to hang the host and kill Telegram).
+- **🪪 Explicit `activeId` tracking** so rotation still knows which account is
+  live after silent token refreshes (token-hash drift no longer confuses the
+  target list).
+- **🛡️ Auth failures after a switch are surfaced** instead of silently running
+  an unauthenticated agent.
+
+### Added
+
+- **✅ Auto-approve permissions (session scope).** ACP
+  `session/request_permission` requests are auto-approved by default, preferring
+  “allow for this session” / “always allow” over “allow once”. Configure with
+  `AUTO_APPROVE_PERMISSIONS` (default `true`). Interactive Approve/Deny buttons
+  only when both `AUTO_APPROVE_PERMISSIONS=false` and `GROK_TRUST_ALL_TOOLS=false`.
+- **`grok login --device-auth` for `/reauth`** — device-code sign-in streamed to
+  Telegram instead of opening a browser on the host.
+- **`--no-leader`** on `grok agent` so auth is process-local and auth.json swaps
+  take effect on restart.
+
+### Changed
+
+- Headless auth method selection prefers `cached_token` (multi-account) over
+  API key / browser methods.
+
 ## [2.1.0] - 2026-07-10
 
 The **"show me everything"** release — the bot now streams rich, real-time detail
@@ -632,6 +669,9 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.2.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.0
+[2.1.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.1.0
+[2.0.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.0.0
 [1.7.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v1.7.1
 [1.7.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v1.7.0
 [1.6.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v1.6.0
