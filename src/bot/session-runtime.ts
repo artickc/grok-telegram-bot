@@ -6,7 +6,13 @@
  */
 import { basename } from "node:path";
 import { type Api, InlineKeyboard } from "grammy";
-import { type GrokClient, isContextExhaustedError, isTransientError, type SessionMetadata } from "../grok/client.js";
+import {
+  type GrokClient,
+  isAccountExhaustedError,
+  isContextExhaustedError,
+  isTransientError,
+  type SessionMetadata,
+} from "../grok/client.js";
 import type { AccountRotator } from "./account-rotator.js";
 import type { ContentBlock, PromptResult, SessionUpdate } from "../grok/types.js";
 import type { AppConfig } from "../config.js";
@@ -27,7 +33,14 @@ import type { PendingStage, SubagentInfo } from "../grok/types.js";
 import { ResponseStreamer } from "../stream/streamer.js";
 import { extractImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
-import { backoffSchedule, fmtSeconds, formatErrorSummary, formatRetryNotice, RETRY_BASE_MS } from "./prompt-retry.js";
+import {
+  backoffSchedule,
+  fmtSeconds,
+  formatAccountSwitchNotice,
+  formatErrorSummary,
+  formatRetryNotice,
+  RETRY_BASE_MS,
+} from "./prompt-retry.js";
 import { sendMarkdownDoc } from "./telegram-io.js";
 import { TypingIndicator } from "./typing.js";
 
@@ -661,13 +674,17 @@ export class SessionRuntime {
   }
 
   /**
-   * Auto-rotate-on-give-up. When a turn has failed (retries exhausted, auto-fork
-   * didn't recover it) and nothing was streamed, cycle through the OTHER saved
-   * accounts once вЂ” switching login + restarting the agent, then retrying the
-   * same prompt on a fresh session for each. The first account that succeeds
-   * wins and stays active; if every account fails we return a single combined
-   * error listing what each one reported. Bounded to ONE pass (no infinite
+   * Auto-rotate-on-give-up. When a turn has failed (retries exhausted / billing
+   * 402 with no same-account retry, auto-fork didn't recover) and nothing was
+   * streamed, cycle through the OTHER saved accounts once — each step:
+   *   stop Grok CLI → replace ~/.grok/auth.json → start CLI + headless auth →
+   *   open a fresh session → retry the same prompt.
+   * The first account that succeeds wins and stays active; if every account
+   * fails we stop with a combined error. Bounded to ONE pass (no infinite
    * loop). No-op unless the rotator is enabled and other accounts exist.
+   *
+   * Billing/quota failures (402 balance exhausted) skip backoff retries on
+   * each account and rotate instantly so the turn continues without a long wait.
    */
   private async maybeRotateAccount(
     input: PromptInput,
@@ -685,11 +702,13 @@ export class SessionRuntime {
 
     for (const t of targets) {
       if (this.cancelled) return last;
+      const failReason = last.error ?? final.error;
       if (this.foreground) {
-        await this.notify(`\u{1F501} Auto-rotating accounts \u2014 trying ${t.label}\u2026`, { replyTo: this.turnReplyTo });
+        await this.notify(formatAccountSwitchNotice(t.label, failReason), { replyTo: this.turnReplyTo });
       }
       try {
-        await rotator.activate(t.id); // switch login + restart the shared agent
+        // stop CLI → swap auth.json → start CLI + authenticate(cached_token)
+        await rotator.activate(t.id);
       } catch (e) {
         errors.push(`\u2022 ${t.label}: couldn't switch \u2014 ${(e as Error).message}`);
         continue;
@@ -709,17 +728,23 @@ export class SessionRuntime {
         priming: transcript ? buildPriming(transcript) : undefined,
         progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
-      log.info(`chat ${this.chatId} auto-rotating to account ${t.label}`);
+      log.info(
+        `chat ${this.chatId} auto-rotating to account ${t.label}` +
+          (isAccountExhaustedError(failReason) ? " (billing/quota exhausted on previous)" : ""),
+      );
+      // runPromptWithRetries already skips backoff for 402 / balance exhausted.
       last = await this.runPromptWithRetries(content);
       if (last.result && !this.cancelled) {
-        if (this.foreground) await this.notify(`\u2705 Recovered on ${t.label}.`, { replyTo: this.turnReplyTo });
+        if (this.foreground) {
+          await this.notify(`\u2705 Recovered on ${t.label}.`, { replyTo: this.turnReplyTo });
+        }
         return last;
       }
       if (this.cancelled || (this.streamer?.hasOutput ?? false)) return last;
       errors.push(`\u2022 ${t.label}: ${last.error?.message ?? "failed"}`);
     }
 
-    // One full cycle done and still failing вЂ” stop with a combined report.
+    // One full cycle done and still failing — stop with a combined report.
     const combined = new Error(`Tried ${targets.length + 1} account(s), all failed:\n${errors.join("\n")}`);
     return { error: combined, attempts: last.attempts };
   }
@@ -748,12 +773,15 @@ export class SessionRuntime {
         const error = err as Error;
         const canRecover = !this.cancelled && !(this.streamer?.hasOutput ?? false);
         // A context-exhausted session won't recover by retrying the same
-        // oversized prompt вЂ” skip the backoff and let auto-fork compact it now.
+        // oversized prompt — skip the backoff and let auto-fork compact it now.
         const forkInstead = canRecover && this.cfg.autoForkOnError && this.isContextRelatedFailure(error);
+        // Billing/quota 402 (balance exhausted) is permanent for this login —
+        // never backoff-retry; surface immediately so auto-rotate can switch.
         const willRetry =
           attempt <= delays.length &&
           canRecover &&
           !forkInstead &&
+          !isAccountExhaustedError(error) &&
           isTransientError(error);
         if (!willRetry) return { error, attempts: attempt };
         const waitMs = delays[attempt - 1]!;

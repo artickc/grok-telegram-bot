@@ -57,7 +57,9 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
   lines.push(
     "",
     `\u{1F501} Auto-rotate on errors: ${rotate ? "ON" : "OFF"}`,
-    rotate ? "  \u2514 If a turn gives up, it cycles through the other accounts once." : "  \u2514 Turns stay on the active account.",
+    rotate
+      ? "  \u2514 On give-up / 402 balance exhausted: stop CLI, swap auth, restart, retry each account once."
+      : "  \u2514 Turns stay on the active account (402 balance exhausted stops immediately).",
   );
   if (note) lines.push("", note);
 

@@ -9,6 +9,21 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-07-13
+
+### Fixed
+
+- **💳 Instant account rotate on 402 balance exhausted.** Grok Build
+  `Payment Required` / `usage balance exhausted` errors (usually wrapped as ACP
+  Internal error `[-32603]`) are no longer treated as transient. Same-account
+  backoff retries are skipped. With **auto-rotate ON**, the bot immediately:
+  stops the Grok CLI → swaps `~/.grok/auth.json` → restarts the CLI with
+  headless `cached_token` auth → opens a fresh session → retries the same
+  prompt. If that account fails, it switches to the next saved account (one
+  pass). If all accounts fail (or auto-rotate is OFF), the turn stops with a
+  clear error. Telegram shows
+  `Account switched to … because of: …` plus a CLI-restart notice.
+
 ## [2.2.2] - 2026-07-12
 
 Patch release that hardens multi-account identity and documents the full **2.2.x**
