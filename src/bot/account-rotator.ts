@@ -1,6 +1,7 @@
 /**
- * Auto-rotate-on-give-up. When a turn exhausts its retries (and auto-fork can't
- * recover it), the runtime can cycle through the OTHER saved Grok accounts,
+ * Auto-rotate-on-give-up. When a turn exhausts its retries (or fails immediately
+ * with a permanent billing error like HTTP 402 balance exhausted) and auto-fork
+ * can't recover it, the runtime can cycle through the OTHER saved Grok accounts,
  * retrying the same prompt on each — useful when the active account is
  * throttled, out of quota, or its backend keeps returning "dispatch failure".
  *
@@ -12,8 +13,11 @@
  * a rotation restarts the shared agent and affects every chat — intended, since
  * the whole point is to move everyone onto a working login.
  *
- * CRITICAL: switch = stop agent → replace ~/.grok/auth.json → start agent with
- * headless `cached_token` auth. Never opens a browser / never runs `grok login`.
+ * CRITICAL: every activate() MUST fully restart the CLI so the new auth applies:
+ *   1. stop agent (`stopAndWait`) — process must exit so it cannot rewrite auth,
+ *   2. replace ~/.grok/auth.json with the saved snapshot,
+ *   3. start agent + `authenticate({ methodId: "cached_token" })` headlessly.
+ * Never opens a browser / never runs `grok login`.
  */
 import type { GrokClient } from "../grok/client.js";
 import type { AccountManager } from "../app/accounts.js";
@@ -52,10 +56,11 @@ export class AccountRotatorImpl implements AccountRotator {
   }
 
   /**
-   * Pure file-based account swap:
-   *   1. Stop the shared agent (so it cannot rewrite auth.json),
+   * Pure file-based account swap with a full CLI restart so the new token is
+   * loaded (agent is process-local with `--no-leader`):
+   *   1. Stop the shared agent and wait for exit (so it cannot rewrite auth.json),
    *   2. Copy the saved snapshot over ~/.grok/auth.json,
-   *   3. Start the agent and authenticate with `cached_token` (headless).
+   *   3. Start a fresh agent process and authenticate with `cached_token`.
    * Never launches a browser.
    */
   async activate(id: string): Promise<void> {
@@ -63,12 +68,15 @@ export class AccountRotatorImpl implements AccountRotator {
     await this.accounts.captureCurrent().catch((e) => {
       log.warn("pre-rotate capture failed (continuing):", (e as Error).message);
     });
-    log.info(`rotating: stopping agent before auth.json swap (${id})`);
+    log.info(`rotating: stopping Grok CLI before auth.json swap (${id})`);
     await this.acp.stopAndWait();
     try {
       const meta = await this.accounts.switchTo(id);
-      log.info(`rotating: auth.json now ${meta.label}; starting agent`);
+      log.info(`rotating: auth.json now ${meta.label}; starting Grok CLI + re-auth`);
+      // start() → connect() → initialize + authenticate(cached_token) against
+      // the freshly written auth.json. A live process would keep the old token.
       await this.acp.start();
+      log.info(`rotating: Grok CLI up on ${meta.label}`);
     } catch (e) {
       // Best-effort recover the agent so the bot stays usable even if the
       // target login was bad.

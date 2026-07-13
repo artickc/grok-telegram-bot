@@ -1,6 +1,6 @@
 {
   "name": "grok-telegram-bot",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Control the official Grok Build CLI from Telegram over the Agent Client Protocol (ACP). Sign in with your xAI account, switch projects, resume sessions, stream responses with diffs, queue follow-ups, manage multiple sign-ins, and run 24/7 as a cross-platform background service.",
   "type": "module",
   "main": "src/index.ts",

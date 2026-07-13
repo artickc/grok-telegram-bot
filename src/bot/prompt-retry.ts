@@ -68,3 +68,30 @@ export function formatErrorSummary(error: Error, elapsed: string, attempts: numb
   }
   return `\u274C Gave up after ${attempts} attempts over ${elapsed}.\nLast error: ${error.message}${tip}`;
 }
+
+/**
+ * Compact, human-facing reason for an account switch (Telegram status line).
+ * Prefers a short billing/quota phrase when present; otherwise truncates.
+ */
+export function shortSwitchReason(error: Error, max = 140): string {
+  const raw = error.message.replace(/\s+/g, " ").trim();
+  const known =
+    raw.match(/Grok Build usage balance exhausted/i)?.[0] ??
+    raw.match(/usage balance exhausted/i)?.[0] ??
+    raw.match(/balance exhausted/i)?.[0] ??
+    raw.match(/Payment Required/i)?.[0] ??
+    raw.match(/quota exceeded/i)?.[0] ??
+    raw.match(/out of (?:credits|quota|balance)/i)?.[0];
+  const text = known ?? raw;
+  return text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+}
+
+/** Shown when auto-rotate swaps login mid-turn and retries on the new account. */
+export function formatAccountSwitchNotice(label: string, error: Error): string {
+  return [
+    `\u{1F504} Account switched to ${label}`,
+    `because of: ${shortSwitchReason(error)}`,
+    "",
+    "Restarting Grok CLI with the new login and retrying\u2026",
+  ].join("\n");
+}

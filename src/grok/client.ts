@@ -46,6 +46,14 @@ const TRANSIENT_RE =
   /internal error|high volume|experiencing|overloaded|temporar|unavailable|rate.?limit|too many requests|try again|capacity|dispatch failure|response stream|connection (?:reset|closed|refused|error)|reset by peer|broken pipe|socket hang ?up|econnreset|econnrefused|enotfound|eai_again|etimedout|\b50[234]\b|\b429\b/i;
 const CONTEXT_EXHAUSTED_RE =
   /context (?:length|window|limit|size|overflow)|maximum context|input (?:is )?too long|prompt (?:is )?too long|too many (?:input )?tokens|token limit|exceeds? (?:the )?(?:maximum|context|token)|reduce the (?:length|size)|context.{0,24}exhaust/i;
+/**
+ * Permanent-for-this-login billing/quota failures (e.g. HTTP 402 "Grok Build
+ * usage balance exhausted"). These ride inside ACP Internal error [-32603] but
+ * must NOT be backoff-retried on the same account — only account rotation can
+ * recover.
+ */
+const ACCOUNT_EXHAUSTED_RE =
+  /\b402\b|payment required|balance exhausted|usage balance|out of (?:credits|quota|balance)|insufficient (?:credits|balance|quota)|quota exceeded|no (?:remaining )?credits/i;
 
 export class GrokError extends Error {
   constructor(
@@ -58,7 +66,35 @@ export class GrokError extends Error {
   }
 }
 
+/**
+ * True when the failure is a billing/quota exhaustion for the active Grok
+ * login (HTTP 402, "balance exhausted", etc.). Same-account retries cannot
+ * help; the turn should stop (or auto-rotate to another saved account).
+ */
+export function isAccountExhaustedError(err: Error): boolean {
+  if (ACCOUNT_EXHAUSTED_RE.test(err.message)) return true;
+  const data = (err as GrokError).data;
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  const status = d.http_status ?? d.status ?? d.statusCode;
+  if (status === 402 || status === "402") return true;
+  if (typeof d.message === "string" && ACCOUNT_EXHAUSTED_RE.test(d.message)) return true;
+  // Nested JSON sometimes lands as a stringified payload inside `data`.
+  for (const v of Object.values(d)) {
+    if (typeof v === "string" && ACCOUNT_EXHAUSTED_RE.test(v)) return true;
+    if (v && typeof v === "object") {
+      const nested = v as Record<string, unknown>;
+      const ns = nested.http_status ?? nested.status ?? nested.statusCode;
+      if (ns === 402 || ns === "402") return true;
+      if (typeof nested.message === "string" && ACCOUNT_EXHAUSTED_RE.test(nested.message)) return true;
+    }
+  }
+  return false;
+}
+
 export function isTransientError(err: Error): boolean {
+  // Balance/quota exhaustion is permanent for this login — never backoff-retry.
+  if (isAccountExhaustedError(err)) return false;
   const code = (err as GrokError).code;
   if (typeof code === "number" && TRANSIENT_CODES.has(code)) return true;
   return TRANSIENT_RE.test(err.message);
