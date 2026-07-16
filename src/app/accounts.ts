@@ -32,6 +32,11 @@ export interface StoredAccount {
   startUrl?: string;
   accountType?: string;
   region?: string;
+  /** Excluded from automatic rotation after an account-specific quota/billing failure. */
+  warning?: {
+    reason: string;
+    markedAt: string;
+  };
 }
 
 interface AccountsData {
@@ -171,6 +176,9 @@ export class AccountManager {
       email: (email && email.includes("@") ? email : undefined) || existing?.email,
       startUrl: (email && email.includes("@") ? email : undefined) || existing?.email || existing?.startUrl,
       savedAt: new Date().toISOString(),
+      // Automatic pre-rotation snapshots must not silently re-enable an
+      // account that was quarantined after a quota/billing failure.
+      warning: existing?.warning,
     };
     this.store.update((d) => {
       const idx = d.accounts.findIndex((a) => a.id === id);
@@ -222,6 +230,33 @@ export class AccountManager {
       if (a) {
         a.label = clean;
         updated = a;
+      }
+    });
+    return updated;
+  }
+
+  /** Mark an account as unsuitable for future automatic rotations. */
+  markWarning(id: string, reason: string): StoredAccount | undefined {
+    let updated: StoredAccount | undefined;
+    this.store.update((d) => {
+      const account = d.accounts.find((a) => a.id === id);
+      if (account) {
+        account.warning = { reason, markedAt: new Date().toISOString() };
+        updated = account;
+      }
+    });
+    if (updated) log.warn(`marked account ${updated.label} with rotation warning: ${reason}`);
+    return updated;
+  }
+
+  /** Re-allow a manually restored account to participate in auto-rotation. */
+  clearWarning(id: string): StoredAccount | undefined {
+    let updated: StoredAccount | undefined;
+    this.store.update((d) => {
+      const account = d.accounts.find((a) => a.id === id);
+      if (account?.warning) {
+        delete account.warning;
+        updated = account;
       }
     });
     return updated;

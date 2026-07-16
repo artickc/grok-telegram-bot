@@ -43,7 +43,7 @@ export interface SessionMetadata {
 
 const TRANSIENT_CODES = new Set([-32603, -32500, -32000, 500, 502, 503, 504, 429]);
 const TRANSIENT_RE =
-  /internal error|high volume|experiencing|overloaded|temporar|unavailable|rate.?limit|too many requests|try again|capacity|dispatch failure|response stream|connection (?:reset|closed|refused|error)|reset by peer|broken pipe|socket hang ?up|econnreset|econnrefused|enotfound|eai_again|etimedout|\b50[234]\b|\b429\b/i;
+  /internal error|high volume|experiencing|overloaded|temporar|unavailable|rate.?limit|too many requests|try again|capacity|dispatch failure|response stream|empty agent response|connection (?:reset|closed|refused|error)|reset by peer|broken pipe|socket hang ?up|econnreset|econnrefused|enotfound|eai_again|etimedout|\b50[234]\b|\b429\b/i;
 const CONTEXT_EXHAUSTED_RE =
   /context (?:length|window|limit|size|overflow)|maximum context|input (?:is )?too long|prompt (?:is )?too long|too many (?:input )?tokens|token limit|exceeds? (?:the )?(?:maximum|context|token)|reduce the (?:length|size)|context.{0,24}exhaust/i;
 /**
@@ -54,6 +54,10 @@ const CONTEXT_EXHAUSTED_RE =
  */
 const ACCOUNT_EXHAUSTED_RE =
   /\b402\b|payment required|balance exhausted|usage balance|out of (?:credits|quota|balance)|insufficient (?:credits|balance|quota)|quota exceeded|no (?:remaining )?credits/i;
+/** Account-level authorization failures from the Grok CLI proxy. A different
+ * saved login may be permitted, while same-account retries cannot help. */
+const ACCOUNT_ACCESS_DENIED_RE =
+  /\b403\b|forbidden|access denied/i;
 
 export class GrokError extends Error {
   constructor(
@@ -92,9 +96,36 @@ export function isAccountExhaustedError(err: Error): boolean {
   return false;
 }
 
+/**
+ * True when the active saved login cannot serve the request: either its Grok
+ * Build quota is exhausted (402), or the proxy rejects it as unauthorized
+ * (403 / Forbidden / Access denied). Both must skip same-account backoff and
+ * trigger account rotation when enabled.
+ */
+export function isAccountRotationError(err: Error): boolean {
+  if (isAccountExhaustedError(err) || ACCOUNT_ACCESS_DENIED_RE.test(err.message)) return true;
+  const data = (err as GrokError).data;
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  const status = d.http_status ?? d.status ?? d.statusCode;
+  if (status === 403 || status === "403") return true;
+  if (typeof d.message === "string" && ACCOUNT_ACCESS_DENIED_RE.test(d.message)) return true;
+  for (const value of Object.values(d)) {
+    if (typeof value === "string" && ACCOUNT_ACCESS_DENIED_RE.test(value)) return true;
+    if (value && typeof value === "object") {
+      const nested = value as Record<string, unknown>;
+      const nestedStatus = nested.http_status ?? nested.status ?? nested.statusCode;
+      if (nestedStatus === 403 || nestedStatus === "403") return true;
+      if (typeof nested.message === "string" && ACCOUNT_ACCESS_DENIED_RE.test(nested.message)) return true;
+    }
+  }
+  return false;
+}
+
 export function isTransientError(err: Error): boolean {
-  // Balance/quota exhaustion is permanent for this login — never backoff-retry.
-  if (isAccountExhaustedError(err)) return false;
+  // Quota exhaustion and access denial are permanent for this login — rotate,
+  // never back off and retry the same credentials.
+  if (isAccountRotationError(err)) return false;
   const code = (err as GrokError).code;
   if (typeof code === "number" && TRANSIENT_CODES.has(code)) return true;
   return TRANSIENT_RE.test(err.message);

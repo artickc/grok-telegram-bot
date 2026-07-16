@@ -17,7 +17,7 @@ import type { BotDeps } from "../deps.js";
 const log = createLogger("accounts");
 
 function accountLine(a: StoredAccount, active: boolean): string {
-  const mark = active ? "\u2705 " : "\u{1F464} ";
+  const mark = a.warning ? "\u26A0\uFE0F " : active ? "\u2705 " : "\u{1F464} ";
   return `${mark}${a.label}`;
 }
 
@@ -51,15 +51,18 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
   if (list.length === 0) {
     lines.push("No saved accounts yet.", "", "Save the current login below, or sign in via /reauth.");
   } else {
-    for (const a of list) lines.push(accountLine(a, a.id === active));
+    for (const a of list) {
+      lines.push(accountLine(a, a.id === active));
+      if (a.warning) lines.push("  \u2514 Skipped by auto-rotate after an account access or quota error.");
+    }
   }
   const rotate = deps.accounts.autoRotateEnabled();
   lines.push(
     "",
     `\u{1F501} Auto-rotate on errors: ${rotate ? "ON" : "OFF"}`,
     rotate
-      ? "  \u2514 On give-up / 402 balance exhausted: stop CLI, swap auth, restart, retry each account once."
-      : "  \u2514 Turns stay on the active account (402 balance exhausted stops immediately).",
+      ? "  \u2514 On account access/quota errors: stop CLI, swap auth, restart, retry each eligible account once. \u26A0\uFE0F accounts are skipped."
+      : "  \u2514 Turns stay on the active account (account access/quota errors stop immediately).",
   );
   if (note) lines.push("", note);
 
@@ -70,6 +73,7 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
       .text("\u270F\uFE0F", `acct:rename:${a.id}`)
       .text("\u{1F5D1}", `acct:del:${a.id}`)
       .row();
+    if (a.warning) kb.text(`\u26A0\uFE0F Re-enable ${trim(a.label)}`, `acct:clearwarning:${a.id}`).row();
   }
   kb.text("\u{1F4BE} Save current login", "acct:save").text("\u270F\uFE0F Save as\u2026", "acct:saveas").row();
   kb.text("\u{1F4E5} Import existing", "acct:import").text("\u{1F511} Sign in\u2026", "acct:login").row();
@@ -159,6 +163,13 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
   bot.callbackQuery(/^acct:rename:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     await promptName(ctx, "rename", ctx.match![1]!);
+  });
+
+  bot.callbackQuery(/^acct:clearwarning:(.+)$/, async (ctx) => {
+    const id = ctx.match![1]!;
+    const account = deps.accounts.clearWarning(id);
+    await ctx.answerCallbackQuery({ text: account ? "Account re-enabled for auto-rotate" : "No warning to clear" });
+    await rerender(ctx, deps, account ? `\u2705 ${account.label} can be used by auto-rotate again.` : undefined);
   });
 
   bot.callbackQuery("acct:close", async (ctx) => {

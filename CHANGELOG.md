@@ -9,6 +9,26 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-07-16
+
+### Fixed
+
+- **🚫 Rotate immediately on Grok access denial.** API `403 Forbidden` / `Access
+  denied` responses now bypass same-account retry backoff, mark the failed
+  login with `⚠️`, and rotate to the next eligible saved account. If the active
+  host login was not already saved (for example after an external sign-in or
+  token refresh), it is captured first so the warning is visible and persists.
+- **🔐 Isolated Grok Telegram identity.** The Grok bot now takes its Telegram
+  token from its own instance `.env` before considering an inherited process
+  environment value. This prevents a machine-wide token for a sibling bot from
+  making Grok poll as Codex/Kiro/OpenCode and causing Telegram conflicts.
+- **⚠️ Persistent account warnings.** Account access/quota failures are shown
+  in `/accounts`, excluded from later automatic rotations, and can be manually
+  re-enabled after the account is repaired.
+- **🛟 No false success for silent ACP turns.** A Grok ACP completion with no
+  text, thought, or tool update is now treated as a recoverable agent failure
+  instead of reporting `Done · no text output`.
+
 ## [2.2.3] - 2026-07-13
 
 ### Fixed
