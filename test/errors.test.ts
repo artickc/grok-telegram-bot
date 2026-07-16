@@ -3,10 +3,14 @@ import { test } from "node:test";
 import {
   GrokError,
   isAccountExhaustedError,
+  isAccountRotationError,
   isContextExhaustedError,
   isTransientError,
 } from "../src/grok/client.js";
 import { formatAccountSwitchNotice, shortSwitchReason } from "../src/bot/prompt-retry.js";
+import { AccountRotatorImpl } from "../src/bot/account-rotator.js";
+import type { AccountManager } from "../src/app/accounts.js";
+import type { GrokClient } from "../src/grok/client.js";
 
 test("isTransientError detects throttling and 5xx/429", () => {
   assert.ok(isTransientError(new Error("high volume of traffic, try again")));
@@ -14,6 +18,7 @@ test("isTransientError detects throttling and 5xx/429", () => {
   assert.ok(isTransientError(new Error("429 too many requests")));
   assert.ok(isTransientError(new GrokError("boom", 503)));
   assert.ok(isTransientError(new Error("ECONNRESET")));
+  assert.ok(isTransientError(new Error("Empty agent response — Grok ended the turn without any output or tool activity")));
   assert.equal(isTransientError(new Error("syntax error in your prompt")), false);
 });
 
@@ -54,6 +59,13 @@ test("402 balance exhausted is NOT transient (no same-account backoff retry)", (
   assert.equal(isTransientError(new Error(BALANCE_MSG)), false);
 });
 
+test("403 access denied is an account-rotation error, not a transient retry", () => {
+  const message = 'Internal error [-32603] — {"message":"API error (status 403 Forbidden): Access denied","http_status":403}';
+  assert.ok(isAccountRotationError(new Error(message)));
+  assert.ok(isAccountRotationError(new GrokError("Internal error", -32603, { http_status: 403 })));
+  assert.equal(isTransientError(new Error(message)), false);
+});
+
 test("account switch notice includes label and reason", () => {
   const notice = formatAccountSwitchNotice("work@x.ai", new Error(BALANCE_MSG));
   assert.match(notice, /Account switched to work@x\.ai/);
@@ -61,4 +73,40 @@ test("account switch notice includes label and reason", () => {
   assert.match(notice, /balance exhausted/i);
   assert.match(notice, /Restarting Grok CLI/i);
   assert.match(shortSwitchReason(new Error(BALANCE_MSG)), /balance exhausted/i);
+});
+
+test("auto-rotation skips warned accounts and can mark the active account", async () => {
+  const marked: Array<{ id: string; reason: string }> = [];
+  const accounts = {
+    list: () => [
+      { id: "active", label: "Active" },
+      { id: "warned", label: "Warned", warning: { reason: "quota", markedAt: "2026-01-01T00:00:00Z" } },
+      { id: "eligible", label: "Eligible" },
+    ],
+    activeAccountId: () => "active",
+    autoRotateEnabled: () => true,
+    markWarning: (id: string, reason: string) => marked.push({ id, reason }),
+  } as unknown as AccountManager;
+  const rotator = new AccountRotatorImpl(accounts, {} as GrokClient);
+
+  assert.deepEqual(await rotator.targets(), [{ id: "eligible", label: "Eligible" }]);
+  await rotator.markFailed(undefined, "balance exhausted");
+  await rotator.markFailed("eligible", "quota exceeded");
+  assert.deepEqual(marked, [
+    { id: "active", reason: "balance exhausted" },
+    { id: "eligible", reason: "quota exceeded" },
+  ]);
+});
+
+test("auto-rotation captures an unmatched host login before warning it", async () => {
+  const marked: Array<{ id: string; reason: string }> = [];
+  const accounts = {
+    activeAccountId: () => undefined,
+    captureCurrent: async () => ({ id: "captured", label: "Host login" }),
+    markWarning: (id: string, reason: string) => marked.push({ id, reason }),
+  } as unknown as AccountManager;
+  const rotator = new AccountRotatorImpl(accounts, {} as GrokClient);
+
+  await rotator.markFailed(undefined, "Access denied");
+  assert.deepEqual(marked, [{ id: "captured", reason: "Access denied" }]);
 });

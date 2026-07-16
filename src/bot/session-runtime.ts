@@ -8,7 +8,7 @@ import { basename } from "node:path";
 import { type Api, InlineKeyboard } from "grammy";
 import {
   type GrokClient,
-  isAccountExhaustedError,
+  isAccountRotationError,
   isContextExhaustedError,
   isTransientError,
   type SessionMetadata,
@@ -101,6 +101,8 @@ export class SessionRuntime {
   private turnReplyTo: number | undefined;
   private imageScanText = "";
   private sentImagesThisTurn = new Set<string>();
+  /** Monotonic count used to reject ACP "success" responses with no turn updates. */
+  private sessionUpdateCount = 0;
   private readonly listener: (sessionId: string, update: SessionUpdate) => void;
   private primingContext: string | undefined;
   private watcher: TailWatcher | undefined;
@@ -692,6 +694,14 @@ export class SessionRuntime {
   ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
     const rotator = this.accountRotator;
     if (!rotator?.enabled() || !final.error || this.cancelled) return undefined;
+    // A quota-exhausted or access-denied response cannot be recovered by retrying
+    // this login. Quarantine it before choosing targets, so later rotations do not
+    // cycle back to a known-bad account. This intentionally happens before the
+    // partial-stream guard: we must not retry/rotate a partial reply, but its
+    // account still needs to be skipped during a future rotation.
+    if (isAccountRotationError(final.error)) {
+      await rotator.markFailed(undefined, final.error.message);
+    }
     if (this.streamer?.hasOutput ?? false) return undefined;
     const targets = await rotator.targets().catch(() => [] as { id: string; label: string }[]);
     if (targets.length === 0) return undefined;
@@ -730,7 +740,7 @@ export class SessionRuntime {
       });
       log.info(
         `chat ${this.chatId} auto-rotating to account ${t.label}` +
-          (isAccountExhaustedError(failReason) ? " (billing/quota exhausted on previous)" : ""),
+          (isAccountRotationError(failReason) ? " (previous account unavailable)" : ""),
       );
       // runPromptWithRetries already skips backoff for 402 / balance exhausted.
       last = await this.runPromptWithRetries(content);
@@ -739,6 +749,9 @@ export class SessionRuntime {
           await this.notify(`\u2705 Recovered on ${t.label}.`, { replyTo: this.turnReplyTo });
         }
         return last;
+      }
+      if (last.error && isAccountRotationError(last.error)) {
+        await rotator.markFailed(t.id, last.error.message);
       }
       if (this.cancelled || (this.streamer?.hasOutput ?? false)) return last;
       errors.push(`\u2022 ${t.label}: ${last.error?.message ?? "failed"}`);
@@ -767,7 +780,16 @@ export class SessionRuntime {
     for (;;) {
       attempt++;
       try {
+        const updatesBeforePrompt = this.sessionUpdateCount;
         const result = await this.acp.prompt(this.sessionId!, content);
+        // A healthy ACP turn emits at least one session/update (text, thought,
+        // or tool event) before resolving session/prompt. Grok can otherwise
+        // report a successful end-turn after an upstream model failure; never
+        // present that as a completed user request.
+        await sleep(0);
+        if (this.sessionUpdateCount === updatesBeforePrompt) {
+          throw new Error("Empty agent response — Grok ended the turn without any output or tool activity");
+        }
         return { result, attempts: attempt };
       } catch (err) {
         const error = err as Error;
@@ -781,7 +803,7 @@ export class SessionRuntime {
           attempt <= delays.length &&
           canRecover &&
           !forkInstead &&
-          !isAccountExhaustedError(error) &&
+          !isAccountRotationError(error) &&
           isTransientError(error);
         if (!willRetry) return { error, attempts: attempt };
         const waitMs = delays[attempt - 1]!;
@@ -960,6 +982,7 @@ export class SessionRuntime {
 
   private onUpdate(sessionId: string, update: SessionUpdate): void {
     if (!this.busy || sessionId !== this.sessionId) return;
+    this.sessionUpdateCount++;
     const kind = update.sessionUpdate;
 
     // Accumulate the turn's file-change summary + image-scan text even when this

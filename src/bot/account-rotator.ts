@@ -37,6 +37,8 @@ export interface AccountRotator {
   targets(): Promise<RotationTarget[]>;
   /** Make a saved account active (swap auth.json + re-bind). Throws on error. */
   activate(id: string): Promise<void>;
+  /** Quarantine an account after an account-specific failure. Undefined means active. */
+  markFailed(id: string | undefined, reason: string): Promise<void>;
 }
 
 export class AccountRotatorImpl implements AccountRotator {
@@ -52,7 +54,26 @@ export class AccountRotatorImpl implements AccountRotator {
   async targets(): Promise<RotationTarget[]> {
     const list = this.accounts.list();
     const activeId = this.accounts.activeAccountId();
-    return list.filter((a) => a.id !== activeId).map((a) => ({ id: a.id, label: a.label }));
+    return list
+      .filter((a) => a.id !== activeId && !a.warning)
+      .map((a) => ({ id: a.id, label: a.label }));
+  }
+
+  async markFailed(id: string | undefined, reason: string): Promise<void> {
+    let accountId = id ?? this.accounts.activeAccountId();
+    if (!accountId) {
+      // The host may have been signed in or had its token refreshed outside the
+      // bot, so no saved snapshot matches yet. Capture it before marking; this
+      // guarantees the actual failed login appears with a warning in /accounts
+      // and is excluded from the target list below.
+      try {
+        accountId = (await this.accounts.captureCurrent()).id;
+      } catch (error) {
+        log.warn("could not capture active account for rotation warning:", (error as Error).message);
+        return;
+      }
+    }
+    this.accounts.markWarning(accountId, reason);
   }
 
   /**

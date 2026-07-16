@@ -44,9 +44,10 @@ function resolveInstanceDir(): string {
   return CANONICAL_DIR;
 }
 
-// Load .env from the resolved instance directory. dotenv does NOT override
-// variables already present in the environment (the launcher/service env wins).
-loadDotenv({ path: ENV_PATH });
+// Load .env from the resolved instance directory. Keep the parsed values as
+// well: a machine-wide TELEGRAM_BOT_TOKEN may belong to a sibling bot (Codex,
+// Kiro, etc.) and must never override this Grok instance's identity.
+const instanceEnv = loadDotenv({ path: ENV_PATH }).parsed ?? {};
 
 function expandHome(p: string): string {
   if (p === "~") return homedir();
@@ -146,7 +147,10 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
-  const token = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+  // Telegram long polling permits one consumer per token. Prefer the token in
+  // this bot's own instance file over a globally inherited environment value,
+  // otherwise a Grok process can accidentally poll as a sibling bot.
+  const token = (instanceEnv.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "").trim();
   if (!token) {
     throw new Error(
       "TELEGRAM_BOT_TOKEN is missing. Copy .env.example to .env and set it (run `npm run setup`).",
