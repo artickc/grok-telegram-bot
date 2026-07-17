@@ -275,16 +275,25 @@ caption. The bot downloads them and attaches them all to the prompt as image
 content blocks, so the agent can analyze them together. Images sent while Grok
 is busy are queued with your next turn.
 
-**Images come back too:** when the agent produces images during a turn (e.g.
-takes screenshots while testing an app), the bot detects the freshly-written
-files and sends them back to Telegram automatically (`SEND_AGENT_IMAGES`).
+**Images come back too:** when the agent produces images during a turn — Imagine
+`image_gen` / `image_edit` (written under
+`~/.grok/sessions/<cwd>/<session>/images/` and `…/assets/`), screenshots, or
+files under `<project>/images/` — the bot detects the freshly-written files and
+sends them back to Telegram as **downloadable documents** (`SEND_AGENT_IMAGES`,
+default on). Prompts also include image-output rules so the agent keeps gens in
+the session media folder and reports absolute paths.
 
 ## 🎙 Sending voice
 
-Send a voice note (or audio file) and the bot transcribes it and runs it as a
-prompt. Configure any OpenAI/Whisper-compatible endpoint via `STT_API_URL` in
-`.env`; leave `STT_LANGUAGE` blank for automatic detection (English, Russian,
-Romanian/Moldovan, and ~100 more).
+Send a voice note, audio file, or video note and the bot runs it as a prompt
+**only when STT is configured**.
+
+Set any OpenAI/Whisper-compatible endpoint via `STT_API_URL` (and `STT_API_KEY`
+if needed). The bot transcribes, shows the quote, and submits plain text.
+Without `STT_API_URL`, voice is rejected with a short “not configured” message
+— Grok Build CLI rejects ACP `audio` content blocks, so raw audio cannot be
+heard by the agent. Leave `STT_LANGUAGE` blank for automatic detection
+(English, Russian, Romanian/Moldovan, and ~100 more).
 
 ## 📎 Sending files
 
@@ -530,7 +539,8 @@ user. See [SECURITY.md](./SECURITY.md) for the full model.
 - [x] Multi-image prompts (albums)
 - [x] Combined, throttled output (anti-spam)
 - [x] 24/7 cross-platform background service
-- [x] Voice messages → speech-to-text → prompt (multi-language)
+- [x] Voice messages → STT (`STT_API_URL`) → text prompt (disabled without STT)
+- [x] Agent-generated images → Telegram document files (session `images/`/`assets/`)
 - [x] Context-usage % in the status panel
 - [x] Inline approvals — approve/deny risky tools from buttons (non trust-all mode)
 - [x] Session auto-approve + pinned permission prompts

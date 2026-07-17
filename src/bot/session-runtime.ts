@@ -31,7 +31,8 @@ import { type FileOp, fileOpFromUpdate, mergeFileOp, summarizeFileOps, summarize
 import { isActiveStatus, renderSubagentTransition, statusKey } from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
 import { ResponseStreamer } from "../stream/streamer.js";
-import { extractImagePaths, sendImages } from "./image-return.js";
+import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
+import { collectTurnImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
 import {
   backoffSchedule,
@@ -216,8 +217,11 @@ export class SessionRuntime {
       this.typing.stop();
       this.stopWatch();
       if (this.streamer) {
-        await this.streamer.finalize().catch(() => {});
+        // Finalize off the critical path so project/session switches never wait
+        // on Telegram edits of the previous live stream.
+        const prev = this.streamer;
         this.streamer = undefined;
+        void prev.finalize().catch(() => {});
       }
     }
     this.changed();
@@ -514,6 +518,7 @@ export class SessionRuntime {
     const content = buildContentBlocks(input, {
       reasoning: reasoningDirective(this.reasoning),
       priming: this.primingContext,
+      imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
       progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     this.primingContext = undefined;
@@ -670,6 +675,7 @@ export class SessionRuntime {
     const forkContent = buildContentBlocks(input, {
       reasoning: reasoningDirective(this.reasoning),
       priming: transcript ? buildPriming(transcript) : undefined,
+      imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
       progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     return this.runPromptWithRetries(forkContent);
@@ -736,7 +742,8 @@ export class SessionRuntime {
       const content = buildContentBlocks(input, {
         reasoning: reasoningDirective(this.reasoning),
         priming: transcript ? buildPriming(transcript) : undefined,
-        progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+        imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
+      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
       log.info(
         `chat ${this.chatId} auto-rotating to account ${t.label}` +
@@ -859,6 +866,7 @@ export class SessionRuntime {
     const delays = this.cfg.promptRetryAttempts > 0 ? backoffSchedule(this.cfg.promptRetryAttempts) : [RETRY_BASE_MS];
     const resumeContent = buildContentBlocks(textPrompt(RESUME_INSTRUCTION), {
       reasoning: reasoningDirective(this.reasoning),
+      imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
       progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
 
@@ -888,17 +896,26 @@ export class SessionRuntime {
     return last;
   }
 
-  /** Send any fresh images the agent produced this turn (screenshots, etc.). */
+  /** Send any fresh images the agent produced this turn (Imagine, screenshots…). */
   private async sendTurnImages(): Promise<void> {
-    if (!this.cfg.sendAgentImages || !this.imageScanText) return;
-    const paths = extractImagePaths(this.imageScanText, this.cwd);
+    if (!this.cfg.sendAgentImages) return;
+    // Always check session images/ + assets/ even when the agent never named a
+    // path in text — image_gen writes under ~/.grok/sessions/.../images/.
+    const paths = collectTurnImagePaths({
+      scanText: this.imageScanText,
+      cwd: this.cwd,
+      sessionId: this.sessionId,
+      since: this.turnStartedAt,
+    });
     if (paths.length === 0) return;
     try {
-      await sendImages(this.api, this.chatId, paths, {
+      const n = await sendImages(this.api, this.chatId, paths, {
         since: this.turnStartedAt,
         already: this.sentImagesThisTurn,
         max: this.cfg.agentImagesMax,
+        replyTo: this.turnReplyTo,
       });
+      if (n > 0) log.info(`chat ${this.chatId}: sent ${n} agent image file(s)`);
     } catch {
       /* non-fatal */
     }
@@ -991,6 +1008,12 @@ export class SessionRuntime {
     if (kind === "tool_call" || kind === "tool_call_update") {
       if (update.rawInput) this.imageScanText += " " + JSON.stringify(update.rawInput);
       if (update.title) this.imageScanText += " " + update.title;
+      // Tool results often carry the saved path only in content_blocks (Imagine).
+      if (Array.isArray(update.content_blocks)) {
+        this.imageScanText += " " + JSON.stringify(update.content_blocks);
+      }
+      // Some agents put free-form result text on `content`.
+      if (update.content?.text) this.imageScanText += " " + update.content.text;
       const fo = fileOpFromUpdate(update);
       if (fo) this.fileOps.set(fo.path, mergeFileOp(this.fileOps.get(fo.path), fo.op));
     } else if (kind === "agent_message_chunk") {

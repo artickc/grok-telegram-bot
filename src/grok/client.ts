@@ -15,6 +15,7 @@ import { EventEmitter } from "node:events";
 import { createLogger } from "../logger.js";
 import { hasLogin } from "../app/grok-credentials.js";
 import { contextWindowFor, DEFAULT_MODEL, KNOWN_MODELS } from "./models.js";
+import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { SessionLog } from "./session-log.js";
 import { JsonRpcTransport } from "./transport.js";
@@ -728,8 +729,12 @@ export class GrokClient extends EventEmitter {
    *  leading reasoning directive, fork/priming preamble) removed, for a clean log. */
   private cleanUserText(content: ContentBlock[]): string {
     let t = this.visibleText(content);
+    // Strip bot-injected appendices (image rules first, then progress — progress
+    // is always last when both are present).
     const pi = t.indexOf(PROGRESS_DIRECTIVE);
     if (pi !== -1) t = t.slice(0, pi).trimEnd();
+    const ii = t.indexOf(IMAGE_OUTPUT_DIRECTIVE);
+    if (ii !== -1) t = t.slice(0, ii).trimEnd();
     const marker = "User's new message:\n";
     const mi = t.lastIndexOf(marker);
     if (mi !== -1) t = t.slice(mi + marker.length);

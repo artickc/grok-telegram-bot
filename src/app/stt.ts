@@ -1,9 +1,12 @@
 /**
  * Speech-to-text via any OpenAI/Whisper-compatible endpoint.
  *
+ * Required for Telegram voice / audio / video notes: Grok Build CLI over ACP
+ * does not accept audio content blocks, so without STT_API_URL the bot rejects
+ * voice with a "not configured" message instead of attaching unusable audio.
+ *
  * Language handling: when STT_LANGUAGE is unset, Whisper auto-detects the
- * spoken language (covers English, Russian, Romanian/Moldovan, and ~100 more),
- * so multilingual voice notes work out of the box.
+ * spoken language (covers English, Russian, Romanian/Moldovan, and ~100 more).
  */
 import { createLogger } from "../logger.js";
 

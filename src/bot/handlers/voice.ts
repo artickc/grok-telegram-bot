@@ -1,6 +1,10 @@
 /**
  * Voice & audio handler — transcribes Telegram voice notes / audio files to
  * text (any language) and submits them as prompts.
+ *
+ * Requires STT_API_URL (and optionally STT_API_KEY). Grok Build CLI over ACP
+ * does not accept audio content blocks, so without an STT endpoint voice is
+ * disabled rather than attaching raw audio the agent cannot hear.
  */
 import type { Bot, Context } from "grammy";
 import { textPrompt } from "../../app/types.js";
@@ -18,7 +22,9 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
       return;
     }
     if (!deps.stt.enabled) {
-      await ctx.reply("\u{1F399} Voice isn't configured. Set STT_API_URL (and STT_API_KEY) in .env.");
+      await ctx.reply(
+        "\u{1F399} Voice isn't configured. Set STT_API_URL (and STT_API_KEY if needed) in .env.",
+      );
       return;
     }
     await ctx.replyWithChatAction("typing").catch(() => {});
@@ -41,9 +47,20 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
     }
   };
 
-  bot.on("message:voice", (ctx) => handle(ctx, ctx.message.voice.file_id, ctx.message.voice.mime_type || "audio/ogg", "voice.ogg"));
-  bot.on("message:audio", (ctx) => handle(ctx, ctx.message.audio.file_id, ctx.message.audio.mime_type || "audio/mpeg", ctx.message.audio.file_name || "audio.mp3"));
-  bot.on("message:video_note", (ctx) => handle(ctx, ctx.message.video_note.file_id, "video/mp4", "note.mp4"));
+  bot.on("message:voice", (ctx) =>
+    handle(ctx, ctx.message.voice.file_id, ctx.message.voice.mime_type || "audio/ogg", "voice.ogg"),
+  );
+  bot.on("message:audio", (ctx) =>
+    handle(
+      ctx,
+      ctx.message.audio.file_id,
+      ctx.message.audio.mime_type || "audio/mpeg",
+      ctx.message.audio.file_name || "audio.mp3",
+    ),
+  );
+  bot.on("message:video_note", (ctx) =>
+    handle(ctx, ctx.message.video_note.file_id, "video/mp4", "note.mp4"),
+  );
 }
 
 async function download(ctx: Context, fileId: string, token: string): Promise<Buffer | undefined> {

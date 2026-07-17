@@ -60,8 +60,11 @@ export async function sendProjectMenu(
  *  "last used" is the latest of its directory mtime and the newest session
  *  opened in it, so the project you worked in most recently floats to the top. */
 function sortByRecency(entries: ProjectEntry[], deps: BotDeps): ProjectEntry[] {
+  if (entries.length === 0) return entries;
+  // Cap the session scan — full directory walks get expensive as history grows,
+  // and only the freshest sessions matter for ranking.
   const recencyByCwd = new Map<string, number>();
-  for (const s of deps.store.list(300)) {
+  for (const s of deps.store.list(80)) {
     const key = normCwd(s.cwd);
     if (!key) continue;
     const ms = Date.parse(s.updatedAt);
@@ -87,7 +90,8 @@ export async function showProjects(ctx: Context, deps: BotDeps, query?: string):
   if (create) {
     try {
       const entry = deps.projects.create(create[1]!);
-      await deps.registry.controller(ctx.chat!.id).addNew(entry.path, entry.name);
+      // Instant switch — ACP session is created on the first message.
+      await deps.registry.controller(ctx.chat!.id).switchProject(entry.path, entry.name);
       await refreshMenu(ctx, deps, `\u2705 Created and opened ${entry.name}\n${entry.path} \u2014 send a message.`);
     } catch (e) {
       await deps.ephemeral.open(ctx);
@@ -132,7 +136,7 @@ async function openProjectPath(ctx: Context, deps: BotDeps, raw: string): Promis
   await deps.ephemeral.open(ctx);
   const name = basename(dir) || dir;
   try {
-    await deps.registry.controller(ctx.chat!.id).addNew(dir, name);
+    await deps.registry.controller(ctx.chat!.id).switchProject(dir, name);
     await refreshMenu(ctx, deps, `\u{1F4C1} Now working in ${name}\n${dir} \u2014 send a message.`);
   } catch (e) {
     await deps.ephemeral.reply(ctx, `\u274C Could not open ${dir}: ${(e as Error).message}`);
@@ -171,10 +175,12 @@ export function registerProjects(bot: Bot, deps: BotDeps): void {
       await ctx.answerCallbackQuery({ text: "Selection expired, run /projects again." });
       return;
     }
-    await ctx.answerCallbackQuery();
+    // Answer immediately (before any work) so Telegram never times out the query.
+    await ctx.answerCallbackQuery({ text: `Opening ${entry.name}\u2026` });
     await deps.ephemeral.clear(ctx.chat!.id); // remove the project picker
     try {
-      await deps.registry.controller(ctx.chat!.id).addNew(entry.path, entry.name);
+      // Instant: no ACP session/new — live session is created on first message.
+      await deps.registry.controller(ctx.chat!.id).switchProject(entry.path, entry.name);
       await refreshMenu(ctx, deps, `\u{1F4C1} Now working in ${entry.name} \u2014 send a message.`);
     } catch (err) {
       await ctx.reply(`\u274C Could not open ${entry.name}: ${(err as Error).message}`);

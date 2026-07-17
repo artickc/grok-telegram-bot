@@ -79,16 +79,65 @@ export class ChatController {
     }));
   }
 
-  /** Start a brand-new session and bring it to the foreground. */
+  /** Start a brand-new session and bring it to the foreground.
+   *  Always binds a live ACP session (`session/new`) — use {@link switchProject}
+   *  when you only need to change the working directory (instant). */
   async addNew(cwd: string, projectName?: string): Promise<SessionRuntime> {
     this.ensureRestored();
     const prevFg = this.fg;
     const rt = this.create({ cwd, projectName });
     this.runtimes.push(rt);
     this.fg = rt;
-    await this.background(prevFg);
+    // Fire-and-forget: finalizing the previous streamer must not block the new
+    // session bind (that was a major source of "bot freezes on switch").
+    void this.background(prevFg);
     await rt.startNewSession(cwd, projectName);
     this.markSeen(rt);
+    this.persist();
+    return rt;
+  }
+
+  /**
+   * Switch the chat to a project directory **without** waiting on ACP.
+   * - Reuses an existing controlled runtime for the same path when possible.
+   * - Does **not** call `session/new` — the live session is created lazily on
+   *   the first prompt / prepare (via `ensureSession`).
+   * This keeps the project picker responsive even while another turn is running.
+   */
+  async switchProject(cwd: string, projectName?: string): Promise<SessionRuntime> {
+    this.ensureRestored();
+    const key = normPath(cwd);
+    const same = this.runtimes.filter((r) => normPath(r.cwd) === key);
+    // Prefer the current FG if it already points here, else the most recent match.
+    const existing = same.find((r) => r === this.fg) ?? same.at(-1);
+
+    if (existing) {
+      if (projectName) existing.projectName = projectName;
+      if (existing === this.fg) {
+        this.persist();
+        return existing;
+      }
+      if (existing.sessionId) {
+        // Fast path: switchTo no longer awaits ACP re-bind.
+        const sw = await this.switchTo(existing.sessionId);
+        return sw?.rt ?? existing;
+      }
+      void this.background(this.fg);
+      this.fg = existing;
+      await existing.setForeground(true);
+      this.persist();
+      return existing;
+    }
+
+    const prevFg = this.fg;
+    const rt = this.create({ cwd, projectName });
+    this.runtimes.push(rt);
+    this.fg = rt;
+    void this.background(prevFg);
+    // Drop other never-used project placeholders (no session yet) so rapid
+    // project browsing can't accumulate infinite idle runtimes/listeners.
+    this.pruneUnusedPlaceholders(rt);
+    // No startNewSession — sessionId stays undefined until the first message.
     this.persist();
     return rt;
   }
@@ -114,7 +163,7 @@ export class ChatController {
     const rt = this.create({ cwd, projectName, sessionId });
     this.runtimes.push(rt);
     this.fg = rt;
-    await this.background(prevFg);
+    void this.background(prevFg);
     const result = await rt.attach(sessionId, cwd, projectName, priorEntries);
     this.markSeen(rt);
     this.persist();
@@ -131,8 +180,8 @@ export class ChatController {
     const rt = this.create({ cwd, projectName, sessionId });
     this.runtimes.push(rt);
     this.fg = rt;
-    await this.background(prevFg);
-    await rt.prepare().catch(() => {});
+    void this.background(prevFg);
+    // Lazy re-bind on first prompt (rebindPending); don't block the resume UI.
     const path = this.store.jsonlPath(sessionId);
     const unread = readHistory(path, 12);
     this.lastRead.set(sessionId, jsonlSize(path));
@@ -148,10 +197,12 @@ export class ChatController {
     if (rt === this.fg) {
       return { rt, sessionId, projectName: rt.projectName, busy: rt.isBusy, unread: [], firstView: false, alreadyForeground: true };
     }
-    await this.background(this.fg);
+    void this.background(this.fg);
     this.fg = rt;
     await rt.setForeground(true);
-    await rt.prepare().catch(() => {});
+    // Do NOT await prepare()/loadSession here — re-bind is lazy on the next
+    // prompt (rebindPending). Awaiting ACP mid-switch freezes the bot when the
+    // agent is busy with another turn.
 
     const path = this.store.jsonlPath(sessionId);
     const seen = this.lastRead.get(sessionId);
@@ -222,8 +273,23 @@ export class ChatController {
       seen.add(cs.sessionId);
       this.runtimes.push(this.create({ cwd: cs.projectPath, projectName: cs.projectName, sessionId: cs.sessionId }));
     }
+    // Lazy project switches persist projectPath without a sessionId. If the
+    // saved project is not among controlled sessions, recreate an unbound FG
+    // so a restart lands on the project the user last chose.
+    if (s.projectPath) {
+      const key = normPath(s.projectPath);
+      const hasProject = this.runtimes.some((r) => normPath(r.cwd) === key);
+      if (!hasProject) {
+        this.runtimes.push(this.create({ cwd: s.projectPath, projectName: s.projectName }));
+      }
+    }
     if (this.runtimes.length > 0) {
-      const fg = this.runtimes.find((r) => r.sessionId === s.foregroundSessionId) ?? this.runtimes[0]!;
+      let fg = this.runtimes.find((r) => r.sessionId && r.sessionId === s.foregroundSessionId);
+      if (!fg && s.projectPath) {
+        const key = normPath(s.projectPath);
+        fg = this.runtimes.find((r) => normPath(r.cwd) === key);
+      }
+      fg = fg ?? this.runtimes[0]!;
       for (const r of this.runtimes) void r.setForeground(r === fg);
       this.fg = fg;
     }
@@ -284,6 +350,17 @@ export class ChatController {
     await rt.setForeground(false);
   }
 
+  /** Remove idle runtimes that never bound an ACP session (lazy project taps). */
+  private pruneUnusedPlaceholders(keep: SessionRuntime): void {
+    for (let i = this.runtimes.length - 1; i >= 0; i--) {
+      const r = this.runtimes[i]!;
+      if (r === keep || r === this.fg) continue;
+      if (r.sessionId || r.isBusy) continue;
+      r.dispose();
+      this.runtimes.splice(i, 1);
+    }
+  }
+
   private markSeen(rt: SessionRuntime): void {
     if (rt.sessionId) this.lastRead.set(rt.sessionId, jsonlSize(this.store.jsonlPath(rt.sessionId)));
   }
@@ -314,4 +391,9 @@ export class ChatController {
       projectName: this.fg?.projectName,
     });
   }
+}
+
+/** Path key for project matching (case / separators / trailing slash). */
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }

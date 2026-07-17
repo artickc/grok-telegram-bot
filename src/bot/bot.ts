@@ -20,6 +20,7 @@ import { TaskRunner } from "../tasks/runner.js";
 import { Scheduler } from "../tasks/scheduler.js";
 import { TaskStore } from "../tasks/store.js";
 import { createAuthMiddleware } from "./auth.js";
+import { isStaleCallbackError, safeCallbackMiddleware } from "./callback.js";
 import { COMMANDS } from "./commands.js";
 import { type BotDeps, MenuCache } from "./deps.js";
 import { registerControl } from "./handlers/control.js";
@@ -139,6 +140,9 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   bot.on("message:pinned_message", (ctx) => void ctx.deleteMessage().catch(() => {}));
 
   bot.use(createAuthMiddleware(cfg));
+  // Answer callback queries safely: never throw on stale IDs, auto-answer if a
+  // handler forgets (prevents the loading spinner + unhandled 400 noise).
+  bot.use(safeCallbackMiddleware());
 
   // Keep history clean: after handling, delete the user's command (/…) and
   // persistent-bar button taps. Plain prompts and wizard input are kept.
@@ -188,6 +192,12 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   registerMessages(bot, deps); // catch-all text prompt — keep last
 
   bot.catch((err) => {
+    // Stale callback answers are expected when the bot was busy past Telegram's
+    // ~timeout — middleware already swallows most of them; keep noise out of ERROR.
+    if (isStaleCallbackError(err.error)) {
+      log.debug("stale callback query:", err.error instanceof Error ? err.error.message : err.error);
+      return;
+    }
     log.error("unhandled bot error:", err.error instanceof Error ? err.error.message : err.error);
   });
 

@@ -26,12 +26,23 @@ export interface JsonRpcNotification {
 
 export type JsonRpcMessage = JsonRpcResponse & JsonRpcNotification & { method?: string };
 
-/** A content block in a prompt or message. */
+/** A content block in a prompt or message (ACP ContentBlock subset). */
 export interface ContentBlock {
-  type: "text" | "image" | "resource";
+  type: "text" | "image" | "audio" | "resource" | "resource_link";
   text?: string;
   data?: string;
   mimeType?: string;
+  /** resource_link */
+  uri?: string;
+  name?: string;
+  size?: number;
+  /** embedded resource */
+  resource?: {
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+  };
   [k: string]: unknown;
 }
 
@@ -47,7 +58,11 @@ export interface InitializeResult {
   authMethods?: AuthMethod[];
   agentCapabilities?: {
     loadSession?: boolean;
-    promptCapabilities?: { image?: boolean };
+    promptCapabilities?: {
+      image?: boolean;
+      audio?: boolean;
+      embeddedContext?: boolean;
+    };
   };
   agentInfo?: { name?: string; version?: string };
 }

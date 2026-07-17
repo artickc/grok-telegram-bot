@@ -56,8 +56,10 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
   bot.callbackQuery(/^agent:set:(\d+)$/, async (ctx) => {
     const mode = deps.acp.availableModes[Number(ctx.match![1])];
     if (!mode) return void ctx.answerCallbackQuery({ text: "Expired, tap Agent again." });
+    // Answer before ACP so a slow setMode never expires the callback query.
+    await ctx.answerCallbackQuery({ text: `\u{1F916} Agent: ${mode.name}` });
     await deps.registry.get(ctx.chat!.id).setAgentPref(mode.id);
-    await confirm(ctx, deps, `\u{1F916} Agent: ${mode.name}`);
+    await confirmUi(ctx, deps);
   });
 
   // ── Reasoning ──────────────────────────────────────────────────────────────
@@ -71,12 +73,17 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
   bot.callbackQuery(/^model:set:(\d+)$/, async (ctx) => {
     const entry = deps.acp.availableModels[Number(ctx.match![1])];
     if (!entry) return void ctx.answerCallbackQuery({ text: "Expired, tap Model again." });
+    await ctx.answerCallbackQuery({ text: `\u{1F9E9} Model: ${entry.name}` });
     const res = await deps.registry.get(ctx.chat!.id).setModelPref(entry.modelId);
-    await confirm(ctx, deps, res.ok ? `\u{1F9E9} Model: ${entry.name}` : `\u26A0\uFE0F Model set failed: ${res.error}`);
+    if (!res.ok) {
+      await ctx.reply(`\u26A0\uFE0F Model set failed: ${res.error}`).catch(() => {});
+    }
+    await confirmUi(ctx, deps);
   });
   bot.callbackQuery("model:clear", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "\u{1F9E9} Model: default" });
     await deps.registry.get(ctx.chat!.id).setModelPref("");
-    await confirm(ctx, deps, "\u{1F9E9} Model: default");
+    await confirmUi(ctx, deps);
   });
 }
 
@@ -143,15 +150,25 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
       } catch (e) {
         return void ctx.reply(`\u274C ${(e as Error).message}`);
       }
-    case "stop":
-      return void ctx.answerCallbackQuery({ text: (await rt.cancel()) ? "Cancelling\u2026" : "Nothing is running" });
+    case "stop": {
+      // Answer first so a slow cancel never times out the callback query.
+      await ctx.answerCallbackQuery({ text: rt.isBusy ? "Cancelling\u2026" : "Nothing is running" });
+      if (rt.isBusy) await rt.cancel();
+      return;
+    }
     default:
       return void ctx.answerCallbackQuery();
   }
 }
 
 async function confirm(ctx: Context, deps: BotDeps, text: string): Promise<void> {
+  // Toast first (callback must be answered within ~seconds), then UI updates.
   await ctx.answerCallbackQuery({ text });
+  await confirmUi(ctx, deps);
+}
+
+/** Refresh status + reopen the main menu after a preference change. */
+async function confirmUi(ctx: Context, deps: BotDeps): Promise<void> {
   try {
     await ctx.deleteMessage();
   } catch {

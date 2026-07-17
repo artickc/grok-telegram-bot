@@ -37,10 +37,24 @@ export interface PromptImage {
   mimeType: string;
 }
 
-/** A unit of work submitted to the agent: text plus optional images. */
+/**
+ * A file the agent can open (ACP `resource_link`). Used for voice notes and
+ * other binaries when we cannot embed the media as a first-class content type
+ * (Grok CLI currently rejects ACP `audio` blocks).
+ */
+export interface PromptResourceLink {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/** A unit of work submitted to the agent: text plus optional images / links. */
 export interface PromptInput {
   text: string;
   images: PromptImage[];
+  /** Optional file references (voice notes, binaries). */
+  resourceLinks?: PromptResourceLink[];
   /** Telegram message id of the prompt, so the reply threads to it. */
   replyTo?: number;
   /**
@@ -52,5 +66,5 @@ export interface PromptInput {
 }
 
 export function textPrompt(text: string, replyTo?: number, quotedText?: string): PromptInput {
-  return { text, images: [], replyTo, quotedText };
+  return { text, images: [], resourceLinks: [], replyTo, quotedText };
 }

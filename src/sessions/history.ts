@@ -3,6 +3,7 @@
  * Reads only the tail of large logs to stay fast.
  */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { extractProgress, PROGRESS_DIRECTIVE } from "../render/progress.js";
 import type { HistoryEntry, HistoryRole } from "./types.js";
 
@@ -161,6 +162,7 @@ function cleanStoredText(text: string): string {
   if (!text) return text;
   let t = extractProgress(text).cleaned;
   if (t.includes(PROGRESS_DIRECTIVE)) t = t.split(PROGRESS_DIRECTIVE).join("").trim();
+  if (t.includes(IMAGE_OUTPUT_DIRECTIVE)) t = t.split(IMAGE_OUTPUT_DIRECTIVE).join("").trim();
   return t;
 }
 

@@ -9,6 +9,34 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-17
+
+### Added
+
+- **⚡ Instant project switch.** Choosing a project no longer waits on ACP
+  `session/new`. The bot switches cwd immediately and creates the live session
+  lazily on the first message. Reuses an existing controlled runtime for the
+  same path when available.
+- **🖼 Image-output prompt rules.** When agent image return is enabled, prompts
+  include rules to keep generated files in the Grok session media folder
+  (`images/` / `assets/`) or project `images/`, and to report absolute paths.
+
+### Fixed
+
+- **🖼 Agent images as Telegram files.** Generated images are sent with
+  `sendDocument` (downloadable file) instead of compressed `sendPhoto`. Discovery
+  now scans Grok session `images/` **and** `assets/`, plus project `images/` and
+  tool/text paths (Imagine was writing under `images/` while the bot only scanned
+  `assets/`).
+- **⏱ Stale callback queries.** Callback answers are safe/idempotent; expired
+  Telegram query IDs no longer spam ERROR logs. Handlers answer before slow ACP
+  work (stop / model / agent / project open).
+- **🎙 Voice requires STT again.** Voice / audio / video notes only work when
+  `STT_API_URL` is set (optional `STT_API_KEY`). Without STT the bot replies that
+  voice isn't configured — the CLI cannot accept ACP audio blocks.
+- **🔄 Non-blocking session handoff.** Backgrounding a session no longer waits
+  on streamer finalize / `prepare()` mid-switch, so the bot stays responsive.
+
 ## [2.2.4] - 2026-07-16
 
 ### Fixed
@@ -733,6 +761,9 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.3.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.0
+[2.2.4]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.4
+[2.2.3]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.3
 [2.2.2]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.2
 [2.2.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.1
 [2.2.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.0
