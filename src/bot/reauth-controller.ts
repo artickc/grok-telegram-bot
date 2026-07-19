@@ -180,7 +180,7 @@ export class ReauthController {
       }
       s.phase = "restarting";
       await this.render(s);
-      await this.grok.start();
+      await this.grok.start(true);
       agentDown = false;
       s.accountLabel = accountLabel(await this.getAccount?.().catch(() => undefined));
       s.phase = "done";
@@ -191,7 +191,7 @@ export class ReauthController {
     } finally {
       s.abort = undefined;
       this.stopAnim(s);
-      if (agentDown) await this.grok.start().catch((e) => log.warn("post-reauth restart failed:", (e as Error).message));
+      if (agentDown) await this.grok.start(true).catch((e) => log.warn("post-reauth restart failed:", (e as Error).message));
       await this.render(s);
     }
   }
