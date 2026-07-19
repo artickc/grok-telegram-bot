@@ -10,6 +10,7 @@ import {
   type GrokClient,
   isAccountRotationError,
   isContextExhaustedError,
+  isSessionLifecycleError,
   isTransientError,
   type SessionMetadata,
 } from "../grok/client.js";
@@ -256,6 +257,7 @@ export class SessionRuntime {
   // в”Ђв”Ђ sessions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
   async startNewSession(cwd: string, projectName?: string): Promise<void> {
+    await this.accountRotator?.waitForIdle();
     if (this.busy) await this.cancel();
     await this.bindNewSession(cwd, projectName);
   }
@@ -430,6 +432,9 @@ export class SessionRuntime {
   }
 
   private async ensureSession(): Promise<void> {
+    // Account rotation restarts the process globally. Do not bind a new chat
+    // to a candidate account until the owner has finished probing it.
+    await this.accountRotator?.waitForIdle();
     if (this.rebindPending && this.sessionId) {
       // The ACP process is frequently mid-restart the first time we re-bind
       // (auto-restart after a crash, or a fresh bot boot), so a single attempt
@@ -525,8 +530,10 @@ export class SessionRuntime {
 
     try {
       const outcome = await this.runPromptWithRetries(content);
-      const recovered = await this.maybeAutoFork(input, outcome);
-      let final = recovered ?? outcome;
+      const rebound = await this.maybeRecoverAgentSession(input, outcome);
+      let final = rebound ?? outcome;
+      const recovered = await this.maybeAutoFork(input, final);
+      final = recovered ?? final;
       // Last resort: if the turn still failed, rotate through other saved
       // accounts (once) and retry on each until one works.
       const rotated = await this.maybeRotateAccount(input, final);
@@ -629,6 +636,51 @@ export class SessionRuntime {
     return pct !== undefined && pct >= threshold;
   }
 
+  /** A shared-process restart invalidates this runtime's ACP session binding,
+   * but says nothing about account health. Wait for any account probe to
+   * settle, re-bind/fork this chat on the selected account, and retry once. */
+  private async maybeRecoverAgentSession(
+    input: PromptInput,
+    outcome: { result?: PromptResult; error?: Error; attempts: number },
+  ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
+    if (
+      !outcome.error ||
+      !isSessionLifecycleError(outcome.error) ||
+      this.cancelled ||
+      (this.streamer?.hasOutput ?? false)
+    ) {
+      return undefined;
+    }
+    try {
+      await this.accountRotator?.waitForIdle();
+      if (this.cancelled) return outcome;
+      const previousId = this.sessionId;
+      this.sessionLive = false;
+      this.rebindPending = Boolean(previousId);
+      await this.ensureSession();
+      this.shownToolIds = new Set();
+      this.subagentShown = new Map();
+      this.streamer?.setFooter(this.hashtags());
+      const retryContent = buildContentBlocks(input, {
+        reasoning: reasoningDirective(this.reasoning),
+        priming: this.primingContext,
+        imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
+        progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      });
+      this.primingContext = undefined;
+      log.info(
+        `chat ${this.chatId} recovered lifecycle error on the active account` +
+          (previousId && this.sessionId !== previousId
+            ? ` with fresh session ${this.sessionId?.slice(0, 8)}`
+            : " by re-binding its session"),
+      );
+      return this.runPromptWithRetries(retryContent);
+    } catch (error) {
+      log.warn(`chat ${this.chatId} session recovery failed: ${(error as Error).message}`);
+      return { error: error as Error, attempts: outcome.attempts };
+    }
+  }
+
   /**
    * Auto-fork-on-error recovery. When a turn fails with a *transient* error (or
    * a context-exhaustion error) and nothing was streamed to the user, the
@@ -700,25 +752,57 @@ export class SessionRuntime {
   ): Promise<{ result?: PromptResult; error?: Error; attempts: number } | undefined> {
     const rotator = this.accountRotator;
     if (!rotator?.enabled() || !final.error || this.cancelled) return undefined;
+    if (isSessionLifecycleError(final.error)) return undefined;
+    const originalError = final.error;
+    const observed = rotator.state();
+    return rotator.withRotationLock(observed, async (changed) => {
+      if (this.cancelled) return final;
+      if (changed) {
+        if (this.streamer?.hasOutput ?? false) return undefined;
+        const current = rotator.state();
+        const transcript = this.sessionId ? recentTranscript(this.cfg.sessionsDir, this.sessionId) : undefined;
+        if (this.foreground) {
+          await this.notify(
+            `\u{1F504} Reusing ${current.activeLabel ?? "the account selected by another chat"} with a fresh session…`,
+            { replyTo: this.turnReplyTo },
+          );
+        }
+        log.info(`chat ${this.chatId} reusing account generation ${current.generation} selected by another chat`);
+        try {
+          await this.bindNewSession(this.cwd, this.projectName);
+        } catch (error) {
+          return { error: error as Error, attempts: final.attempts };
+        }
+        this.shownToolIds = new Set();
+        this.subagentShown = new Map();
+        this.streamer?.setFooter(this.hashtags());
+        const content = buildContentBlocks(input, {
+          reasoning: reasoningDirective(this.reasoning),
+          priming: transcript ? buildPriming(transcript) : undefined,
+          imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
+          progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+        });
+        return this.runPromptWithRetries(content);
+      }
     // A quota-exhausted or access-denied response cannot be recovered by retrying
     // this login. Quarantine it before choosing targets, so later rotations do not
     // cycle back to a known-bad account. This intentionally happens before the
     // partial-stream guard: we must not retry/rotate a partial reply, but its
     // account still needs to be skipped during a future rotation.
-    if (isAccountRotationError(final.error)) {
-      await rotator.markFailed(undefined, final.error.message);
+    if (isAccountRotationError(originalError)) {
+      await rotator.markFailed(observed.activeId, originalError.message);
     }
     if (this.streamer?.hasOutput ?? false) return undefined;
     const targets = await rotator.targets().catch(() => [] as { id: string; label: string }[]);
     if (targets.length === 0) return undefined;
 
     const transcript = this.sessionId ? recentTranscript(this.cfg.sessionsDir, this.sessionId) : undefined;
-    const errors: string[] = [`\u2022 previous: ${final.error.message}`];
+    const errors: string[] = [`\u2022 previous: ${originalError.message}`];
     let last = final;
 
     for (const t of targets) {
       if (this.cancelled) return last;
-      const failReason = last.error ?? final.error;
+      const failReason = last.error ?? originalError;
       if (this.foreground) {
         await this.notify(formatAccountSwitchNotice(t.label, failReason), { replyTo: this.turnReplyTo });
       }
@@ -767,6 +851,7 @@ export class SessionRuntime {
     // One full cycle done and still failing — stop with a combined report.
     const combined = new Error(`Tried ${targets.length + 1} account(s), all failed:\n${errors.join("\n")}`);
     return { error: combined, attempts: last.attempts };
+    });
   }
 
   /**

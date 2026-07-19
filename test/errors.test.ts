@@ -5,6 +5,7 @@ import {
   isAccountExhaustedError,
   isAccountRotationError,
   isContextExhaustedError,
+  isSessionLifecycleError,
   isTransientError,
 } from "../src/grok/client.js";
 import { formatAccountSwitchNotice, shortSwitchReason } from "../src/bot/prompt-retry.js";
@@ -66,6 +67,19 @@ test("403 access denied is an account-rotation error, not a transient retry", ()
   assert.equal(isTransientError(new Error(message)), false);
 });
 
+test("session/process lifecycle failures never trigger account retry semantics", () => {
+  for (const error of [
+    new GrokError("Invalid params [-32602] — unknown session id", -32602),
+    new Error("grok agent is restarting"),
+    new Error("grok agent stdio exited (code 1)"),
+    new GrokError("Authentication required [-32000] — no auth method id provided", -32000),
+  ]) {
+    assert.ok(isSessionLifecycleError(error));
+    assert.equal(isAccountRotationError(error), false);
+    assert.equal(isTransientError(error), false);
+  }
+});
+
 test("account switch notice includes label and reason", () => {
   const notice = formatAccountSwitchNotice("work@x.ai", new Error(BALANCE_MSG));
   assert.match(notice, /Account switched to work@x\.ai/);
@@ -109,4 +123,47 @@ test("auto-rotation captures an unmatched host login before warning it", async (
 
   await rotator.markFailed(undefined, "Access denied");
   assert.deepEqual(marked, [{ id: "captured", reason: "Access denied" }]);
+});
+
+test("concurrent rotations serialize and a waiting chat observes the selected account", async () => {
+  let activeId = "first";
+  const starts: boolean[] = [];
+  const accounts = {
+    activeAccountId: () => activeId,
+    get: (id: string) => ({ id, label: id === "second" ? "Working" : "First" }),
+    captureCurrent: async () => ({ id: activeId, label: activeId }),
+    switchTo: async (id: string) => {
+      activeId = id;
+      return { id, label: id === "second" ? "Working" : "First" };
+    },
+  } as unknown as AccountManager;
+  const acp = {
+    stopAndWait: async () => {},
+    start: async (notifyRestarted?: boolean) => {
+      starts.push(notifyRestarted === true);
+    },
+  } as unknown as GrokClient;
+  const rotator = new AccountRotatorImpl(accounts, acp);
+  const observed = rotator.state();
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const owner = rotator.withRotationLock(observed, async (changed) => {
+    assert.equal(changed, false);
+    await rotator.activate("second");
+    await hold;
+    return "owner";
+  });
+  const waiter = rotator.withRotationLock(observed, async (changed) => {
+    assert.equal(changed, true);
+    return rotator.state().activeLabel;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release();
+
+  assert.equal(await owner, "owner");
+  assert.equal(await waiter, "Working");
+  assert.deepEqual(starts, [true]);
 });

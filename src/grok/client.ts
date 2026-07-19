@@ -59,6 +59,11 @@ const ACCOUNT_EXHAUSTED_RE =
  * saved login may be permitted, while same-account retries cannot help. */
 const ACCOUNT_ACCESS_DENIED_RE =
   /\b403\b|forbidden|access denied/i;
+/** Process/session lifecycle failures are not evidence that the active login
+ * is bad. They require a session re-bind on the current process generation,
+ * never account rotation. */
+const SESSION_LIFECYCLE_RE =
+  /unknown session id|grok agent is restarting|grok agent stdio exited|grok agent (?:is )?not running|agent connection (?:is )?closed|authentication required.{0,80}no auth method id provided/i;
 
 export class GrokError extends Error {
   constructor(
@@ -123,7 +128,14 @@ export function isAccountRotationError(err: Error): boolean {
   return false;
 }
 
+export function isSessionLifecycleError(err: Error): boolean {
+  return SESSION_LIFECYCLE_RE.test(err.message);
+}
+
 export function isTransientError(err: Error): boolean {
+  // Retrying the same stale session cannot recover a process-generation
+  // mismatch. SessionRuntime owns the immediate re-bind + one safe retry.
+  if (isSessionLifecycleError(err)) return false;
   // Quota exhaustion and access denial are permanent for this login — rotate,
   // never back off and retry the same credentials.
   if (isAccountRotationError(err)) return false;
@@ -265,9 +277,10 @@ export class GrokClient extends EventEmitter {
     this.availableModels = KNOWN_MODELS.map((m) => ({ modelId: m.modelId, name: m.name, description: m.description }));
   }
 
-  async start(): Promise<void> {
+  async start(notifyRestarted = false): Promise<void> {
     this.stopped = false;
     await this.connect();
+    if (notifyRestarted) this.emit("restarted");
   }
 
   private async connect(): Promise<void> {
@@ -529,9 +542,7 @@ export class GrokClient extends EventEmitter {
     this.stopped = true;
     this.restartAttempts = 0;
     await this.killCurrent();
-    this.stopped = false;
-    await this.connect();
-    this.emit("restarted");
+    await this.start(true);
   }
 
   private killCurrent(): Promise<void> {

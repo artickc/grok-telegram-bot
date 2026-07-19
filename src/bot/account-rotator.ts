@@ -30,6 +30,12 @@ export interface RotationTarget {
   label: string;
 }
 
+export interface RotationState {
+  generation: number;
+  activeId?: string;
+  activeLabel?: string;
+}
+
 export interface AccountRotator {
   /** Whether auto-rotate is switched on. */
   enabled(): boolean;
@@ -39,9 +45,19 @@ export interface AccountRotator {
   activate(id: string): Promise<void>;
   /** Quarantine an account after an account-specific failure. Undefined means active. */
   markFailed(id: string | undefined, reason: string): Promise<void>;
+  /** Process/account generation observed when a turn failed. */
+  state(): RotationState;
+  /** Serialize a complete rotation probe. `changed` means another chat already
+   * selected/restarted an account while this caller was waiting. */
+  withRotationLock<T>(observed: RotationState, run: (changed: boolean) => Promise<T>): Promise<T>;
+  /** Wait for an in-progress rotation probe before re-binding a stale session. */
+  waitForIdle(): Promise<void>;
 }
 
 export class AccountRotatorImpl implements AccountRotator {
+  private generation = 0;
+  private rotationTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly accounts: AccountManager,
     private readonly acp: GrokClient,
@@ -49,6 +65,42 @@ export class AccountRotatorImpl implements AccountRotator {
 
   enabled(): boolean {
     return this.accounts.autoRotateEnabled();
+  }
+
+  state(): RotationState {
+    const activeId = this.accounts.activeAccountId();
+    return {
+      generation: this.generation,
+      activeId,
+      activeLabel: activeId ? this.accounts.get(activeId)?.label : undefined,
+    };
+  }
+
+  async withRotationLock<T>(observed: RotationState, run: (changed: boolean) => Promise<T>): Promise<T> {
+    const previous = this.rotationTail;
+    let release!: () => void;
+    this.rotationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      const current = this.state();
+      const changed =
+        current.generation !== observed.generation || current.activeId !== observed.activeId;
+      return await run(changed);
+    } finally {
+      release();
+    }
+  }
+
+  async waitForIdle(): Promise<void> {
+    // Include work queued while we were waiting, not only the first captured
+    // promise, so callers never re-bind in the middle of a candidate switch.
+    for (;;) {
+      const pending = this.rotationTail;
+      await pending;
+      if (pending === this.rotationTail) return;
+    }
   }
 
   async targets(): Promise<RotationTarget[]> {
@@ -96,12 +148,19 @@ export class AccountRotatorImpl implements AccountRotator {
       log.info(`rotating: auth.json now ${meta.label}; starting Grok CLI + re-auth`);
       // start() → connect() → initialize + authenticate(cached_token) against
       // the freshly written auth.json. A live process would keep the old token.
-      await this.acp.start();
+      await this.acp.start(true);
+      this.generation++;
       log.info(`rotating: Grok CLI up on ${meta.label}`);
     } catch (e) {
       // Best-effort recover the agent so the bot stays usable even if the
       // target login was bad.
-      await this.acp.start().catch((err) => log.warn("post-rotate restart failed:", (err as Error).message));
+      await this.acp.stopAndWait().catch(() => {});
+      await this.acp
+        .start(true)
+        .then(() => {
+          this.generation++;
+        })
+        .catch((err) => log.warn("post-rotate restart failed:", (err as Error).message));
       throw e;
     }
   }

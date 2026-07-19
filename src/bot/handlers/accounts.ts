@@ -205,9 +205,9 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
     // Import reuses the live auth.json — just re-bind the agent headlessly.
     try {
       await deps.acp.stopAndWait();
-      await deps.acp.start();
+      await deps.acp.start(true);
     } catch (e) {
-      await deps.acp.start().catch(() => {});
+      await deps.acp.start(true).catch(() => {});
       return void rerender(ctx, deps, `\u26A0\uFE0F Imported, but re-bind failed: ${(e as Error).message}`);
     }
     let note = `\u2705 Imported the current login${res.label ? ` (${res.label})` : ""}.`;
@@ -239,9 +239,9 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
       try {
         meta = await deps.accounts.switchTo(id);
         // 3) Start agent; it authenticates headlessly with cached_token.
-        await deps.acp.start();
+        await deps.acp.start(true);
       } catch (e) {
-        await deps.acp.start().catch(() => {});
+        await deps.acp.start(true).catch(() => {});
         throw e;
       }
       const note = (await deps.usage.isLoggedIn())
