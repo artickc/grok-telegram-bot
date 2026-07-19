@@ -9,6 +9,23 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-07-19
+
+### Fixed
+
+- **Stable account rotation across concurrent chats.** Account selection is now
+  serialized around the single shared Grok CLI process. Chats reuse the working
+  account selected by another session and create their own ACP session instead
+  of starting competing rotation loops that repeatedly restart the agent.
+- **Session failures no longer condemn valid accounts.** `unknown session id`,
+  agent-restart/process-exit, and headless-auth initialization errors now trigger
+  a session rebind/retry on the active account rather than quarantining or
+  cycling functional logins.
+- **Reliable restart propagation.** Credential imports, manual switches,
+  reauthentication, and automatic rotation notify every chat runtime after the
+  shared process restarts; new session binding waits until candidate validation
+  completes.
+
 ## [2.3.0] - 2026-07-17
 
 ### Added
@@ -761,6 +778,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.3.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.1
 [2.3.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.0
 [2.2.4]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.4
 [2.2.3]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.3
