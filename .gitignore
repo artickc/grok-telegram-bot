@@ -6,6 +6,7 @@ node_modules/
 # ── Secrets — NEVER commit ───────────────────────────────────────────────────
 .env
 .env.*
+
 !.env.example
 .npmrc
 *.pem
