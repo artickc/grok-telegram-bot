@@ -17,6 +17,13 @@ The latest section is published verbatim as the GitHub Release notes by
   disconnected"* and stay stuck with edits blocked. Default: auto-approve + short
   Telegram notice.
 
+### Fixed
+
+- **Grok Build slash commands from Telegram** — `/goal`, `/plan`, `/compact`,
+  `/deep-research`, `/workflow(s)`, and other non-bot `/…` lines are forwarded
+  into the active Grok session (via `session/prompt` / optional commands RPC)
+  instead of "Unknown command".
+
 
 ## [2.3.1] - 2026-07-19
 

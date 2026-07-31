@@ -23,6 +23,7 @@ import { createAuthMiddleware } from "./auth.js";
 import { isStaleCallbackError, safeCallbackMiddleware } from "./callback.js";
 import { COMMANDS } from "./commands.js";
 import { type BotDeps, MenuCache } from "./deps.js";
+import { registerGrokSlash } from "./handlers/grok-slash.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
 import { registerHistory } from "./handlers/history.js";
@@ -213,6 +214,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   registerPhotos(bot, deps); // photos & image documents
   registerDocuments(bot, deps); // non-image files (text inlined, binaries saved)
   registerVoice(bot, deps); // voice / audio -> transcription -> prompt
+  registerGrokSlash(bot, deps);
   registerMessages(bot, deps); // catch-all text prompt — keep last
 
   bot.catch((err) => {
