@@ -9,6 +9,15 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plan mode exit over ACP** — answer Grok's `exit_plan_mode` reverse request
+  (`ext_method` / `x.ai/exit_plan_mode`) instead of Method-not-found. Without this,
+  headless clients hit *"Plan approval could not be completed because the client
+  disconnected"* and stay stuck with edits blocked. Default: auto-approve + short
+  Telegram notice.
+
+
 ## [2.3.1] - 2026-07-19
 
 ### Fixed
