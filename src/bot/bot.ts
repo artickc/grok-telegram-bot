@@ -23,6 +23,7 @@ import { createAuthMiddleware } from "./auth.js";
 import { isStaleCallbackError, safeCallbackMiddleware } from "./callback.js";
 import { COMMANDS } from "./commands.js";
 import { type BotDeps, MenuCache } from "./deps.js";
+import { registerGrokSlash } from "./handlers/grok-slash.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
 import { registerHistory } from "./handlers/history.js";
@@ -133,6 +134,30 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
   acp.permissionHandler = (p) => permissions.handle(p);
+  // exit_plan_mode reverse-request: auto-approve by default (same policy as tools).
+  // Without this, Grok reports "client disconnected" and stays stuck in plan mode.
+  acp.planExitHandler = async ({ params }) => {
+    const sessionId =
+      (typeof params.sessionId === "string" && params.sessionId) ||
+      (typeof params.session_id === "string" && params.session_id) ||
+      "";
+    const planText =
+      (typeof params.plan_content === "string" && params.plan_content) ||
+      (typeof params.planContent === "string" && params.planContent) ||
+      (typeof params.content === "string" && params.content) ||
+      "";
+    const preview = planText.replace(/\s+/g, " ").trim().slice(0, 280);
+    const desc = sessionId ? registry.describeSession(sessionId) : { chatId: undefined as number | undefined };
+    const chatId = desc.chatId;
+    if (chatId !== undefined) {
+      const body = preview
+        ? `\u{1F4CB} Plan approved (exit plan mode).\n\n${preview}${planText.length > 280 ? "\u2026" : ""}`
+        : "\u{1F4CB} Plan approved \u2014 leaving plan mode and implementing.";
+      void bot.api.sendMessage(chatId, body, { disable_notification: true }).catch(() => {});
+    }
+    return { outcome: "approved" as const, feedback: "" };
+  };
+
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
   // message" service message for each pin. Delete those so the chat stays clean
@@ -189,6 +214,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   registerPhotos(bot, deps); // photos & image documents
   registerDocuments(bot, deps); // non-image files (text inlined, binaries saved)
   registerVoice(bot, deps); // voice / audio -> transcription -> prompt
+  registerGrokSlash(bot, deps);
   registerMessages(bot, deps); // catch-all text prompt — keep last
 
   bot.catch((err) => {

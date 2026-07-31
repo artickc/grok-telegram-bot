@@ -26,6 +26,18 @@ export const COMMANDS: { command: string; description: string }[] = [
   { command: "reauth", description: "Sign in to Grok (login or import)" },
   { command: "accounts", description: "Switch between saved Grok accounts" },
   { command: "help", description: "Show help" },
+  // Grok Build slash commands (forwarded into the active session)
+  { command: "goal", description: "Grok /goal — set/status/pause/resume/clear" },
+  { command: "plan", description: "Grok /plan — enter plan mode" },
+  { command: "view_plan", description: "Grok /view-plan — show saved plan" },
+  { command: "compact", description: "Grok /compact — compress context" },
+  { command: "context", description: "Grok /context — context window breakdown" },
+  { command: "deep_research", description: "Grok /deep-research <query>" },
+  { command: "workflow", description: "Grok /workflow run|pause|resume|stop" },
+  { command: "workflows", description: "Grok /workflows — live runs" },
+  { command: "remember", description: "Grok /remember <note>" },
+  { command: "effort", description: "Grok /effort low|medium|high|xhigh" },
+  { command: "session_info", description: "Grok /session-info" },
 ];
 
 export const HELP_TEXT = [
@@ -49,4 +61,15 @@ export const HELP_TEXT = [
   "/status \u2014 show session, project and queue size",
   "/reauth \u2014 sign in to Grok (grok login, or import an existing login)",
   "/accounts \u2014 switch between saved Grok accounts",
+  "",
+  "GROK BUILD SLASH (in the current session)",
+  "/goal <objective|status|pause|resume|clear> \u2014 autonomous goal",
+  "/plan [description] \u2014 enter plan mode",
+  "/view_plan \u2014 show saved plan",
+  "/compact [note] \u2014 compress context",
+  "/context \u2014 context window usage",
+  "/deep_research <query> \u2014 background research workflow",
+  "/workflow / /workflows \u2014 workflows",
+  "/remember <note> \u2014 save to memory",
+  "Other Grok /commands are also forwarded if not a bot command.",
 ].join("\n");
