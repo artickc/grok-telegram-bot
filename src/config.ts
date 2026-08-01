@@ -72,6 +72,7 @@ function nonNegNum(v: string | undefined, def: number): number {
   return Number.isFinite(n) && n >= 0 ? n : def;
 }
 
+/** Comma-separated list (spaces around commas ok). Used for ALLOWED_USERS, PROJECT_ROOTS, etc. */
 function list(v: string | undefined): string[] {
   return (v || "")
     .split(",")
