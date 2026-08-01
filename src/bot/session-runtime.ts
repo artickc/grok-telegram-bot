@@ -214,14 +214,21 @@ export class SessionRuntime {
    */
   private skipSelfRecheck = false;
 
+  /**
+   * Forum topic thread id (message_thread_id). When set, all outbound messages
+   * for this runtime are posted into that topic.
+   */
+  readonly messageThreadId: number | undefined;
+
   constructor(
     private readonly api: Api,
     private readonly chatId: number,
     private readonly acp: GrokClient,
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
-    init?: { cwd: string; projectName?: string; sessionId?: string },
+    init?: { cwd: string; projectName?: string; sessionId?: string; messageThreadId?: number },
   ) {
+    this.messageThreadId = init?.messageThreadId;
     if (init) {
       this.cwd = init.cwd;
       this.projectName = init.projectName;
@@ -749,7 +756,17 @@ export class SessionRuntime {
     const startedAt = Date.now();
     this.turnStartedAt = startedAt;
     this.streamer = live
-      ? new ResponseStreamer(this.api, this.chatId, this.cfg.streamThrottleMs, this.turnReplyTo, this.hashtags(), (pct) => this.setProgress(pct), this.cfg.progressFallback, startedAt)
+      ? new ResponseStreamer(
+          this.api,
+          this.chatId,
+          this.cfg.streamThrottleMs,
+          this.turnReplyTo,
+          this.hashtags(),
+          (pct) => this.setProgress(pct),
+          this.cfg.progressFallback,
+          startedAt,
+          this.messageThreadId,
+        )
       : undefined;
     if (live) this.typing.start();
     this.activity(true);
@@ -1865,6 +1882,7 @@ export class SessionRuntime {
   ): Promise<void> {
     try {
       const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
+      if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
       if (opts?.replyTo !== undefined) {
         extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
       }
@@ -1885,7 +1903,11 @@ export class SessionRuntime {
       })
       .filter(Boolean)
       .join("\n\n");
-    if (body.trim()) await sendMarkdownDoc(this.api, this.chatId, `${body}\n\n${this.tags}`);
+    if (body.trim()) {
+      await sendMarkdownDoc(this.api, this.chatId, `${body}\n\n${this.tags}`, {
+        messageThreadId: this.messageThreadId,
+      });
+    }
   }
 }
 

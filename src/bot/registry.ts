@@ -19,7 +19,7 @@ import { subagentSummary } from "../render/subagent.js";
 import type { SessionStore } from "../sessions/store.js";
 import type { AccountRotator } from "./account-rotator.js";
 import { ChatController } from "./chat-controller.js";
-import type { SessionRuntime } from "./session-runtime.js";
+import { SessionRuntime } from "./session-runtime.js";
 
 export interface SessionDescription {
   /** Chat that owns the session (controlled session or subagent parent). */
@@ -34,6 +34,11 @@ export interface SessionDescription {
 
 export class RuntimeRegistry {
   private readonly controllers = new Map<number, ChatController>();
+  /**
+   * Forum topic runtimes keyed by `chatId:threadId`. Each topic is one project
+   * session and always "foreground" within that topic.
+   */
+  private readonly forumRuntimes = new Map<string, SessionRuntime>();
   private refresher: ((chatId: number) => void) | undefined;
   private rotator: AccountRotator | undefined;
   /** Chat ids with a running turn, most-recently-started last. */
@@ -84,15 +89,61 @@ export class RuntimeRegistry {
     return this.controller(chatId).foreground();
   }
 
+  /**
+   * Runtime for a forum topic (one topic = one project path). Creates lazily.
+   * Always foreground for that topic so streaming posts into the thread.
+   */
+  getForumTopic(
+    chatId: number,
+    threadId: number,
+    cwd: string,
+    projectName?: string,
+  ): SessionRuntime {
+    const key = `${chatId}:${threadId}`;
+    let rt = this.forumRuntimes.get(key);
+    if (rt) {
+      // Path re-bind (user fixed mapping) — update cwd if changed.
+      if (normPath(rt.cwd) !== normPath(cwd)) {
+        rt.dispose();
+        this.forumRuntimes.delete(key);
+        rt = undefined;
+      }
+    }
+    if (!rt) {
+      rt = new SessionRuntime(this.api, chatId, this.acp, this.cfg, this.settings, {
+        cwd,
+        projectName,
+        messageThreadId: threadId,
+      });
+      rt.onStateChange = () => this.refresher?.(chatId);
+      rt.onActivity = (busy) => this.noteActivity(chatId, busy);
+      rt.accountRotator = this.rotator;
+      void rt.setForeground(true);
+      this.forumRuntimes.set(key, rt);
+    } else if (projectName) {
+      rt.projectName = projectName;
+    }
+    return rt;
+  }
+
   disposeAll(): void {
     for (const c of this.controllers.values()) c.dispose();
     this.controllers.clear();
+    for (const rt of this.forumRuntimes.values()) rt.dispose();
+    this.forumRuntimes.clear();
   }
 
   /** Find the chat that currently controls a given session id. */
   findChatBySession(sessionId: string): number | undefined {
     for (const [chatId, c] of this.controllers) {
       if (c.findBySession(sessionId)) return chatId;
+    }
+    // Forum runtimes: recover group chat id from `chatId:threadId` keys.
+    for (const [key, rt] of this.forumRuntimes) {
+      if (rt.sessionId === sessionId) {
+        const chatId = Number(key.split(":")[0]);
+        return Number.isFinite(chatId) ? chatId : undefined;
+      }
     }
     return undefined;
   }
@@ -183,4 +234,8 @@ export class RuntimeRegistry {
       if (!live.has(sid)) this.subagentParents.delete(sid);
     }
   }
+}
+
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }

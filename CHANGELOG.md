@@ -9,6 +9,14 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Added
+
+- **Forum project topics (optional).** `TOPIC_GROUP_ID` manages a Telegram forum
+  supergroup: default **AI Chat** topic (workspace), optional auto-create one
+  topic per catalog project (`TOPIC_AUTO_CREATE`), favicon/MSIX logo discovery
+  pinned in the topic, and path-binding when users create new topics. Messages
+  in a topic run sessions in that project path.
+
 ## [2.4.0] - 2026-08-01
 
 ### Added

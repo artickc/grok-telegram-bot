@@ -167,6 +167,19 @@ export interface AppConfig {
    * the AI-written recheck prompt (or built-in default if the AI left it blank).
    */
   selfRecheckPrompt: string;
+  /**
+   * Telegram forum supergroup id for project topics (TOPIC_GROUP_ID). When set
+   * and the bot is admin, the bot manages topics: AI Chat + optional one topic
+   * per catalog project. Empty/undefined disables forum management.
+   */
+  topicGroupId?: number;
+  /**
+   * Auto-create a forum topic for each catalog project (TOPIC_AUTO_CREATE).
+   * Default true when TOPIC_GROUP_ID is set.
+   */
+  topicAutoCreateProjects: boolean;
+  /** Display name for the default AI chat topic (TOPIC_AI_CHAT_NAME). */
+  topicAiChatName: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -264,9 +277,22 @@ export function loadConfig(): AppConfig {
       true,
     ),
     selfRecheckPrompt: (process.env.SELF_RECHECK_PROMPT ?? "").trim(),
+    topicGroupId: parseTopicGroupId(
+      process.env.TOPIC_GROUP_ID ?? process.env.FORUM_GROUP_ID,
+    ),
+    topicAutoCreateProjects: bool(process.env.TOPIC_AUTO_CREATE, true),
+    topicAiChatName: (process.env.TOPIC_AI_CHAT_NAME ?? "AI Chat").trim() || "AI Chat",
   };
 
   return cfg;
+}
+
+/** Parse a Telegram chat/group id (may be negative for supergroups). */
+function parseTopicGroupId(v: string | undefined): number | undefined {
+  if (v === undefined || v.trim() === "") return undefined;
+  const n = Number(v.trim());
+  if (!Number.isFinite(n) || n === 0) return undefined;
+  return Math.trunc(n);
 }
 
 /** Parse 0–100 percentage; blank → default. */

@@ -65,6 +65,8 @@ export class ResponseStreamer {
     private readonly fallbackEnabled = false,
     /** Turn start time, used by the fallback's elapsed-time signal. */
     private readonly turnStartedAt = Date.now(),
+    /** Forum topic thread — required so stream edits land in the right topic. */
+    private readonly messageThreadId?: number,
   ) {}
 
   /** Replace the hashtag footer (used after a logical fork swaps the session id
@@ -121,12 +123,19 @@ export class ResponseStreamer {
     this.setProgressValue(100, false);
   }
 
+  private threadExtra(): Record<string, unknown> {
+    return this.messageThreadId !== undefined ? { message_thread_id: this.messageThreadId } : {};
+  }
+
   /** reply_parameters threading EVERY message of the turn to the user's prompt,
    *  so the whole response (all bubbles, tool calls and continuations) stays in
-   *  one thread — not just the first message. */
+   *  one thread — not just the first message. Also carries forum topic id. */
   private replyExtra(): Record<string, unknown> {
-    if (this.replyTo === undefined) return {};
-    return { reply_parameters: { message_id: this.replyTo, allow_sending_without_reply: true } };
+    const extra: Record<string, unknown> = { ...this.threadExtra() };
+    if (this.replyTo !== undefined) {
+      extra.reply_parameters = { message_id: this.replyTo, allow_sending_without_reply: true };
+    }
+    return extra;
   }
 
   appendOutput(text: string): void {

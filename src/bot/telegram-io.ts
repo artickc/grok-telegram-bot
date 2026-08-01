@@ -97,9 +97,10 @@ export async function sendMarkdownDoc(
   api: Api,
   chatId: number,
   rawMarkdown: string,
-  opts?: { loud?: boolean },
+  opts?: { loud?: boolean; messageThreadId?: number },
 ): Promise<void> {
-  const extra = opts?.loud ? { disable_notification: false } : {};
+  const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
+  if (opts?.messageThreadId !== undefined) extra.message_thread_id = opts.messageThreadId;
   const rendered = toTelegramMarkdown(rawMarkdown);
   const mdChunks = chunkMarkdown(rendered);
   const plainChunks = chunkMarkdown(rawMarkdown);

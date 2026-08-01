@@ -43,6 +43,7 @@ import { registerSystem } from "./handlers/system.js";
 import { registerTasks, registerWizardInput } from "./handlers/tasks.js";
 import { registerUsage } from "./handlers/usage.js";
 import { registerVoice } from "./handlers/voice.js";
+import { registerForum } from "./handlers/forum.js";
 import { StatusPanel } from "./menu/status-panel.js";
 import { sendMarkdownDoc } from "./telegram-io.js";
 import { Ephemeral } from "./menu/ephemeral.js";
@@ -50,6 +51,7 @@ import { BAR_LABELS } from "./menu/keyboard.js";
 import { PermissionService } from "./permission-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
+import { ForumManager } from "../forum/manager.js";
 
 const log = createLogger("bot");
 
@@ -99,13 +101,19 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   const statusPanel = new StatusPanel(bot.api, settings, registry);
   registry.setRefresher((chatId) => void statusPanel.refresh(chatId));
 
+  const projects = new ProjectManager(cfg.projectRoots);
+  const forum =
+    cfg.topicGroupId !== undefined
+      ? new ForumManager(bot.api, cfg, projects)
+      : undefined;
+
   const deps: BotDeps = {
     api: bot.api,
     cfg,
     acp,
     registry,
     store,
-    projects: new ProjectManager(cfg.projectRoots),
+    projects,
     menuCache: new MenuCache(),
     settings,
     statusPanel,
@@ -121,6 +129,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     }),
     usage: new UsageService(cfg.grokCliPath),
     accounts: new AccountManager(cfg.dataDir),
+    forum,
   };
 
   // Auto-rotate-on-give-up: let a stuck turn cycle through other saved logins.
@@ -208,6 +217,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
 
   registerMenu(bot, deps); // persistent-keyboard buttons (hears)
   registerWizardInput(bot, deps); // wizard text input (before commands)
+  if (forum) registerForum(bot, deps, forum);
   registerControl(bot, deps);
   registerProjects(bot, deps);
   registerSessions(bot, deps);
@@ -277,6 +287,13 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
 
   // Remove any navigation surface left over from before a restart.
   void deps.ephemeral.cleanupAll().catch(() => {});
+
+  // Forum project topics: ensure AI Chat + optional catalog topics (best-effort).
+  if (forum) {
+    void forum.ensureSetup().catch((e) => {
+      log.warn(`forum setup failed: ${(e as Error).message}`);
+    });
+  }
 
   return { bot, registry, scheduler: new Scheduler(tasks, taskRunner), updater };
 }

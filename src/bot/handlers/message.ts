@@ -17,65 +17,107 @@ import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
 import type { BotDeps } from "../deps.js";
 import { extractReplyContext } from "../reply-context.js";
+import { resolveForumRuntime } from "./forum.js";
 
 const log = createLogger("message");
 
-/** A pending burst of text messages from one chat, awaiting coalescing. */
+/** A pending burst of text messages from one chat/topic, awaiting coalescing. */
 interface TextBatch {
   parts: string[];
   ids: number[];
+  /** Forum topic thread id (undefined for private chats / General without id). */
+  threadId?: number;
   /** Reference content if the burst began as a reply to another message. */
   quoted?: string;
   timer: NodeJS.Timeout;
 }
 
+function batchKey(chatId: number, threadId?: number): string {
+  return `${chatId}:${threadId ?? 0}`;
+}
+
 export function registerMessages(bot: Bot, deps: BotDeps): void {
-  const batches = new Map<number, TextBatch>();
+  const batches = new Map<string, TextBatch>();
   const windowMs = deps.cfg.messageBatchMs;
 
-  const arm = (chatId: number): NodeJS.Timeout =>
-    setTimeout(() => void flush(deps, batches, chatId), windowMs);
+  const arm = (key: string): NodeJS.Timeout =>
+    setTimeout(() => void flush(deps, batches, key), windowMs);
 
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text;
     if (!text.trim()) return;
     const chatId = ctx.chat.id;
     const id = ctx.message.message_id;
+    const threadId = ctx.message.message_thread_id;
     const quoted = extractReplyContext(ctx);
+    const key = batchKey(chatId, threadId);
 
-    const batch = batches.get(chatId);
+    const batch = batches.get(key);
     if (batch) {
       clearTimeout(batch.timer);
       batch.parts.push(text);
       batch.ids.push(id);
       if (quoted && !batch.quoted) batch.quoted = quoted;
-      batch.timer = arm(chatId);
+      batch.timer = arm(key);
       return;
     }
-    batches.set(chatId, { parts: [text], ids: [id], quoted, timer: arm(chatId) });
+    batches.set(key, {
+      parts: [text],
+      ids: [id],
+      threadId,
+      quoted,
+      timer: arm(key),
+    });
   });
 }
 
 /** Coalesce a chat's buffered parts into one prompt and submit it once. */
-async function flush(deps: BotDeps, batches: Map<number, TextBatch>, chatId: number): Promise<void> {
-  const batch = batches.get(chatId);
+async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string): Promise<void> {
+  const batch = batches.get(key);
   if (!batch) return;
-  batches.delete(chatId);
+  batches.delete(key);
 
   // Telegram splits at 4096 chars, almost always on a line boundary, so
   // rejoining with a newline reconstructs the original text faithfully.
   const combined = batch.parts.join("\n").trim();
   if (!combined) return;
 
+  const [chatIdStr] = key.split(":");
+  const chatId = Number(chatIdStr);
+  const threadId = batch.threadId;
+
   // A lone, single-line "/something" is an unknown-command typo — guide the
   // user instead of forwarding it to the agent. Split content never trips
   // this: it arrives as multiple parts, and multi-line text is never a command.
   if (batch.parts.length === 1 && !combined.includes("\n") && combined.startsWith("/")) {
-    await send(deps, chatId, "Unknown command. Type /help to see what I can do.");
-    return;
+    // Let grammY command handlers run for known commands; only unknown fall here
+    // after commands middleware — still skip bare typos in private chat.
+    if (!deps.cfg.topicGroupId || chatId !== deps.cfg.topicGroupId) {
+      await send(deps, chatId, "Unknown command. Type /help to see what I can do.", threadId);
+      return;
+    }
   }
 
-  const rt = deps.registry.get(chatId);
+  let rt = deps.registry.get(chatId);
+  // Forum group: one topic = one project session.
+  if (deps.forum && deps.cfg.topicGroupId && chatId === deps.cfg.topicGroupId) {
+    const resolved = await resolveForumRuntime(
+      deps,
+      deps.forum,
+      chatId,
+      threadId,
+      combined,
+      batch.ids[0]!,
+    );
+    if (resolved === "handled" || resolved === "ignore") {
+      if (resolved === "ignore") {
+        /* not our group path */
+      }
+      return;
+    }
+    rt = resolved.rt;
+  }
+
   const note = batch.parts.length > 1 ? ` (combined ${batch.parts.length} messages)` : "";
   try {
     // Thread the reply to the prompt message (the user's message is left intact;
@@ -86,18 +128,26 @@ async function flush(deps: BotDeps, batches: Map<number, TextBatch>, chatId: num
         deps,
         chatId,
         `\u{1F4E5} Queued (position ${rt.queueLength})${note} \u2014 I'm still working on the previous task. It'll run next.`,
+        threadId,
       );
     }
     // "ran": turn started; complexity is steered silently by the agent.
   } catch (err) {
     log.warn(`submit failed for chat ${chatId}: ${(err as Error).message}`);
-    await send(deps, chatId, `\u274C Couldn't start your message: ${(err as Error).message}`);
+    await send(deps, chatId, `\u274C Couldn't start your message: ${(err as Error).message}`, threadId);
   }
 }
 
-async function send(deps: BotDeps, chatId: number, text: string): Promise<void> {
+async function send(
+  deps: BotDeps,
+  chatId: number,
+  text: string,
+  threadId?: number,
+): Promise<void> {
   try {
-    await deps.api.sendMessage(chatId, text);
+    const extra: Record<string, unknown> = {};
+    if (threadId !== undefined) extra.message_thread_id = threadId;
+    await deps.api.sendMessage(chatId, text, extra);
   } catch {
     /* non-fatal */
   }
