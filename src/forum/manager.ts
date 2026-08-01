@@ -61,6 +61,16 @@ export class ForumManager {
         log.warn(`bot is not admin in topic group ${chatId} (status=${status})`);
         return;
       }
+      // Need Manage Topics to createForumTopic (creator always can).
+      if (status === "administrator") {
+        const admin = member as { can_manage_topics?: boolean };
+        if (admin.can_manage_topics === false) {
+          log.warn(
+            `bot is admin in ${chatId} but can_manage_topics=false — cannot create topics`,
+          );
+          return;
+        }
+      }
     } catch (e) {
       log.warn(`cannot access topic group ${chatId}: ${(e as Error).message}`);
       return;

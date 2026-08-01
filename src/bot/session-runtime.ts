@@ -1621,6 +1621,7 @@ export class SessionRuntime {
         already: this.sentImagesThisTurn,
         max: this.cfg.agentImagesMax,
         replyTo: this.turnReplyTo,
+        messageThreadId: this.messageThreadId,
       });
       if (n > 0) log.info(`chat ${this.chatId}: sent ${n} agent image file(s)`);
     } catch {

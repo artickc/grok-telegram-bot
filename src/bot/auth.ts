@@ -23,7 +23,27 @@ export function createAuthMiddleware(cfg: AppConfig) {
     // rejections. Real unauthorized users still get one clear reply below.
     if (!from || from.is_bot) return;
     const m = ctx.message ?? ctx.editedMessage;
-    if (m && (m.pinned_message || m.new_chat_members || m.left_chat_member)) return;
+    if (
+      m &&
+      (m.pinned_message ||
+        m.new_chat_members ||
+        m.left_chat_member ||
+        m.forum_topic_created ||
+        m.forum_topic_closed ||
+        m.forum_topic_reopened ||
+        m.forum_topic_edited)
+    ) {
+      // Service messages: still allow forum_topic_created through for allowed users.
+      if (m.forum_topic_created) {
+        const userId = String(from.id);
+        if (allowAll || cfg.allowedUsers.has(userId)) {
+          await next();
+          return;
+        }
+        return; // ignore unauthorized topic creates silently
+      }
+      return;
+    }
 
     const userId = String(from.id);
     if (allowAll || cfg.allowedUsers.has(userId)) {
@@ -32,7 +52,10 @@ export function createAuthMiddleware(cfg: AppConfig) {
     }
     log.warn(`blocked unauthorized user ${userId}`);
     if (ctx.chat) {
-      await ctx.reply("\u26D4 Not authorized. Ask the bot owner to add your Telegram ID.");
+      const threadId = m && "message_thread_id" in m ? m.message_thread_id : undefined;
+      const extra =
+        threadId !== undefined ? { message_thread_id: threadId as number } : {};
+      await ctx.reply("\u26D4 Not authorized. Ask the bot owner to add your Telegram ID.", extra);
     }
   };
 }

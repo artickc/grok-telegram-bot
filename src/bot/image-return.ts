@@ -129,6 +129,8 @@ export interface SendImagesOptions {
   max: number;
   /** Optional Telegram message id to thread replies under. */
   replyTo?: number;
+  /** Forum topic — required so agent images land in the right topic. */
+  messageThreadId?: number;
 }
 
 /** Send the valid, fresh, not-yet-sent images as documents. Returns how many were sent. */
@@ -139,10 +141,11 @@ export async function sendImages(
   opts: SendImagesOptions,
 ): Promise<number> {
   let sent = 0;
-  const replyExtra =
-    opts.replyTo !== undefined
-      ? { reply_parameters: { message_id: opts.replyTo, allow_sending_without_reply: true } }
-      : {};
+  const extra: Record<string, unknown> = {};
+  if (opts.replyTo !== undefined) {
+    extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
+  }
+  if (opts.messageThreadId !== undefined) extra.message_thread_id = opts.messageThreadId;
   for (const path of paths) {
     if (sent >= opts.max) break;
     if (opts.already.has(path)) continue;
@@ -161,7 +164,7 @@ export async function sendImages(
       const file = new InputFile(path, basename(path));
       await api.sendDocument(chatId, file, {
         caption: basename(path),
-        ...replyExtra,
+        ...extra,
       });
       sent++;
       log.debug(`sent document ${path}`);

@@ -15,6 +15,7 @@
 import type { Bot } from "grammy";
 import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
+import { batchKey, forumThreadId } from "../../forum/thread.js";
 import type { BotDeps } from "../deps.js";
 import { extractReplyContext } from "../reply-context.js";
 import { resolveForumRuntime } from "./forum.js";
@@ -32,10 +33,6 @@ interface TextBatch {
   timer: NodeJS.Timeout;
 }
 
-function batchKey(chatId: number, threadId?: number): string {
-  return `${chatId}:${threadId ?? 0}`;
-}
-
 export function registerMessages(bot: Bot, deps: BotDeps): void {
   const batches = new Map<string, TextBatch>();
   const windowMs = deps.cfg.messageBatchMs;
@@ -46,11 +43,17 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text;
     if (!text.trim()) return;
+    // Slash commands are handled by bot.command / menu — never batch as agent prompts.
+    // (Otherwise /forum_setup and /help would also hit the debounce → agent path.)
+    if (!text.includes("\n") && text.startsWith("/")) return;
+
     const chatId = ctx.chat.id;
     const id = ctx.message.message_id;
-    const threadId = ctx.message.message_thread_id;
+    const rawThreadId = ctx.message.message_thread_id;
+    const isForum = Boolean(deps.cfg.topicGroupId && chatId === deps.cfg.topicGroupId);
+    const threadId = isForum ? forumThreadId(rawThreadId) : rawThreadId;
     const quoted = extractReplyContext(ctx);
-    const key = batchKey(chatId, threadId);
+    const key = batchKey(chatId, rawThreadId, isForum);
 
     const batch = batches.get(key);
     if (batch) {
@@ -86,16 +89,9 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   const chatId = Number(chatIdStr);
   const threadId = batch.threadId;
 
-  // A lone, single-line "/something" is an unknown-command typo — guide the
-  // user instead of forwarding it to the agent. Split content never trips
-  // this: it arrives as multiple parts, and multi-line text is never a command.
+  // Defense-in-depth: never submit slash-only lines as agent prompts.
   if (batch.parts.length === 1 && !combined.includes("\n") && combined.startsWith("/")) {
-    // Let grammY command handlers run for known commands; only unknown fall here
-    // after commands middleware — still skip bare typos in private chat.
-    if (!deps.cfg.topicGroupId || chatId !== deps.cfg.topicGroupId) {
-      await send(deps, chatId, "Unknown command. Type /help to see what I can do.", threadId);
-      return;
-    }
+    return;
   }
 
   let rt = deps.registry.get(chatId);
@@ -109,12 +105,7 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
       combined,
       batch.ids[0]!,
     );
-    if (resolved === "handled" || resolved === "ignore") {
-      if (resolved === "ignore") {
-        /* not our group path */
-      }
-      return;
-    }
+    if (resolved === "handled" || resolved === "ignore") return;
     rt = resolved.rt;
   }
 
