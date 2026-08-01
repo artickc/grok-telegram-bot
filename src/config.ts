@@ -76,13 +76,47 @@ function nonNegNum(v: string | undefined, def: number): number {
 function list(v: string | undefined): string[] {
   return (v || "")
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
+}
+
+/**
+ * Parse ALLOWED_USERS. Blank/unset → allow everyone. Non-blank → only numeric
+ * Telegram user ids (invalid tokens dropped). If every token is invalid, deny
+ * everyone (fail closed) rather than treating as open.
+ */
+export function parseAllowedUsers(raw: string | undefined): {
+  ids: Set<string>;
+  allowAll: boolean;
+  dropped: string[];
+} {
+  if (raw === undefined || raw.trim() === "") {
+    return { ids: new Set(), allowAll: true, dropped: [] };
+  }
+  const tokens = list(raw);
+  const dropped: string[] = [];
+  const ids = new Set<string>();
+  for (const t of tokens) {
+    // Telegram user ids are positive integers (string form).
+    if (/^\d+$/.test(t)) ids.add(t);
+    else dropped.push(t);
+  }
+  return { ids, allowAll: false, dropped };
 }
 
 export interface AppConfig {
   token: string;
+  /**
+   * Telegram user ids allowed to use the bot (private + groups). Populated from
+   * comma-separated ALLOWED_USERS. See {@link allowAllUsers}.
+   */
   allowedUsers: Set<string>;
+  /**
+   * True only when ALLOWED_USERS was blank/unset. When false, only ids in
+   * {@link allowedUsers} may use the bot (even if the set is empty after
+   * filtering invalid tokens — fail closed).
+   */
+  allowAllUsers: boolean;
   grokCliPath: string;
   workspace: string;
   /** Optional xAI API key for headless hosts. When set, exported to the agent
@@ -219,9 +253,17 @@ export function loadConfig(): AppConfig {
     ? resolve(expandHome(process.env.LOG_FILE.trim()))
     : join(logsDir, "grok-telegram-bot.log");
 
+  const allowedParsed = parseAllowedUsers(process.env.ALLOWED_USERS);
+  if (allowedParsed.dropped.length > 0) {
+    // Avoid importing logger at top (config loads early); stderr is fine at boot.
+    console.warn(
+      `[config] ALLOWED_USERS ignored non-numeric token(s): ${allowedParsed.dropped.join(", ")}`,
+    );
+  }
   const cfg: AppConfig = {
     token,
-    allowedUsers: new Set(list(process.env.ALLOWED_USERS)),
+    allowedUsers: allowedParsed.ids,
+    allowAllUsers: allowedParsed.allowAll,
     grokCliPath: resolveGrokPath(process.env.GROK_CLI_PATH?.trim()),
     workspace,
     grokApiKey: process.env.XAI_API_KEY?.trim() || process.env.GROK_API_KEY?.trim() || undefined,

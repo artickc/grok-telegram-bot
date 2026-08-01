@@ -15,8 +15,7 @@ import { createLogger } from "../logger.js";
 const log = createLogger("auth");
 
 export function createAuthMiddleware(cfg: AppConfig) {
-  const allowAll = cfg.allowedUsers.size === 0;
-  if (allowAll) {
+  if (cfg.allowAllUsers) {
     log.warn("ALLOWED_USERS is empty — the bot will respond to ANY Telegram user.");
     if (cfg.topicGroupId !== undefined) {
       log.warn(
@@ -25,6 +24,11 @@ export function createAuthMiddleware(cfg: AppConfig) {
     }
   } else {
     log.info(`ALLOWED_USERS: ${cfg.allowedUsers.size} id(s) (private + groups)`);
+    if (cfg.allowedUsers.size === 0) {
+      log.warn(
+        "ALLOWED_USERS was set but no valid numeric ids remain — denying everyone (fail closed).",
+      );
+    }
   }
 
   return async (ctx: Context, next: NextFunction): Promise<void> => {
@@ -40,14 +44,16 @@ export function createAuthMiddleware(cfg: AppConfig) {
         m.left_chat_member ||
         m.forum_topic_closed ||
         m.forum_topic_reopened ||
-        m.forum_topic_edited)
+        m.forum_topic_edited ||
+        m.general_forum_topic_hidden ||
+        m.general_forum_topic_unhidden)
     ) {
       return;
     }
 
     // forum_topic_created: only allowed users get the path-bind prompt.
     if (m?.forum_topic_created) {
-      if (isAllowed(cfg, from.id, allowAll)) {
+      if (isAllowed(cfg, from.id)) {
         await next();
         return;
       }
@@ -55,7 +61,7 @@ export function createAuthMiddleware(cfg: AppConfig) {
       return;
     }
 
-    if (isAllowed(cfg, from.id, allowAll)) {
+    if (isAllowed(cfg, from.id)) {
       await next();
       return;
     }
@@ -68,16 +74,19 @@ export function createAuthMiddleware(cfg: AppConfig) {
   };
 }
 
-/** True when ALLOWED_USERS is empty (open) or `userId` is in the set. */
-export function isAllowed(cfg: AppConfig, userId: number | string, allowAll?: boolean): boolean {
-  const open = allowAll ?? cfg.allowedUsers.size === 0;
-  if (open) return true;
+/**
+ * True when ALLOWED_USERS was blank (open) or `userId` is listed.
+ * When allowAllUsers is false and the set is empty, nobody is allowed.
+ */
+export function isAllowed(cfg: AppConfig, userId: number | string): boolean {
+  if (cfg.allowAllUsers) return true;
   return cfg.allowedUsers.has(String(userId));
 }
 
+/** Groups, supergroups, and channels: never ⛔-reply (silent deny). */
 function isGroupChat(ctx: Context): boolean {
   const t = ctx.chat?.type;
-  return t === "group" || t === "supergroup";
+  return t === "group" || t === "supergroup" || t === "channel";
 }
 
 /** Private: one ⛔ reply. Group: silent (or callback toast). Never spam topics. */
