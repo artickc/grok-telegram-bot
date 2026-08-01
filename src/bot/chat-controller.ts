@@ -23,6 +23,11 @@ export interface RunningSession {
   unread: number;
   /** Latest task-completion % (0–100) for this session, if known. */
   progress?: number;
+  /**
+   * Card comment: live step while working, chat summary when idle
+   * ("what is happening / what was done").
+   */
+  comment?: string;
 }
 
 export interface SwitchResult {
@@ -76,6 +81,7 @@ export class ChatController {
       foreground: rt.isForeground,
       unread: this.unreadCount(rt),
       progress: rt.taskProgress,
+      comment: rt.cardComment,
     }));
   }
 
@@ -138,6 +144,28 @@ export class ChatController {
     // project browsing can't accumulate infinite idle runtimes/listeners.
     this.pruneUnusedPlaceholders(rt);
     // No startNewSession — sessionId stays undefined until the first message.
+    this.persist();
+    return rt;
+  }
+
+  /**
+   * Import a foreign session (Kiro / OpenCode / Claude / Codex) as a new
+   * controlled Grok session in the same project, primed with the full transcript.
+   * The new session becomes the foreground /running entry.
+   */
+  async addImport(
+    cwd: string,
+    projectName: string | undefined,
+    priming: string,
+  ): Promise<SessionRuntime> {
+    this.ensureRestored();
+    const prevFg = this.fg;
+    const rt = this.create({ cwd, projectName });
+    this.runtimes.push(rt);
+    this.fg = rt;
+    void this.background(prevFg);
+    await rt.startImportedSession(cwd, projectName, priming);
+    this.markSeen(rt);
     this.persist();
     return rt;
   }
@@ -249,6 +277,13 @@ export class ChatController {
     if (!sessionId) return undefined;
     this.ensureRestored();
     return this.runtimes.find((r) => r.sessionId === sessionId)?.taskProgress;
+  }
+
+  /** Live step / chat summary for a controlled session id. */
+  commentFor(sessionId?: string): string | undefined {
+    if (!sessionId) return undefined;
+    this.ensureRestored();
+    return this.runtimes.find((r) => r.sessionId === sessionId)?.cardComment;
   }
 
   findBySession(sessionId: string): boolean {

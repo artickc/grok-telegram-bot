@@ -1,16 +1,19 @@
 /**
  * Menu handler — maps the persistent reply-keyboard buttons (matched by emoji
- * prefix for stateful ones) to actions, and provides inline submenus for Agent
- * (real Grok modes), Reasoning, and Model. Changing a value re-renders the
- * keyboard so its labels always reflect the current state.
+ * prefix for stateful ones) to actions, and provides inline submenus for
+ * Reasoning and Model. Changing a value re-renders the keyboard so its labels
+ * always reflect the current state.
+ *
+ * The Agent picker was removed: Grok has no useful headless agent switch, and
+ * plan mode is entered automatically when the agent judges a task complex.
  */
 import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { reasoningLabel } from "../../app/reasoning.js";
-import { listAgents } from "../../agents/catalog.js";
 import { REASONING_LEVELS, type ReasoningEffort } from "../../app/types.js";
 import type { BotDeps } from "../deps.js";
 import { BAR_LABELS, compactKeyboard, mainMenuInline, MENU_BTN, RUNNING_BTN, STOP_BTN } from "../menu/keyboard.js";
 import { refreshMenu } from "../menu/refresh.js";
+import { showImportSources } from "./import-session.js";
 import { showKillConfirm } from "./kill.js";
 import { showMcp } from "./mcp.js";
 import { showProjects } from "./projects.js";
@@ -20,13 +23,12 @@ import { showSessions } from "./sessions.js";
 import { showTasks } from "./tasks.js";
 import { showUsage } from "./usage.js";
 
-/** Open the full inline menu, showing the current agent/model/reasoning. */
+/** Open the full inline menu, showing the current model/reasoning. */
 export async function openMainMenu(ctx: Context, deps: BotDeps): Promise<void> {
   await deps.ephemeral.open(ctx);
   const rt = deps.registry.get(ctx.chat!.id);
   await deps.ephemeral.reply(ctx, "\u2699\uFE0F Menu", {
     reply_markup: mainMenuInline({
-      agent: rt.agent || "default",
       model: rt.model || "default",
       reasoning: reasoningLabel(rt.reasoning),
     }),
@@ -51,16 +53,6 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
 
   // Inline menu actions.
   bot.callbackQuery(/^m:(\w+)$/, (ctx) => dispatchMenu(ctx, deps, ctx.match![1]!));
-
-  // ── Agent (real Grok modes) ─────────────────────────────────────────────
-  bot.callbackQuery(/^agent:set:(\d+)$/, async (ctx) => {
-    const mode = deps.acp.availableModes[Number(ctx.match![1])];
-    if (!mode) return void ctx.answerCallbackQuery({ text: "Expired, tap Agent again." });
-    // Answer before ACP so a slow setMode never expires the callback query.
-    await ctx.answerCallbackQuery({ text: `\u{1F916} Agent: ${mode.name}` });
-    await deps.registry.get(ctx.chat!.id).setAgentPref(mode.id);
-    await confirmUi(ctx, deps);
-  });
 
   // ── Reasoning ──────────────────────────────────────────────────────────────
   bot.callbackQuery(/^reason:(minimal|low|medium|high|max)$/, async (ctx) => {
@@ -113,12 +105,19 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
     case "sessions":
       await ctx.answerCallbackQuery();
       return showSessions(ctx, deps);
+    case "import":
+      await ctx.answerCallbackQuery();
+      return showImportSources(ctx, deps);
     case "tasks":
       await ctx.answerCallbackQuery();
       return showTasks(ctx, deps);
     case "agent":
-      await ctx.answerCallbackQuery();
-      return showAgentMenu(ctx, deps);
+      // Legacy callback from old keyboards.
+      await ctx.answerCallbackQuery({
+        text: "Agent menu removed — Grok picks sub-agents automatically",
+        show_alert: true,
+      });
+      return openMainMenu(ctx, deps);
     case "model":
       await ctx.answerCallbackQuery();
       return showModelMenu(ctx, deps);
@@ -176,26 +175,6 @@ async function confirmUi(ctx: Context, deps: BotDeps): Promise<void> {
   }
   await deps.statusPanel.refresh(ctx.chat!.id);
   await openMainMenu(ctx, deps); // reopen so the new value is visible
-}
-
-async function showAgentMenu(ctx: Context, deps: BotDeps): Promise<void> {
-  const rt = deps.registry.get(ctx.chat!.id);
-  await ensureReady(ctx, rt);
-  await deps.ephemeral.open(ctx);
-  const modes = deps.acp.availableModes.slice(0, 60);
-  if (modes.length === 0) {
-    // Grok has no headless agent switch; surface the sub-agents it can delegate
-    // to (built-ins + any custom ones in ~/.grok/user-settings.json) as info.
-    const subs = listAgents(rt.cwd).map((s) => s.name);
-    const info = subs.length
-      ? `Grok sub-agents available: ${subs.join(", ")}.\nGrok delegates to these automatically during a turn (via its task/delegate tools) — there's no headless agent switch. Use \u{1F9E9} Model to change the model.`
-      : "Grok delegates to built-in sub-agents automatically in headless mode; there's no agent to select. Use \u{1F9E9} Model to change the model.";
-    await deps.ephemeral.reply(ctx, `Current agent: ${rt.agent || "default"}\n${info}`);
-    return;
-  }
-  const kb = new InlineKeyboard();
-  modes.forEach((m, i) => kb.text(`${m.id === rt.agent ? "\u2713 " : ""}${m.name}`, `agent:set:${i}`).row());
-  await deps.ephemeral.reply(ctx, `Current agent: ${rt.agent || "default"}\nChoose an agent:`, { reply_markup: kb });
 }
 
 async function showReasoningMenu(ctx: Context, deps: BotDeps): Promise<void> {

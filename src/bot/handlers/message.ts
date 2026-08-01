@@ -88,6 +88,7 @@ async function flush(deps: BotDeps, batches: Map<number, TextBatch>, chatId: num
         `\u{1F4E5} Queued (position ${rt.queueLength})${note} \u2014 I'm still working on the previous task. It'll run next.`,
       );
     }
+    // "ran": turn started; complexity is steered silently by the agent.
   } catch (err) {
     log.warn(`submit failed for chat ${chatId}: ${(err as Error).message}`);
     await send(deps, chatId, `\u274C Couldn't start your message: ${(err as Error).message}`);

@@ -168,20 +168,32 @@ function entryOf(spec: LaunchSpec): string {
 }
 
 function vbsLauncher(spec: LaunchSpec): string {
+  // Forever-restart loop: wait for the bot process to exit, pause, relaunch.
+  // Prevents silent death when the node process crashes. GROK_TG_SUPERVISED=1
+  // tells the bot a supervisor will relaunch it (auto-update exits cleanly).
   const cmd = `""${spec.nodePath}"" ${spec.args.map((a) => `""${a}""`).join(" ")}`;
   return [
     'Set sh = CreateObject("WScript.Shell")',
     `sh.CurrentDirectory = "${spec.cwd}"`,
-    `sh.Run "${cmd}", 0, False`,
+    'Set env = sh.Environment("PROCESS")',
+    'env("GROK_TG_SUPERVISED") = "1"',
+    "Do",
+    `  sh.Run "${cmd}", 0, True`,
+    "  WScript.Sleep 3000",
+    "Loop",
   ].join("\r\n");
 }
 
 function killScript(entry: string): string {
   const safe = entry.replace(/'/g, "''");
+  // Kill the forever-restart VBS host *before* node, otherwise the 3s loop
+  // respawns the bot right after "stop". Targets our service / Startup launchers.
   return [
+    `$vbs = Get-CimInstance Win32_Process -Filter "Name='wscript.exe' OR Name='cscript.exe'" | Where-Object { $_.CommandLine -like '*GrokTelegramBot.vbs*' -or $_.CommandLine -like '*run-service.vbs*' };`,
+    `$vbs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };`,
     `$p = Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*${safe}*' };`,
     `$p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };`,
-    `"killed " + (@($p).Count)`,
+    `"killed " + (@($p).Count) + " node, " + (@($vbs).Count) + " vbs"`,
   ].join(" ");
 }
 

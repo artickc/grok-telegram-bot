@@ -33,3 +33,14 @@ export function buildPriming(transcript: string): string {
     "=== END TRANSCRIPT ===",
   ].join("\n");
 }
+
+/**
+ * First-turn prompt body used after a foreign-session import. The heavy
+ * transcript lives in {@link SessionRuntime}'s primingContext; this is the
+ * short user message that flushes priming into the live Grok session.
+ */
+export const IMPORT_CONFIRM_PROMPT =
+  "Session import complete. Confirm you have the full imported context " +
+  "(read the transcript file if anything was truncated inline). " +
+  "Reply with a one-line ready confirmation: project path + one-sentence " +
+  "summary of the task so far. Do not continue work until I send the next message.";

@@ -10,6 +10,8 @@ import type { AppConfig } from "../config.js";
 import type { SttService } from "../app/stt.js";
 import type { UsageService } from "../app/usage.js";
 import type { ProjectEntry, ProjectManager } from "../projects/manager.js";
+import type { ImportableSession } from "../import/list-running.js";
+import type { ImportSourceId } from "../import/sources.js";
 import type { SessionMeta } from "../sessions/types.js";
 import type { SessionStore } from "../sessions/store.js";
 import type { TaskRunner } from "../tasks/runner.js";
@@ -42,6 +44,10 @@ export interface BotDeps {
 export class MenuCache {
   private readonly projectLists = new Map<number, ProjectEntry[]>();
   private readonly sessionLists = new Map<number, { metas: SessionMeta[]; heading: string }>();
+  private readonly importLists = new Map<
+    number,
+    { sourceId: ImportSourceId; sessions: ImportableSession[] }
+  >();
 
   setProjects(chatId: number, list: ProjectEntry[]): void {
     this.projectLists.set(chatId, list);
@@ -63,5 +69,18 @@ export class MenuCache {
 
   getSessions(chatId: number): { metas: SessionMeta[]; heading: string } | undefined {
     return this.sessionLists.get(chatId);
+  }
+
+  /** Cache foreign sessions shown by Import session (callback index → session). */
+  setImportSessions(chatId: number, sourceId: ImportSourceId, sessions: ImportableSession[]): void {
+    this.importLists.set(chatId, { sourceId, sessions });
+  }
+
+  getImportSessions(chatId: number): { sourceId: ImportSourceId; sessions: ImportableSession[] } | undefined {
+    return this.importLists.get(chatId);
+  }
+
+  getImportSession(chatId: number, index: number): ImportableSession | undefined {
+    return this.importLists.get(chatId)?.sessions[index];
   }
 }

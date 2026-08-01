@@ -11,6 +11,7 @@ import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { AuthService } from "../../app/auth-service.js";
 import type { StoredAccount } from "../../app/accounts.js";
 import { UNSUPPORTED_LOGIN_HELP } from "../../app/grok-credentials.js";
+import { formatCliBillingLines } from "../../app/usage.js";
 import { createLogger } from "../../logger.js";
 import type { BotDeps } from "../deps.js";
 
@@ -48,12 +49,35 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
   } else {
     lines.push("\u{1F7E2} Signed in (identity unknown).", "");
   }
+  // Live Grok CLI monthly quota for the host login (same source as OmniRoute-style clients).
+  if (loggedIn) {
+    const { billing, error } = await deps.usage.cliBilling().catch((e) => ({
+      billing: undefined,
+      error: (e as Error).message,
+    }));
+    if (billing) {
+      lines.push(...formatCliBillingLines(billing), "");
+    } else if (error) {
+      lines.push(`\u{1F4B3} Grok CLI quota: unavailable (${error})`, "");
+    }
+  }
   if (list.length === 0) {
     lines.push("No saved accounts yet.", "", "Save the current login below, or sign in via /reauth.");
   } else {
     for (const a of list) {
       lines.push(accountLine(a, a.id === active));
-      if (a.warning) lines.push("  \u2514 Skipped by auto-rotate after an account access or quota error.");
+      const usage = deps.accounts.formatUsageLine(a);
+      if (usage) lines.push(`  \u2514 \u{1F4CA} ${usage}`);
+      else lines.push("  \u2514 \u{1F4CA} No recorded usage yet");
+      if (a.warning) {
+        lines.push(
+          `  \u2514 \u26A0\uFE0F Skipped by auto-rotate: ${a.warning.reason.slice(0, 80)}${a.warning.reason.length > 80 ? "\u2026" : ""}`,
+        );
+      }
+    }
+    const totals = summarizeUsage(list);
+    if (totals) {
+      lines.push("", `\u{1F4CA} All saved accounts: ${totals}`);
     }
   }
   const rotate = deps.accounts.autoRotateEnabled();
@@ -84,6 +108,32 @@ async function view(deps: BotDeps, note?: string): Promise<{ text: string; keybo
 
 function trim(s: string, n = 22): string {
   return s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
+}
+
+/** Aggregate usage across saved accounts for the footer line. */
+function summarizeUsage(list: StoredAccount[]): string {
+  let turns = 0;
+  let credits = 0;
+  let used = 0;
+  for (const a of list) {
+    const u = a.usage;
+    if (!u) continue;
+    if (u.turns > 0 || u.credits > 0) used++;
+    turns += u.turns || 0;
+    credits += u.credits || 0;
+  }
+  if (used === 0 && turns === 0 && credits === 0) return "";
+  const parts: string[] = [];
+  if (turns > 0) parts.push(`${turns} turn${turns === 1 ? "" : "s"}`);
+  if (credits > 0) parts.push(`${fmtNum(credits)} credits total`);
+  parts.push(`${used}/${list.length} accounts used`);
+  return parts.join(" \u00B7 ");
+}
+
+function fmtNum(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (Number.isInteger(n)) return n.toLocaleString("en-US");
+  return n.toFixed(2);
 }
 
 export async function showAccounts(ctx: Context, deps: BotDeps): Promise<void> {

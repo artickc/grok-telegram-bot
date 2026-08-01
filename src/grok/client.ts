@@ -19,19 +19,26 @@ import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { SessionLog } from "./session-log.js";
 import { JsonRpcTransport } from "./transport.js";
-import type {
-  ContentBlock,
-  InitializeResult,
-  JsonRpcMessage,
-  PendingStage,
-  PermissionOutcome,
-  PromptResult,
-  RequestPermissionParams,
-  SessionNotificationParams,
-  SessionUpdate,
-  SubagentInfo,
-  SubagentListUpdate,
+import {
+  contentText,
+  type ContentBlock,
+  type InitializeResult,
+  type JsonRpcMessage,
+  type PendingStage,
+  type PermissionOutcome,
+  type PromptResult,
+  type RequestPermissionParams,
+  type SessionNotificationParams,
+  type SessionUpdate,
+  type SubagentInfo,
+  type SubagentListUpdate,
 } from "./types.js";
+import {
+  autoApproveExitPlanMode,
+  autoSkipAskUserQuestion,
+  isAskUserQuestionMethod,
+  isPlanExitMethod,
+} from "./plan-approval.js";
 
 const log = createLogger("grok:client");
 
@@ -512,6 +519,16 @@ export class GrokClient extends EventEmitter {
     this.currentModeId = modeId;
   }
 
+  /** Persisted Running/Sessions card comment (current step or chat summary). */
+  sessionComment(sessionId: string | undefined): string | undefined {
+    if (!sessionId) return undefined;
+    return this.slog.commentFor(sessionId);
+  }
+
+  setSessionComment(sessionId: string, comment: string): void {
+    this.slog.setComment(sessionId, comment);
+  }
+
   async executeCommand(sessionId: string, command: string): Promise<unknown> {
     return this.request("_grok.dev/commands/execute", { sessionId, command });
   }
@@ -654,8 +671,34 @@ export class GrokClient extends EventEmitter {
         // No handler: auto-approve, preferring session-scope / always options.
         const opts = (params.options as Array<{ optionId: string; name?: string; kind?: string }>) ?? [];
         result = pickAllowOption(opts);
+      } else if (isPlanExitMethod(method)) {
+        // Live method name is `_x.ai/exit_plan_mode` (leading underscore).
+        // Grok intercepts exit_plan_mode and reverse-requests the client to
+        // show a plan-approval UI. Method-not-found is reported as
+        // "client disconnected" and plan mode stays Active forever.
+        const planSnippet =
+          (typeof params.planContent === "string" && params.planContent) ||
+          (typeof params.plan_content === "string" && params.plan_content) ||
+          (typeof params.plan_file_path === "string" && params.plan_file_path) ||
+          "";
+        const keys = Object.keys(params || {}).slice(0, 20).join(",");
+        log.info(
+          `auto-approving plan exit via ${method}` +
+            (params.sessionId ? ` session=${String(params.sessionId).slice(0, 8)}` : "") +
+            (params.toolCallId ? ` tool=${String(params.toolCallId).slice(0, 24)}` : "") +
+            (planSnippet ? ` plan=${planSnippet.replace(/\s+/g, " ").slice(0, 80)}` : "") +
+            (keys ? ` keys=[${keys}]` : ""),
+        );
+        result = autoApproveExitPlanMode(params);
+      } else if (isAskUserQuestionMethod(method)) {
+        // No TUI question form: skip so the agent continues (prefer later Telegram UI).
+        log.info(`auto-skipping ${method} (no interactive question UI in Telegram bridge)`);
+        result = autoSkipAskUserQuestion(params);
       } else {
         // We advertise no fs/terminal capabilities, so the agent shouldn't ask.
+        // Log at warn — unknown reverse methods used to silently break plan exit
+        // when we only matched `x.ai/…` and Grok sent `_x.ai/…`.
+        log.warn(`unsupported client reverse-request: ${method} keys=[${Object.keys(params || {}).join(",")}]`);
         throw new GrokError(`unsupported client method: ${method}`, -32601);
       }
       this.transport?.send({ jsonrpc: "2.0", id, result });
@@ -701,10 +744,28 @@ export class GrokClient extends EventEmitter {
 
   /** Accumulate assistant text and log tool calls to the session's jsonl. */
   private recordUpdate(sessionId: string, u: SessionUpdate): void {
-    if (u.sessionUpdate === "agent_message_chunk" && typeof u.content?.text === "string") {
-      this.assistantBuf.set(sessionId, (this.assistantBuf.get(sessionId) ?? "") + u.content.text);
-    } else if (u.sessionUpdate === "tool_call" && (u.title || u.kind)) {
-      this.slog.logTool(sessionId, u.title || u.kind || "tool", "");
+    if (u.sessionUpdate === "agent_message_chunk") {
+      const t = contentText(u.content);
+      if (t) this.assistantBuf.set(sessionId, (this.assistantBuf.get(sessionId) ?? "") + t);
+    } else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
+      // Prefer stable name over generic title ("Tool call").
+      const name =
+        (typeof u.name === "string" && u.name) ||
+        (typeof u.toolName === "string" && u.toolName) ||
+        (typeof u.title === "string" && u.title && !/^tool[_ ]?call$/i.test(u.title) ? u.title : "") ||
+        u.kind ||
+        "tool";
+      const raw = (u.rawInput || {}) as Record<string, unknown>;
+      const detail =
+        (typeof raw.path === "string" && raw.path) ||
+        (typeof raw.target_file === "string" && raw.target_file) ||
+        (typeof raw.command === "string" && raw.command) ||
+        (typeof raw.pattern === "string" && raw.pattern) ||
+        (Array.isArray(u.locations) && u.locations[0]?.path) ||
+        "";
+      if (u.sessionUpdate === "tool_call" || detail) {
+        this.slog.logTool(sessionId, String(name), detail ? String(detail).slice(0, 200) : "");
+      }
     }
     // Derive a context-usage %/token count if the update carries usage info.
     const usage = (u as { usage?: { totalTokens?: number } }).usage;
@@ -749,6 +810,20 @@ export class GrokClient extends EventEmitter {
     const marker = "User's new message:\n";
     const mi = t.lastIndexOf(marker);
     if (mi !== -1) t = t.slice(mi + marker.length);
+    // Strip auto-complexity steering (and legacy forced-complex wrapper).
+    const taskMarker = "User task:";
+    const ti = t.lastIndexOf(taskMarker);
+    if (
+      ti !== -1 &&
+      (/^COMPLEXITY \(decide yourself/i.test(t) || /^TASK COMPLEXITY:/i.test(t))
+    ) {
+      t = t.slice(ti + taskMarker.length);
+    }
+    // Never persist quiet meta-prompts as a user message title.
+    if (/^Session status update \(meta only\)/i.test(t.trim())) t = "";
+    if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t.trim())) t = "";
+    if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t.trim())) t = "";
+    if (/^SELF-RECHECK \(automatic quality pass/i.test(t.trim())) t = "";
     t = t.replace(/^\([^\n)]*\)\s*\n+/, "");
     return t.trim();
   }

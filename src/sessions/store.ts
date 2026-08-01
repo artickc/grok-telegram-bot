@@ -17,6 +17,7 @@ interface RawSessionJson {
   created_at?: string;
   updated_at?: string;
   session_created_reason?: string;
+  comment?: string;
 }
 
 interface RawLock {
@@ -93,6 +94,7 @@ export class SessionStore {
       /* no history yet */
     }
 
+    const comment = (raw.comment || "").trim();
     return {
       sessionId,
       cwd: raw.cwd || "",
@@ -103,6 +105,7 @@ export class SessionStore {
       lockPid,
       active,
       historyBytes,
+      comment: comment || undefined,
     };
   }
 

@@ -2,8 +2,9 @@
  * Menu surfaces:
  *  - a tiny PERSISTENT bar (☰ Menu · 🧭 Running · ⏹ Stop) — minimal footprint;
  *  - a full, organized INLINE menu opened on demand (and hideable).
- * Live state (project/agent/model/reasoning/context) lives in the pinned panel,
- * so the bar stays clean.
+ * Live state (project/model/reasoning/context) lives in the pinned panel,
+ * so the bar stays clean. (Agent picker removed — Grok has no useful headless
+ * agent switch; plan mode is entered automatically when the agent judges the task complex.)
  */
 import { InlineKeyboard, Keyboard } from "grammy";
 
@@ -18,7 +19,7 @@ export function compactKeyboard(): Keyboard {
 }
 
 /** The full, grouped inline menu (opened via ☰ Menu or /menu). */
-export function mainMenuInline(state: { agent: string; model: string; reasoning: string }): InlineKeyboard {
+export function mainMenuInline(state: { model: string; reasoning: string }): InlineKeyboard {
   const t = (s: string, n: number): string => (s.length > n ? s.slice(0, n - 1) + "\u2026" : s);
   return new InlineKeyboard()
     .text("\u{1F4C1} Project", "m:project")
@@ -27,7 +28,7 @@ export function mainMenuInline(state: { agent: string; model: string; reasoning:
     .text("\u{1F9ED} Running", "m:running")
     .text("\u{1F5C2} Sessions", "m:sessions")
     .row()
-    .text(`\u{1F916} Agent \u00B7 ${t(state.agent, 24)}`, "m:agent")
+    .text("\u{1F4E5} Import session", "m:import")
     .row()
     .text(`\u{1F9E9} Model \u00B7 ${t(state.model, 24)}`, "m:model")
     .row()

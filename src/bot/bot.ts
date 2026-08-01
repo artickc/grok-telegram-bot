@@ -11,6 +11,7 @@ import { SettingsStore } from "../app/settings-store.js";
 import { SttService } from "../app/stt.js";
 import { Updater } from "../app/updater.js";
 import { UsageService } from "../app/usage.js";
+import { textPrompt } from "../app/types.js";
 import type { AppConfig } from "../config.js";
 import { INSTANCE_DIR } from "../config.js";
 import { createLogger } from "../logger.js";
@@ -26,6 +27,7 @@ import { type BotDeps, MenuCache } from "./deps.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
 import { registerHistory } from "./handlers/history.js";
+import { registerImportSession } from "./handlers/import-session.js";
 import { registerKill } from "./handlers/kill.js";
 import { registerMcp } from "./handlers/mcp.js";
 import { registerMenu } from "./handlers/menu.js";
@@ -171,11 +173,45 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     if (sid) await switchAndShow(ctx, deps, sid);
   });
 
+  // Legacy complexity buttons (removed — agent decides; auto-plan if complex).
+  bot.callbackQuery(/^cplx:(simple|complex)$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Complexity is automatic now" });
+    await ctx
+      .editMessageText("\u2705 Complexity is decided by the agent automatically \u2014 just send your task.", {
+        reply_markup: { inline_keyboard: [] },
+      })
+      .catch(() => {});
+  });
+
+  // Post-turn suggestion buttons on the Done message.
+  bot.callbackQuery(/^sug:(\d+):(\d+)$/, async (ctx) => {
+    const batchId = Number(ctx.match![1]);
+    const index = Number(ctx.match![2]);
+    const rt = deps.registry.get(ctx.chat!.id);
+    const text = rt.takeSuggestion(batchId, index);
+    if (!text) {
+      await ctx.answerCallbackQuery({ text: "Suggestion expired", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Sending\u2026" });
+    // Dim the keyboard so double-taps don't re-fire.
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    try {
+      const outcome = await rt.submit(textPrompt(text, ctx.callbackQuery.message?.message_id));
+      if (outcome === "queued") {
+        await ctx.reply(`\u{1F4E5} Queued suggestion (position ${rt.queueLength}).`).catch(() => {});
+      }
+    } catch (e) {
+      await ctx.reply(`\u274C Couldn't run suggestion: ${(e as Error).message}`).catch(() => {});
+    }
+  });
+
   registerMenu(bot, deps); // persistent-keyboard buttons (hears)
   registerWizardInput(bot, deps); // wizard text input (before commands)
   registerControl(bot, deps);
   registerProjects(bot, deps);
   registerSessions(bot, deps);
+  registerImportSession(bot, deps);
   registerSessionKill(bot, deps);
   registerRunning(bot, deps);
   registerHistory(bot, deps);

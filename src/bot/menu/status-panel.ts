@@ -49,11 +49,15 @@ export class StatusPanel {
     const SEP = " | "; // pipe delimiter between inline fields
     const lines: string[] = [];
 
-    // 1) Progress first — only while a turn is live (cleared when it ends), so
-    //    the collapsed pin preview shows how far along the current task is.
+    // 1) Active plan board first (always above the progress bar) so the user
+    //    always sees done / in-progress / pending steps while a plan is live.
+    const plan = rt.planBoard;
+    if (plan) lines.push(plan);
+
+    // 2) Progress — only while a turn is live (cleared when it ends).
     if (progress !== undefined) lines.push(`\u{1F4C8} ${progressBar(progress)}`);
 
-    // 2) Activity: state + only the counters that currently apply.
+    // 3) Activity: state + only the counters that currently apply.
     const activity: string[] = [rt.isBusy ? "\u23F3 Working" : "\u2705 Idle"];
     if (rt.queueLength > 0) activity.push(`\u{1F4E5} ${rt.queueLength} queued`);
     if (running > 1) activity.push(`\u{1F9ED} ${running} sessions`);
@@ -61,13 +65,22 @@ export class StatusPanel {
     if (subagents) activity.push(`\u{1F465} ${subagents}`);
     lines.push(activity.join(SEP));
 
-    // 3) Where: project | session | context usage.
+    // 3b) What is happening now / last summary (same source as Running cards).
+    // Prefer plan one-liner over a redundant tool-step when a plan is active.
+    const comment = rt.planSummary && rt.isBusy ? undefined : rt.cardComment;
+    if (comment) {
+      const icon = rt.isBusy ? "\u23F3" : "\u{1F4AC}";
+      const shown = comment.length > 120 ? `${comment.slice(0, 119)}\u2026` : comment;
+      lines.push(`${icon} ${shown}`);
+    }
+
+    // 4) Where: project | session | context usage.
     const loc = [`\u{1F4C1} ${project}`, `\u{1F9F5} ${session}`];
     if (ctxPct !== undefined) loc.push(`\u{1F4CA} ${ctxPct.toFixed(0)}% context`);
     lines.push(loc.join(SEP));
 
-    // 4) How: agent | reasoning | model.
-    lines.push([`\u{1F916} ${s.agent || "default"}`, `\u{1F9E0} ${reasoningLabel(s.reasoning)}`, `\u{1F9E9} ${s.model || "default"}`].join(SEP));
+    // 5) How: reasoning | model (agent picker removed — plan mode is automatic).
+    lines.push([`\u{1F9E0} ${reasoningLabel(s.reasoning)}`, `\u{1F9E9} ${s.model || "default"}`].join(SEP));
 
     return lines.join("\n");
   }

@@ -26,6 +26,11 @@ interface SessionFile {
   grok_session_id?: string;
   /** Model last used for this session (applied via `grok --model`). */
   model?: string;
+  /**
+   * Short human comment for Running/Sessions cards: live step while working,
+   * AI/local summary when idle. Display-only; not used as agent context.
+   */
+  comment?: string;
 }
 
 export class SessionLog {
@@ -99,6 +104,17 @@ export class SessionLog {
 
   cwdFor(id: string): string | undefined {
     return this.read(id)?.cwd;
+  }
+
+  commentFor(id: string): string | undefined {
+    const c = this.read(id)?.comment?.trim();
+    return c || undefined;
+  }
+
+  setComment(id: string, comment: string): void {
+    const c = comment.trim();
+    if (!c) return;
+    this.update(id, { comment: c });
   }
 
   // ── event log (history-compatible jsonl) ──────────────────────────────────

@@ -38,11 +38,20 @@ export function renderUnifiedDiff(input: DiffInput): DiffResult {
   }
   if (lines.length === 0) return { block: "", added, removed };
 
+  // Display-only: keep head + tail so long edits still show both the start and
+  // the end of the change. Full content remains in the agent session context.
   let shown = lines;
   let note = "";
   if (lines.length > input.maxLines) {
-    shown = lines.slice(0, input.maxLines);
-    note = `\n… +${lines.length - input.maxLines} more lines`;
+    const headN = Math.max(1, Math.floor(input.maxLines * 0.45));
+    const tailN = Math.max(1, input.maxLines - headN);
+    const omitted = lines.length - headN - tailN;
+    shown = [
+      ...lines.slice(0, headN),
+      `… (${omitted} lines omitted) …`,
+      ...lines.slice(lines.length - tailN),
+    ];
+    note = "";
   }
   return { block: "```diff\n" + shown.join("\n") + note + "\n```", added, removed };
 }

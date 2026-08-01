@@ -46,6 +46,48 @@ export function jsonlMtimeMs(jsonlPath: string): number {
   }
 }
 
+/**
+ * Best-effort card blurb from the tail of a session log: last assistant prose
+ * (what was solved), else last user prompt. Skips import-confirm noise.
+ */
+export function readLastCardSummary(jsonlPath: string, maxEntries = 30): string {
+  const entries = readHistory(jsonlPath, maxEntries);
+  if (entries.length === 0) return "";
+  // Walk newest → oldest for a useful assistant conclusion.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!;
+    if (e.role === "assistant" && e.text.trim()) {
+      const t = cleanCardProse(e.text);
+      if (t.length >= 20) return t;
+    }
+  }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!;
+    if (e.role === "user" && e.text.trim()) {
+      const t = cleanCardProse(e.text);
+      if (t && !/session import complete/i.test(t)) return t;
+    }
+  }
+  return "";
+}
+
+function cleanCardProse(raw: string, max = 200): string {
+  let t = extractProgress(raw).cleaned;
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  t = t.replace(/^COMPLEXITY \(decide yourself[\s\S]*?User task:\s*/i, "");
+  t = t.replace(/^TASK COMPLEXITY:[\s\S]*?User task:\s*/i, "");
+  if (/^Session status update \(meta only\)/i.test(t.trim())) return "";
+  t = t.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  // Prefer the ending (conclusions).
+  if (t.length > max + 40) {
+    const tail = t.slice(-max + 1);
+    const sp = tail.indexOf(" ");
+    return "\u2026" + (sp > 0 && sp < 30 ? tail.slice(sp + 1) : tail);
+  }
+  return t.slice(0, max - 1) + "\u2026";
+}
+
 /** The first user prompt in a session log (read from the start), or "". */
 export function readFirstPrompt(jsonlPath: string, maxBytes = 256 * 1024): string {
   let size: number;
@@ -163,6 +205,21 @@ function cleanStoredText(text: string): string {
   let t = extractProgress(text).cleaned;
   if (t.includes(PROGRESS_DIRECTIVE)) t = t.split(PROGRESS_DIRECTIVE).join("").trim();
   if (t.includes(IMAGE_OUTPUT_DIRECTIVE)) t = t.split(IMAGE_OUTPUT_DIRECTIVE).join("").trim();
+  // Strip first-prompt auto-complexity steering (and legacy forced-complex wrapper)
+  // so history / cards show the real user task, not bot plumbing.
+  const taskMarker = "User task:";
+  const ti = t.lastIndexOf(taskMarker);
+  if (
+    ti !== -1 &&
+    (/^COMPLEXITY \(decide yourself/i.test(t) || /^TASK COMPLEXITY:/i.test(t))
+  ) {
+    t = t.slice(ti + taskMarker.length).trim();
+  }
+  // Drop removed/quiet meta-prompts if they landed in history.
+  if (/^Session status update \(meta only\)/i.test(t.trim())) t = "";
+  if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t.trim())) t = "";
+  if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t.trim())) t = "";
+  if (/^SELF-RECHECK \(automatic quality pass/i.test(t.trim())) t = "";
   return t;
 }
 

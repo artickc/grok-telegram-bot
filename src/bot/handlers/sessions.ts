@@ -10,7 +10,7 @@
 import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { basename } from "node:path";
 import type { BotDeps } from "../deps.js";
-import { readHistory } from "../../sessions/history.js";
+import { readHistory, readLastCardSummary } from "../../sessions/history.js";
 import type { SessionMeta } from "../../sessions/types.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { showHistory } from "./history.js";
@@ -52,8 +52,19 @@ async function renderSessionPage(ctx: Context, deps: BotDeps, page: number): Pro
 
   for (const m of slice) {
     const contextPct = deps.acp.metadataFor(m.sessionId)?.contextUsagePercentage;
-    const progress = deps.registry.controller(ctx.chat!.id).progressFor(m.sessionId);
-    const { text, keyboard } = buildSessionCard(m, { contextPct, selfPid: deps.acp.pid, progress });
+    const ctrl = deps.registry.controller(ctx.chat!.id);
+    const progress = ctrl.progressFor(m.sessionId);
+    // Live runtime → persisted comment → last assistant outcome from history.
+    const comment =
+      ctrl.commentFor(m.sessionId) ||
+      m.comment ||
+      readLastCardSummary(deps.store.jsonlPath(m.sessionId));
+    const { text, keyboard } = buildSessionCard(m, {
+      contextPct,
+      selfPid: deps.acp.pid,
+      progress,
+      comment,
+    });
     await deps.ephemeral.reply(ctx, text, { reply_markup: keyboard });
   }
 

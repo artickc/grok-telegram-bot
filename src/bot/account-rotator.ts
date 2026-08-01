@@ -52,6 +52,8 @@ export interface AccountRotator {
   withRotationLock<T>(observed: RotationState, run: (changed: boolean) => Promise<T>): Promise<T>;
   /** Wait for an in-progress rotation probe before re-binding a stale session. */
   waitForIdle(): Promise<void>;
+  /** Record a completed turn's usage against the active saved account. */
+  recordTurnUsage(stats: { credits?: number; contextPct?: number }): void;
 }
 
 export class AccountRotatorImpl implements AccountRotator {
@@ -65,6 +67,14 @@ export class AccountRotatorImpl implements AccountRotator {
 
   enabled(): boolean {
     return this.accounts.autoRotateEnabled();
+  }
+
+  recordTurnUsage(stats: { credits?: number; contextPct?: number }): void {
+    try {
+      this.accounts.recordTurnUsage(stats);
+    } catch (e) {
+      log.debug("recordTurnUsage failed:", (e as Error).message);
+    }
   }
 
   state(): RotationState {

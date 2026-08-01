@@ -20,6 +20,23 @@ import type { AccountInfo } from "./usage.js";
 
 const log = createLogger("accounts");
 
+/** Real usage counters recorded by the bot from completed turns (not billing API). */
+export interface AccountUsage {
+  /** Completed (non-cancelled) turns on this account. */
+  turns: number;
+  /**
+   * Sum of per-turn credit figures Grok reported via `_grok.dev/metadata`.
+   * Only increments when the agent actually sends a credits value.
+   */
+  credits: number;
+  /** ISO timestamp of the last successful turn on this account. */
+  lastUsedAt?: string;
+  /** Credits reported on the most recent turn (if any). */
+  lastTurnCredits?: number;
+  /** Context-window % from the most recent turn that reported it. */
+  lastContextPct?: number;
+}
+
 /** Persisted, non-secret metadata about a saved account. */
 export interface StoredAccount {
   id: string;
@@ -32,6 +49,8 @@ export interface StoredAccount {
   startUrl?: string;
   accountType?: string;
   region?: string;
+  /** Live usage stats accumulated while this account was active. */
+  usage?: AccountUsage;
   /** Excluded from automatic rotation after an account-specific quota/billing failure. */
   warning?: {
     reason: string;
@@ -262,6 +281,53 @@ export class AccountManager {
     return updated;
   }
 
+  /**
+   * Record a completed turn against the active (or given) saved account.
+   * Credits are only added when Grok reported a figure for the turn; turns
+   * always increment so /accounts shows real activity even without credits.
+   */
+  recordTurnUsage(
+    stats: { credits?: number; contextPct?: number },
+    accountId?: string,
+  ): StoredAccount | undefined {
+    const id = accountId ?? this.activeAccountId() ?? this.markedActiveId();
+    if (!id) return undefined;
+    let updated: StoredAccount | undefined;
+    this.store.update((d) => {
+      const account = d.accounts.find((a) => a.id === id);
+      if (!account) return;
+      const prev = account.usage ?? { turns: 0, credits: 0 };
+      const credits =
+        typeof stats.credits === "number" && Number.isFinite(stats.credits) && stats.credits > 0
+          ? stats.credits
+          : undefined;
+      const next: AccountUsage = {
+        turns: (prev.turns || 0) + 1,
+        credits: (prev.credits || 0) + (credits ?? 0),
+        lastUsedAt: new Date().toISOString(),
+        lastTurnCredits: credits ?? prev.lastTurnCredits,
+        lastContextPct:
+          typeof stats.contextPct === "number" && Number.isFinite(stats.contextPct)
+            ? stats.contextPct
+            : prev.lastContextPct,
+      };
+      account.usage = next;
+      updated = account;
+    });
+    return updated;
+  }
+
+  /** Compact one-line usage summary for menus (empty when no stats yet). */
+  formatUsageLine(account: StoredAccount): string {
+    const u = account.usage;
+    if (!u || (u.turns <= 0 && u.credits <= 0 && !u.lastUsedAt)) return "";
+    const parts: string[] = [];
+    if (u.turns > 0) parts.push(`${u.turns} turn${u.turns === 1 ? "" : "s"}`);
+    if (u.credits > 0) parts.push(`${fmtUsageNumber(u.credits)} credits`);
+    if (u.lastUsedAt) parts.push(`last ${fmtRelative(u.lastUsedAt)}`);
+    return parts.join(" \u00B7 ");
+  }
+
   async forget(id: string): Promise<boolean> {
     const existed = !!this.get(id);
     await rm(this.snapshotPath(id), { force: true }).catch(() => {});
@@ -271,4 +337,22 @@ export class AccountManager {
     });
     return existed;
   }
+}
+
+function fmtUsageNumber(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (Number.isInteger(n)) return n.toLocaleString("en-US");
+  return n.toFixed(2);
+}
+
+/** Short relative time for usage lines ("2h ago", "just now"). */
+function fmtRelative(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso.slice(0, 10);
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 60) return "just now";
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)}h ago`;
+  if (sec < 86_400 * 14) return `${Math.floor(sec / 86_400)}d ago`;
+  return new Date(t).toISOString().slice(0, 10);
 }

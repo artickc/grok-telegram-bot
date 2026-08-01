@@ -66,6 +66,9 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
   const quotes = inputs
     .map((i) => i.quotedText?.trim())
     .filter((q): q is string => !!q);
+  // Preserve meta flags: auto-suggestion batches / self-recheck must not re-arm
+  // another recheck after merge (dropping this caused infinite recheck loops).
+  const skipSelfRecheck = inputs.some((i) => i.skipSelfRecheck);
   return {
     text: inputs
       .map((i) => i.text)
@@ -75,6 +78,7 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
     resourceLinks: inputs.flatMap((i) => i.resourceLinks ?? []),
     replyTo: inputs.find((i) => i.replyTo !== undefined)?.replyTo,
     quotedText: quotes.length > 0 ? [...new Set(quotes)].join("\n\n---\n\n") : undefined,
+    skipSelfRecheck: skipSelfRecheck || undefined,
   };
 }
 

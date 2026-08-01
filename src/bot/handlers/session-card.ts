@@ -10,6 +10,7 @@ import { InlineKeyboard } from "grammy";
 import { basename } from "node:path";
 import { progressBar } from "../../render/progress.js";
 import type { SessionMeta } from "../../sessions/types.js";
+// Note: callers may pass `comment` from runtime or history (last-turn outcome).
 
 export interface SessionCardExtras {
   /** Context-usage %, when the session is loaded in the current ACP process. */
@@ -22,6 +23,11 @@ export interface SessionCardExtras {
   selfPid?: number;
   /** Latest task-completion % (0–100) for this session, if this chat runs it. */
   progress?: number;
+  /**
+   * Live step (while working) or chat summary (when idle). Overrides
+   * `m.comment` when provided by the controlling chat runtime.
+   */
+  comment?: string;
 }
 
 export interface SessionCard {
@@ -34,9 +40,15 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
   const dot = m.active ? "\u{1F7E2}" : "\u26AA";
   const state = m.active ? `running${m.lockPid ? ` \u00B7 pid ${m.lockPid}` : ""}` : "idle";
   const proj = m.cwd ? basename(m.cwd) : "(no project)";
+  const comment = (extra.comment || m.comment || "").trim();
 
   const lines = [`${dot} ${m.title}`, `\u{1F4C1} ${proj}`];
   if (m.cwd) lines.push(`   ${m.cwd}`);
+  // Always surface "what is happening / what was done" when we have it.
+  if (comment) {
+    const icon = m.active || typeof extra.progress === "number" ? "\u23F3" : "\u{1F4AC}";
+    lines.push(`${icon} ${comment.length > 160 ? comment.slice(0, 159) + "\u2026" : comment}`);
+  }
   lines.push(`\u{1F552} updated ${relTime(m.updatedAt)} \u00B7 created ${relTime(m.createdAt)}`);
   const ctx = typeof extra.contextPct === "number" ? ` \u00B7 \u{1F9E0} ctx ${Math.round(extra.contextPct)}%` : "";
   lines.push(`\u{1F4CA} ${state} \u00B7 \u{1F4DC} history ${humanSize(m.historyBytes)}${ctx}`);

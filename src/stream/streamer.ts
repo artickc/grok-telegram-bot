@@ -15,15 +15,19 @@ import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
 import { extractProgress, progressBar } from "../render/progress.js";
 import { estimateProgress } from "../render/progress-estimate.js";
+import { truncateMiddle } from "../render/truncate.js";
 import { safeEdit, safeSend } from "../bot/telegram-io.js";
 
 const SOFT_LIMIT = 3500;
-const THINK_TAIL = 500;
+/** Display budget for a thinking block (middle-truncated; session context keeps all). */
+const THINK_DISPLAY_MAX = 2800;
 
 type SegKind = "out" | "think" | "tool";
 interface Seg {
   kind: SegKind;
   text: string;
+  /** When set, later tool updates replace this segment instead of appending. */
+  toolId?: string;
 }
 
 export class ResponseStreamer {
@@ -44,6 +48,11 @@ export class ResponseStreamer {
   private toolCalls = 0;
   private outChars = 0;
   private thoughtChars = 0;
+  /**
+   * Active plan board (ACP sessionUpdate "plan"). Always rendered just above
+   * the progress bar when set — done / in-progress / pending steps.
+   */
+  private planMarkdown: string | undefined;
 
   constructor(
     private readonly api: Api,
@@ -134,10 +143,53 @@ export class ResponseStreamer {
     this.schedule();
   }
 
+  /**
+   * Append a one-shot tool card (no live updates). Prefer {@link upsertTool}
+   * for ACP tool calls that stream progress/output under a stable toolCallId.
+   */
   addTool(rawMarkdown: string): void {
     if (!rawMarkdown) return;
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown });
+    this.schedule();
+  }
+
+  /**
+   * Insert or replace a tool card keyed by toolCallId so one command/edit stays
+   * a single Telegram block that auto-updates (no spam of new code sections).
+   * Full tool results remain in the agent session; this is display-only.
+   */
+  /** Replace the live plan board (or clear with empty/undefined). */
+  setPlan(markdown: string | undefined): void {
+    const next = markdown?.trim() ? markdown.trim() : undefined;
+    if (next === this.planMarkdown) return;
+    this.planMarkdown = next;
+    this.schedule();
+  }
+
+  upsertTool(toolId: string | undefined, rawMarkdown: string): void {
+    if (!rawMarkdown) return;
+    const id = (toolId || "").trim();
+    if (id) {
+      // Replace any existing segment with this id (newest first; includes rare
+      // sealed-region matches so we don't keep stale text in the segs model).
+      for (let i = this.segs.length - 1; i >= 0; i--) {
+        const s = this.segs[i]!;
+        if (s.kind === "tool" && s.toolId === id) {
+          if (s.text === rawMarkdown) return;
+          s.text = rawMarkdown;
+          // If the card lives only in a sealed bubble, also ensure a live copy
+          // so the user sees the latest output on the current message.
+          if (i < this.sealedIdx) {
+            this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id });
+          }
+          this.schedule();
+          return;
+        }
+      }
+    }
+    this.toolCalls += 1;
+    this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id || undefined });
     this.schedule();
   }
 
@@ -182,13 +234,15 @@ export class ResponseStreamer {
       await this.sealOverflow();
       const base = this.captureProgress(renderSegs(this.segs.slice(this.sealedIdx)));
       this.applyFallback();
-      // Never send an empty / progress-only bubble. The bar is appended only to
-      // real streamed content; the live status panel shows the standalone bar.
-      if (!base.trim()) return;
-      // The live (still-streaming) bubble carries the hashtag footer AND a fresh
-      // progress bar at the bottom (sealed bubbles below get neither bar).
-      const parts: string[] = [base];
+      // Never send an empty / progress-only bubble. Plan alone is allowed so the
+      // board is visible as soon as the agent publishes steps.
+      if (!base.trim() && !this.planMarkdown) return;
+      // Live bubble: body → plan (always above progress) → progress bar → footer.
+      const parts: string[] = [];
+      if (base.trim()) parts.push(base);
+      if (this.planMarkdown) parts.push(this.planMarkdown);
       if (this.progress !== undefined) parts.push(progressBar(this.progress));
+      if (parts.length === 0) return;
       const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
       const rendered = toTelegramMarkdown(src);
       const chunks = chunkMarkdown(rendered);
@@ -255,7 +309,17 @@ function renderSegs(segs: Seg[]): string {
 function quoteThought(text: string): string {
   const t = text.trim();
   if (!t) return "";
-  const short = t.length > THINK_TAIL ? "…" + t.slice(-THINK_TAIL) : t;
+  // Keep both ends of long reasoning so early investigation is not lost in the UI.
+  // Truncation is display-only — the agent session retains every thought token.
+  // Neutralize fence markers and half-open emphasis so thinking never breaks
+  // MarkdownV2 parsing of the surrounding live message.
+  const safe = t
+    .replace(/```+/g, "'''")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/~~/g, "");
+  const short = truncateMiddle(safe, THINK_DISPLAY_MAX);
   const lines = short.split("\n");
-  return lines.map((l, i) => (i === 0 ? `> 💭 *thinking:* ${l}` : `> ${l}`)).join("\n");
+  // Plain "thinking:" (no nested *bold*) — nested markers break mid-stream.
+  return lines.map((l, i) => (i === 0 ? `> \u{1F4AD} thinking: ${l}` : `> ${l}`)).join("\n");
 }

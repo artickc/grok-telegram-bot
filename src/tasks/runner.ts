@@ -6,7 +6,7 @@
 import type { Api } from "grammy";
 import { basename } from "node:path";
 import type { GrokClient } from "../grok/client.js";
-import type { SessionUpdate } from "../grok/types.js";
+import { contentText, type SessionUpdate } from "../grok/types.js";
 import { createLogger } from "../logger.js";
 import { sendMarkdownDoc } from "../bot/telegram-io.js";
 import type { Task } from "./types.js";
@@ -29,8 +29,9 @@ export class TaskRunner {
 
     const listener = (sid: string, u: SessionUpdate): void => {
       if (sid !== sessionId) return;
-      if (u.sessionUpdate === "agent_message_chunk" && typeof u.content?.text === "string") {
-        text += u.content.text;
+      if (u.sessionUpdate === "agent_message_chunk") {
+        const t = contentText(u.content);
+        if (t) text += t;
       } else if (u.sessionUpdate === "tool_call") {
         const id = u.toolCallId || u.title || String(tools);
         if (!seen.has(id)) {

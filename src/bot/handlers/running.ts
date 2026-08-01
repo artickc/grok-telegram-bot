@@ -7,7 +7,7 @@ import { type Bot, type Context, InlineKeyboard } from "grammy";
 import type { RunningSession, SwitchResult } from "../chat-controller.js";
 import type { BotDeps } from "../deps.js";
 import type { HistoryEntry } from "../../sessions/types.js";
-import { jsonlMtimeMs, readFirstPrompt } from "../../sessions/history.js";
+import { jsonlMtimeMs, readFirstPrompt, readLastCardSummary } from "../../sessions/history.js";
 import { progressBar } from "../../render/progress.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { sendMarkdownDoc } from "../telegram-io.js";
@@ -49,27 +49,47 @@ function cleanPrompt(raw: string): string {
 }
 
 /** Build a rich card (plain text, no MarkdownV2) + buttons for one controlled
- *  session: Switch / History / Close. */
+ *  session: Switch / History / Close.
+ *
+ *  The comment line always answers "what is happening / what was solved":
+ *    busy  → live current step (tool / thinking / working on …)
+ *    idle  → last-turn outcome (assistant result + files), never bare import noise
+ */
 function buildRunningCard(s: RunningSession, deps: BotDeps, now: number): { text: string; kb: InlineKeyboard } {
   const dot = s.foreground ? "\u25B6\uFE0F" : s.busy ? "\u{1F7E0}" : "\u26AA";
   const state = s.foreground ? "foreground" : s.busy ? "working" : "idle";
 
   let when = "new";
-  let prompt = "";
+  let historySummary = "";
+  let firstPrompt = "";
   if (s.sessionId) {
     const path = deps.store.jsonlPath(s.sessionId);
     const mtime = jsonlMtimeMs(path);
     if (mtime) when = timeAgo(now - mtime);
-    prompt = cleanPrompt(readFirstPrompt(path));
+    // Last assistant outcome beats first-prompt import-confirm noise.
+    historySummary = readLastCardSummary(path);
+    firstPrompt = cleanPrompt(readFirstPrompt(path));
+    if (/session import complete/i.test(firstPrompt)) firstPrompt = "";
   }
+
+  const diskComment = s.sessionId ? deps.store.get(s.sessionId)?.comment?.trim() : undefined;
+  // Order: live runtime comment → persisted last-turn summary → history tail → first prompt.
+  const comment =
+    (s.comment && s.comment.trim()) ||
+    diskComment ||
+    historySummary ||
+    firstPrompt;
 
   const meta = [when, state];
   if (s.busy) meta.push("\u23F3");
   if (s.unread > 0) meta.push(`${s.unread} \u{1F4EC} unread`);
 
+  const commentLabel = s.busy ? "\u23F3" : "\u{1F4AC}";
   const lines = [
     `${dot} ${s.projectName}`,
-    prompt ? `\u{1F4AC} \u201C${trunc(prompt, 120)}\u201D` : "\u{1F4AC} (no messages yet)",
+    comment
+      ? `${commentLabel} ${trunc(comment, 200)}`
+      : "\u{1F4AC} (no messages yet)",
     `\u{1F552} ${meta.join(" \u00B7 ")}`,
   ];
   if (s.progress !== undefined) lines.push(`\u{1F4C8} ${progressBar(s.progress)}`);
@@ -170,6 +190,16 @@ async function deliverSwitch(ctx: Context, deps: BotDeps, res: SwitchResult): Pr
   // in the .jsonl, so it's the footer you'd have seen had you been watching.
   if (!res.busy && res.rt.lastTurnSummary) {
     await ctx.reply(res.rt.lastTurnSummary);
+  }
+
+  // Re-show post-turn suggestions generated while this session was in the
+  // background (or if the user missed the Done notify). Buttons stay wired to
+  // the same batch ids so taps still submit the follow-up.
+  if (!res.busy) {
+    const sug = res.rt.peekPendingSuggestions();
+    if (sug) {
+      await ctx.reply(sug.text, { reply_markup: sug.markup }).catch(() => {});
+    }
   }
 }
 

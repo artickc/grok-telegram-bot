@@ -32,6 +32,17 @@ test("mergeInputs concatenates resource links", () => {
   assert.match(m.text, /hello/);
 });
 
+test("mergeInputs preserves skipSelfRecheck from any item", () => {
+  const meta = textPrompt("1) run typecheck\n2) fix bugs", undefined, undefined, {
+    skipSelfRecheck: true,
+  });
+  const user = textPrompt("also add a note");
+  const m = mergeInputs([meta, user]);
+  assert.equal(m.skipSelfRecheck, true);
+  assert.equal(mergeInputs([user]).skipSelfRecheck, undefined);
+  assert.equal(mergeInputs([meta]).skipSelfRecheck, true);
+});
+
 test("buildContentBlocks appends imageOutput then progress", () => {
   const blocks = buildContentBlocks(textPrompt("hi"), {
     imageOutput: "IMAGE OUTPUT RULES:\nkeep in session",

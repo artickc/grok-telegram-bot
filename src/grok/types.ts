@@ -85,29 +85,48 @@ export interface SessionUpdate {
     | "plan"
     | "user_message_chunk"
     | string;
-  content?: ContentBlock;
+  /**
+   * Message chunk body (ContentBlock) OR tool-call content array (ACP standard).
+   * Callers must narrow based on sessionUpdate — use {@link contentText} helper.
+   */
+  content?: ContentBlock | ToolCallContent[] | (ContentBlock & Record<string, unknown>) | unknown;
   toolCallId?: string;
+  /** Human title (sometimes generic "Tool call" from Grok). */
   title?: string;
+  /** Stable tool identity when the agent sends it (ACP RFD / Grok extensions). */
+  name?: string;
+  toolName?: string;
   kind?: string; // "read" | "edit" | "execute" | "search" | ...
   status?: "pending" | "in_progress" | "completed" | "failed" | string;
   rawInput?: Record<string, unknown>;
+  rawOutput?: unknown;
+  /** Some agents use content_blocks instead of content. */
   content_blocks?: ToolCallContent[];
+  locations?: Array<{ path?: string; line?: number }>;
   [k: string]: unknown;
 }
 
 /** A piece of tool-call content (text, diff, etc.). */
 export interface ToolCallContent {
-  type: "content" | "diff" | string;
+  type: "content" | "diff" | "terminal" | string;
   path?: string;
   oldText?: string | null;
   newText?: string;
   content?: ContentBlock;
+  terminalId?: string;
   [k: string]: unknown;
 }
 
 export interface SessionNotificationParams {
   sessionId: string;
   update: SessionUpdate;
+}
+
+/** Safe text extraction when content is a ContentBlock (not a tool content array). */
+export function contentText(content: SessionUpdate["content"]): string | undefined {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return undefined;
+  const t = (content as ContentBlock).text;
+  return typeof t === "string" ? t : undefined;
 }
 
 /** Permission request from the agent (server -> client) — ACP "ask" mode. */

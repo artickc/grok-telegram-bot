@@ -88,6 +88,12 @@ export class InstanceLock {
     }
   }
 
+  /** Refresh lock metadata while we still hold it (lifetime heartbeat). */
+  touch(): void {
+    if (!this.held) return;
+    this.write();
+  }
+
   private write(): void {
     const data: LockData = { pid: process.pid, startedAt: Date.now(), supervised: this.supervised };
     try {

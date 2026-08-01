@@ -154,12 +154,23 @@ export class Updater {
       return;
     }
     log.info("re-executing the updated bot");
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", join(this.opts.projectRoot, "src", "index.ts"), "--instance", this.opts.instanceDir],
-      { detached: true, stdio: "ignore", cwd: this.opts.projectRoot, env: process.env },
-    );
-    child.unref();
+    try {
+      const child = spawn(
+        process.execPath,
+        ["--import", "tsx", join(this.opts.projectRoot, "src", "index.ts"), "--instance", this.opts.instanceDir],
+        { detached: true, stdio: "ignore", cwd: this.opts.projectRoot, env: process.env },
+      );
+      child.unref();
+      if (!child.pid) {
+        log.error("re-exec spawn produced no pid — staying alive");
+        return;
+      }
+      log.info(`re-exec child pid ${child.pid}`);
+    } catch (e) {
+      // Never exit if replacement failed — silent death is worse than stale code.
+      log.error(`re-exec failed: ${(e as Error).message} — staying alive`);
+      return;
+    }
     setTimeout(() => process.exit(0), 500);
   }
 

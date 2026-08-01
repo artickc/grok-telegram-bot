@@ -144,6 +144,29 @@ export interface AppConfig {
   autoUpdate: boolean;
   updateCheckMs: number;
   singleInstance: boolean;
+  /**
+   * After a successful Done, ask Grok for 1–3 follow-up suggestions (JSON) and
+   * attach them as inline buttons on the Done message. Default true.
+   */
+  suggestionsEnabled: boolean;
+  /**
+   * Auto-queue any suggestion whose need score is ≥ this percent (0–100).
+   * 0 disables auto-approve (buttons only). Default 95.
+   * Multiple hits are merged into one numbered multi-step prompt.
+   */
+  suggestionsAutoApprovePct: number;
+  /**
+   * After a successful user turn (queue empty), optionally run one self-recheck
+   * pass before Done + suggestions. Skipped when no files changed or when a
+   * quiet AI decision refuses. Default true. Typo alias: SLEF_RECHECK.
+   */
+  selfRecheckEnabled: boolean;
+  /**
+   * Optional override for the recheck turn body when the AI decides recheck is
+   * needed (SELF_RECHECK_PROMPT). Supports {{USER}} and {{DONE}}. Empty → use
+   * the AI-written recheck prompt (or built-in default if the AI left it blank).
+   */
+  selfRecheckPrompt: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -231,9 +254,27 @@ export function loadConfig(): AppConfig {
     autoUpdate: bool(process.env.AUTO_UPDATE, true),
     updateCheckMs: num(process.env.UPDATE_CHECK_MS, 3_600_000),
     singleInstance: bool(process.env.GROK_TG_SINGLE_INSTANCE, true),
+    // Post-turn follow-ups: default on; auto-run suggestions scoring ≥ 95%.
+    suggestionsEnabled: bool(process.env.SUGGESTIONS_ENABLED, true),
+    suggestionsAutoApprovePct: clampPct(process.env.SUGGESTIONS_AUTO_APPROVE_PCT, 95),
+    // One-shot post-turn self-recheck before Done/suggestions (default on).
+    // Accept typo SLEF_RECHECK as alias.
+    selfRecheckEnabled: bool(
+      process.env.SELF_RECHECK ?? process.env.SLEF_RECHECK,
+      true,
+    ),
+    selfRecheckPrompt: (process.env.SELF_RECHECK_PROMPT ?? "").trim(),
   };
 
   return cfg;
+}
+
+/** Parse 0–100 percentage; blank → default. */
+function clampPct(v: string | undefined, def: number): number {
+  if (v === undefined || v === "") return def;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(0, Math.min(100, Math.round(n)));
 }
 
 /** Resolve the `grok` binary path. The official installer puts it in

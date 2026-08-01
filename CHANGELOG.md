@@ -9,6 +9,42 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-01
+
+### Added
+
+- **Post-turn suggestions.** After Done, quietly ask for 1–3 follow-ups with a
+  need score (0–100). Shown as inline buttons; items at/above
+  `SUGGESTIONS_AUTO_APPROVE_PCT` (default 95) run as **one** numbered multi-step
+  prompt (`1) …\n2) …`).
+- **Gated self-recheck.** After a successful user turn with file changes, a
+  quiet AI decision may refuse recheck (simple tasks / pure build) or write a
+  focused recheck prompt that runs once before Done. Skipped when no files
+  modified. Env: `SELF_RECHECK` / `SLEF_RECHECK`, optional `SELF_RECHECK_PROMPT`.
+- **Auto complexity steering.** First prompt of a session steers Simple vs
+  Complex without asking the user; plan-mode exit is auto-approved
+  (`_x.ai/exit_plan_mode`).
+- **Plan board rendering.** Live plan entries with progress in the status stream.
+- **Session import.** Import external session transcripts into a bot-controlled
+  session.
+- **Richer tool / file / markdown rendering.** Improved tool-call detail, file
+  op summaries (including first-turn vs recheck split), session card comments,
+  and Markdown fence safety.
+- **Usage / accounts menu polish.** Clearer usage and account surfaces in the
+  Telegram menu.
+
+### Fixed / hardened
+
+- **Near-100% bot lifetime.** Telegram long-poll restarts forever; uncaught
+  errors stay up; ACP and `createBot` boot retries; lock heartbeat; Windows VBS
+  forever-restart supervisor; stop kills the VBS host; self-relaunch / updater
+  stay alive if spawn fails.
+- **Self-recheck / queue safety.** `mergeInputs` preserves `skipSelfRecheck`;
+  meta turns flush alone so auto-batches cannot re-arm recheck loops; cancel
+  during recheck decision does not queue a recheck.
+- **Plan exit reliability.** Correct ACP method and approval payload for plan
+  mode exit.
+
 ## [2.3.1] - 2026-07-19
 
 ### Fixed
@@ -778,6 +814,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.4.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.4.0
 [2.3.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.1
 [2.3.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.0
 [2.2.4]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.2.4

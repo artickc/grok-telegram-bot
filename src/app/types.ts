@@ -63,8 +63,25 @@ export interface PromptInput {
    * to. See {@link ../bot/reply-context.ts}.
    */
   quotedText?: string;
+  /**
+   * System/meta turns (self-recheck, auto-approved suggestion batches) must not
+   * trigger another self-recheck — only real user prompts do (once each).
+   */
+  skipSelfRecheck?: boolean;
 }
 
-export function textPrompt(text: string, replyTo?: number, quotedText?: string): PromptInput {
-  return { text, images: [], resourceLinks: [], replyTo, quotedText };
+export function textPrompt(
+  text: string,
+  replyTo?: number,
+  quotedText?: string,
+  opts?: { skipSelfRecheck?: boolean },
+): PromptInput {
+  return {
+    text,
+    images: [],
+    resourceLinks: [],
+    replyTo,
+    quotedText,
+    skipSelfRecheck: opts?.skipSelfRecheck,
+  };
 }

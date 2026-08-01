@@ -13,6 +13,11 @@ export interface SessionMeta {
   active: boolean;
   /** Size of the .jsonl history in bytes (proxy for conversation length). */
   historyBytes: number;
+  /**
+   * Short status line for cards: current step while working, or chat summary
+   * when idle (persisted by the bot after turns).
+   */
+  comment?: string;
 }
 
 export type HistoryRole = "user" | "assistant" | "tool" | "system";

@@ -25,7 +25,14 @@ export function fileOpFromUpdate(u: SessionUpdate): { path: string; op: FileOp }
   const raw = (u.rawInput || {}) as Record<string, unknown>;
   const diff = findDiff(u);
   const path =
-    str(diff?.path) || str(raw.path) || str(raw.file_path) || str(raw.filename) || pathFromTitle(u.title);
+    str(diff?.path) ||
+    str(raw.path) ||
+    str(raw.file_path) ||
+    str(raw.filePath) ||
+    str(raw.target_file) ||
+    str(raw.targetFile) ||
+    str(raw.filename) ||
+    pathFromTitle(u.title);
   if (!path) return undefined;
 
   if (kind === "delete") return { path, op: "deleted" };
@@ -69,6 +76,29 @@ export function summarizeFileOps(ops: Map<string, FileOp>, cwd: string, maxList 
 /** Compact, one-line counts (no file list) — used for "other session" pings. */
 export function summarizeFileOpsShort(ops: Map<string, FileOp>): string {
   return ops.size === 0 ? "\u{1F4C4} No files modified" : `\u{1F4DD} ${countsLine(ops)}`;
+}
+
+/**
+ * Split Done body: first-turn edits vs self-recheck edits (when a recheck ran).
+ * Each section uses the same compact list format as {@link summarizeFileOps}.
+ */
+export function summarizeFileOpsSplit(
+  firstTurn: Map<string, FileOp>,
+  recheck: Map<string, FileOp>,
+  cwd: string,
+  maxList = 15,
+): string {
+  const a = summarizeFileOps(firstTurn, cwd, maxList);
+  const b = summarizeFileOps(recheck, cwd, maxList);
+  return (
+    `\u{1F4C1} After first turn\n${a}` +
+    `\n\n\u{1F50D} After self-recheck\n${b}`
+  );
+}
+
+/** Clone a file-ops map (for freezing first-turn edits before recheck). */
+export function cloneFileOps(ops: Map<string, FileOp>): Map<string, FileOp> {
+  return new Map(ops);
 }
 
 /** "+2 created · ~3 edited · −1 deleted" — only the non-zero buckets. */

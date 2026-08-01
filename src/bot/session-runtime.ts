@@ -4,7 +4,7 @@
  * and per-chat preferences (project, agent, model, reasoning). State persists
  * to the settings store so it survives restarts.
  */
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { type Api, InlineKeyboard } from "grammy";
 import {
   type GrokClient,
@@ -15,26 +15,67 @@ import {
   type SessionMetadata,
 } from "../grok/client.js";
 import type { AccountRotator } from "./account-rotator.js";
-import type { ContentBlock, PromptResult, SessionUpdate } from "../grok/types.js";
+import { contentText, type ContentBlock, type PromptResult, type SessionUpdate } from "../grok/types.js";
 import type { AppConfig } from "../config.js";
 import { reasoningDirective } from "../app/reasoning.js";
 import type { SettingsStore } from "../app/settings-store.js";
 import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types.js";
 import { createLogger } from "../logger.js";
-import { buildTranscript } from "../sessions/history.js";
+import { buildTranscript, readHistory } from "../sessions/history.js";
 import { sessionHashtags } from "../render/hashtags.js";
 import { PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { buildPriming, recentTranscript } from "./session-fork.js";
 import { TailWatcher } from "../sessions/tail.js";
 import type { HistoryEntry } from "../sessions/types.js";
 import { formatToolCall } from "../render/tool-call.js";
-import { type FileOp, fileOpFromUpdate, mergeFileOp, summarizeFileOps, summarizeFileOpsShort } from "../render/file-summary.js";
+import {
+  mergeToolSnapshot,
+  snapshotHasDetail,
+  type ToolSnapshot,
+} from "../render/tool-call-merge.js";
+import {
+  type FileOp,
+  cloneFileOps,
+  fileOpFromUpdate,
+  mergeFileOp,
+  summarizeFileOps,
+  summarizeFileOpsShort,
+  summarizeFileOpsSplit,
+} from "../render/file-summary.js";
 import { isActiveStatus, renderSubagentTransition, statusKey } from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
 import { ResponseStreamer } from "../stream/streamer.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { collectTurnImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
+import { wrapAutoComplexityPrompt } from "./complexity-gate.js";
+import {
+  autoApproveSuggestions,
+  buildSelfRecheckDecisionPrompt,
+  buildSelfRecheckPrompt,
+  buildSuggestionsPrompt,
+  composeSelfRecheckTurn,
+  formatBatchedSuggestionsPrompt,
+  isSelfRecheckPrompt,
+  parseSelfRecheckDecision,
+  parseSuggestions,
+  type Suggestion,
+  suggestionsKeyboard,
+} from "./suggestions.js";
+import {
+  parsePlanUpdate,
+  renderPlanMarkdown,
+  renderPlanOneLine,
+  type PlanEntry,
+} from "../render/plan.js";
+import {
+  buildLastTurnSummary,
+  cleanCommentLine,
+  cleanUserPreview,
+  stepFromThought,
+  stepFromToolUpdate,
+  stripDirectiveWrappers,
+} from "../render/session-comment.js";
 import {
   backoffSchedule,
   fmtSeconds,
@@ -85,6 +126,8 @@ export class SessionRuntime {
   private streamer: ResponseStreamer | undefined;
   private readonly typing: TypingIndicator;
   private shownToolIds = new Set<string>();
+  /** toolCallId → merged snapshot so completed updates keep title/args. */
+  private toolCallCache = new Map<string, ToolSnapshot>();
   /** Files touched this turn (path -> operation), tracked even in background so
    *  the completion message can summarise what changed. */
   private fileOps = new Map<string, FileOp>();
@@ -127,6 +170,49 @@ export class SessionRuntime {
   /** Optional multi-account rotator: when a turn gives up, cycle through the
    *  other saved logins once and retry on each. Injected by the registry. */
   accountRotator: AccountRotator | undefined;
+  /** Session ids that already received the first-prompt auto-complexity directive. */
+  private complexitySteered = new Set<string>();
+  /** Last credits total reported for this session (for per-turn delta accounting). */
+  private lastReportedCredits = 0;
+  /** Live "what is happening now" line while a turn is in flight. */
+  private liveStep: string | undefined;
+  /** Idle card comment (AI/local summary of the chat after the last turn). */
+  private sessionComment: string | undefined;
+  /** User text of the turn currently running (for local card-comment fallback). */
+  private turnUserText = "";
+  /** Assistant prose streamed this turn — used to build the idle card summary. */
+  private turnAssistantText = "";
+  /** Quiet meta capture (suggestions) — never stream to Telegram. */
+  private capturingQuiet = false;
+  private quietCaptureBuf = "";
+  /** Batches of post-turn suggestions for inline-button callbacks. */
+  private suggestionBatches = new Map<number, Suggestion[]>();
+  private suggestionBatchSeq = 0;
+  /**
+   * Last successful Done's suggestions — kept so a background "Done from other
+   * session" can carry buttons, and so switching back to this session re-shows
+   * them even if the user missed the notify (or notify was off).
+   */
+  private pendingSuggestions:
+    | { batchId: number; suggestions: Suggestion[]; banner: string }
+    | undefined;
+  /** Live ACP plan board for the current turn (done / in-progress / pending). */
+  private planEntries: PlanEntry[] | undefined;
+  /** True while the active turn is the automatic one-shot self-recheck pass. */
+  private isSelfRecheckTurn = false;
+  /**
+   * Original user prompt (and first-pass assistant text) for suggestions after
+   * a self-recheck turn, so follow-ups stay grounded in the real user request.
+   */
+  private suggestionUserText = "";
+  private preRecheckAssistantText = "";
+  /** File ops from the first turn, frozen before the self-recheck pass. */
+  private preRecheckFileOps = new Map<string, FileOp>();
+  /**
+   * When true, this turn must not schedule a self-recheck (meta / auto-queue /
+   * already-recheck). Set from PromptInput.skipSelfRecheck or recheck marker.
+   */
+  private skipSelfRecheck = false;
 
   constructor(
     private readonly api: Api,
@@ -176,9 +262,51 @@ export class SessionRuntime {
     return this.lastCompletion;
   }
 
-  /** Latest task-completion % (0вЂ“100) parsed this turn, or undefined if none. */
+  /** Latest task-completion % (0–100) parsed this turn, or undefined if none. */
   get taskProgress(): number | undefined {
     return this.progress;
+  }
+
+  /**
+   * Full plan board for the live stream / status panel (above the progress bar).
+   * Empty when no plan is active this turn.
+   */
+  get planBoard(): string | undefined {
+    if (!this.planEntries?.length) return undefined;
+    return renderPlanMarkdown(this.planEntries);
+  }
+
+  /** One-line plan summary for compact cards. */
+  get planSummary(): string | undefined {
+    if (!this.planEntries?.length) return undefined;
+    return renderPlanOneLine(this.planEntries);
+  }
+
+  /**
+   * Pending post-turn suggestions for switch replay / Done markup.
+   * Returns text + keyboard without clearing (taps still resolve via batch id).
+   */
+  peekPendingSuggestions():
+    | { text: string; markup: InlineKeyboard; batchId: number }
+    | undefined {
+    const p = this.pendingSuggestions;
+    if (!p?.suggestions.length) return undefined;
+    return {
+      text: p.banner,
+      markup: suggestionsKeyboard(p.batchId, p.suggestions),
+      batchId: p.batchId,
+    };
+  }
+
+  /**
+   * One-line status for Running/Sessions cards:
+   * live step while busy, otherwise the last chat summary / comment.
+   */
+  get cardComment(): string | undefined {
+    if (this.busy && this.liveStep) return this.liveStep;
+    if (this.sessionComment) return this.sessionComment;
+    if (this.sessionId) return this.acp.sessionComment(this.sessionId);
+    return undefined;
   }
 
   /** Record a new progress value and refresh the status panel / cards. The bar
@@ -189,6 +317,36 @@ export class SessionRuntime {
     if (next === this.progress) return;
     this.progress = next;
     this.changed();
+  }
+
+  /** Update the live step shown on session cards (throttled by equality). */
+  private setLiveStep(step: string | undefined): void {
+    const next = step?.trim() ? cleanCommentLine(step) : undefined;
+    if (next === this.liveStep) return;
+    this.liveStep = next;
+    this.changed();
+  }
+
+  /** Persist idle card comment (disk + memory) so /running and /sessions see it. */
+  private setSessionComment(comment: string | undefined): void {
+    const next = comment?.trim() ? cleanCommentLine(comment) : undefined;
+    if (next === this.sessionComment) return;
+    this.sessionComment = next;
+    if (next && this.sessionId) {
+      try {
+        this.acp.setSessionComment(this.sessionId, next);
+      } catch {
+        /* non-fatal */
+      }
+    }
+    this.changed();
+  }
+
+  /** Hydrate comment from disk after bind/resume. */
+  private loadPersistedComment(): void {
+    if (!this.sessionId) return;
+    const c = this.acp.sessionComment(this.sessionId);
+    if (c) this.sessionComment = c;
   }
 
   /** Searchable hashtag footer for this session (project В· session В· model В·
@@ -212,6 +370,10 @@ export class SessionRuntime {
         // Any transient follow-watch of this session is now superseded.
         if (this.watchIsFollow) this.stopWatch();
         this.streamer = new ResponseStreamer(this.api, this.chatId, this.cfg.streamThrottleMs, this.turnReplyTo, this.hashtags(), (pct) => this.setProgress(pct), this.cfg.progressFallback, this.turnStartedAt);
+        // Restore the live plan board so steps stay visible above the progress bar.
+        if (this.planEntries?.length) {
+          this.streamer.setPlan(renderPlanMarkdown(this.planEntries));
+        }
         this.typing.start();
       }
     } else {
@@ -274,6 +436,10 @@ export class SessionRuntime {
     this.rebindPending = false;
     this.cwd = cwd;
     this.projectName = projectName;
+    this.turnCount = 0;
+    this.lastReportedCredits = 0;
+    this.liveStep = undefined;
+    this.sessionComment = undefined;
     await this.applySessionPrefs();
     this.persist();
     this.sessionChanged();
@@ -298,6 +464,7 @@ export class SessionRuntime {
     this.rebindPending = false;
     this.cwd = cwd;
     this.projectName = projectName;
+    this.loadPersistedComment();
     this.persist();
     log.info(`chat ${this.chatId} -> resumed session ${sessionId} @ ${cwd}`);
     this.changed();
@@ -318,6 +485,18 @@ export class SessionRuntime {
       if (priorEntries.length > 0) this.primingContext = buildPriming(buildTranscript(priorEntries));
       return "forked";
     }
+  }
+
+  /**
+   * Start a brand-new Grok session primed with a full foreign transcript
+   * (import from Kiro / OpenCode / Claude / Codex). Priming is applied on the
+   * next {@link submit} so the imported context becomes part of Grok's history.
+   */
+  async startImportedSession(cwd: string, projectName: string | undefined, priming: string): Promise<void> {
+    await this.startNewSession(cwd, projectName);
+    if (priming.trim()) this.primingContext = priming;
+    // Imported transcripts already have context — skip first-prompt complexity steering.
+    this.markComplexitySteered();
   }
 
   startWatch(jsonlPath: string, follow = false): void {
@@ -399,7 +578,7 @@ export class SessionRuntime {
     }
   }
 
-  // в”Ђв”Ђ prompting в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ── prompting ────────────────────────────────────────────────────────────
 
   async submit(input: PromptInput): Promise<"ran" | "queued"> {
     await this.ensureSession();
@@ -408,8 +587,41 @@ export class SessionRuntime {
       this.changed();
       return "queued";
     }
-    void this.runTurn(input);
+    // First prompt of a fresh session: steer the agent to decide complexity
+    // itself (plan if complex, implement if simple) — never ask the user.
+    let toRun = input;
+    if (this.shouldSteerComplexity()) {
+      toRun = wrapAutoComplexityPrompt(input);
+      this.markComplexitySteered();
+      log.info(`chat ${this.chatId}: first-prompt auto-complexity steering applied`);
+    }
+    void this.runTurn(toRun);
     return "ran";
+  }
+
+  private markComplexitySteered(): void {
+    if (this.sessionId) this.complexitySteered.add(this.sessionId);
+  }
+
+  /**
+   * Apply auto-complexity directive only on the first prompt of a brand-new
+   * conversation (no prior user turns in this process / session jsonl).
+   */
+  private shouldSteerComplexity(): boolean {
+    if (!this.sessionId) return false;
+    if (this.complexitySteered.has(this.sessionId)) return false;
+    if (this.turnCount > 0) return false;
+    try {
+      const path = join(this.cfg.sessionsDir, `${this.sessionId}.jsonl`);
+      const hist = readHistory(path, 8);
+      if (hist.some((e) => e.role === "user" && e.text.trim().length > 0)) {
+        this.complexitySteered.add(this.sessionId);
+        return false;
+      }
+    } catch {
+      /* treat as fresh */
+    }
+    return true;
   }
 
   async cancel(): Promise<boolean> {
@@ -462,10 +674,11 @@ export class SessionRuntime {
   /** Reload a persisted session, retrying flaky failures with a short backoff.
    *  Returns true once loaded, false after the attempts are exhausted. */
   private async rebindWithRetries(sessionId: string, attempts = 4): Promise<boolean> {
-    const delays = [400, 1200, 3000]; // в‰€4.6s total before giving up
+    const delays = [400, 1200, 3000]; // ~4.6s total before giving up
     for (let i = 0; i < attempts; i++) {
       try {
         await this.acp.loadSession(sessionId, this.cwd);
+        this.loadPersistedComment();
         return true;
       } catch (err) {
         log.warn(
@@ -501,10 +714,34 @@ export class SessionRuntime {
     this.busy = true;
     this.cancelled = false;
     this.turnReplyTo = input.replyTo;
+    this.turnUserText = input.text;
+    this.turnAssistantText = "";
+    this.isSelfRecheckTurn = isSelfRecheckPrompt(input.text);
+    // Meta turns (recheck, auto-suggestion batches) never arm another recheck.
+    this.skipSelfRecheck = !!input.skipSelfRecheck || this.isSelfRecheckTurn;
+    // Fresh user work resets suggestion anchors; recheck keeps the original ask.
+    // Strip complexity/reply wrappers so suggestions + recheck see the real ask.
+    if (!this.isSelfRecheckTurn) {
+      this.suggestionUserText = stripDirectiveWrappers(input.text) || input.text;
+      this.preRecheckAssistantText = "";
+      this.preRecheckFileOps = new Map();
+    }
     this.shownToolIds = new Set();
+    this.toolCallCache = new Map();
     this.fileOps = new Map();
     this.subagentShown = new Map();
     this.progress = undefined; // a new turn = a new task; clear the old bar
+    this.planEntries = undefined; // plan board is per-turn
+    this.pendingSuggestions = undefined; // new work supersedes previous Done suggestions
+    this.setLiveStep(
+      this.isSelfRecheckTurn
+        ? "Self-recheck: hunting bugs / incomplete logic\u2026"
+        : input.text.trim()
+          ? `Working: ${cleanUserPreview(input.text, 110)}`
+          : input.images.length
+            ? "Working on attached image(s)\u2026"
+            : "Working\u2026",
+    );
     // A new streamed turn supersedes any transient "follow" watch of this same
     // session's previous in-flight turn (avoids duplicated output).
     if (this.watchIsFollow) this.stopWatch();
@@ -545,7 +782,7 @@ export class SessionRuntime {
       if (resumed) final = resumed;
       const streamedOutput = this.streamer?.hasOutput ?? false;
       // On a successful, non-cancelled turn, top the fallback bar up to 100 (a
-      // no-op when the agent reported its own progress вЂ” its value is kept).
+      // no-op when the agent reported its own progress — its value is kept).
       if (final.result && !this.cancelled) this.streamer?.completeFallback();
       if (this.streamer) await this.streamer.finalize();
       if (this.foreground) await this.sendTurnImages();
@@ -554,31 +791,219 @@ export class SessionRuntime {
       // the foreground turn, or a background turn when NOTIFY_OTHER_SESSIONS is on.
       const canPing = this.foreground || this.cfg.notifyOtherSessions;
       // A background session about to run a queued follow-up shouldn't ping its
-      // interim "Done" вЂ” only the final, queue-empty turn announces completion.
+      // interim "Done" — only the final, queue-empty turn announces completion.
       const hasQueued = this.queue.length > 0;
       const switchKb = this.switchKeyboard();
-      if (final.result && !this.cancelled) this.turnCount++;
-      if (final.result || this.cancelled) {
-        const live = this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
-        const pingDone = canPing && (this.foreground || !hasQueued);
-        if (pingDone) await this.notify(live, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+      if (final.result && !this.cancelled) {
+        this.turnCount++;
+        // Persist real per-account usage (turns + reported credits) for /accounts and /usage.
+        this.recordAccountUsage();
+        // Card comment: what this turn solved (assistant result + files) — no extra agent call.
+        this.setSessionComment(
+          buildLastTurnSummary({
+            userText: this.turnUserText,
+            assistantText: this.turnAssistantText,
+            fileOps: this.fileOps,
+            stopReason: final.result.stopReason,
+          }),
+        );
+        this.setLiveStep(undefined);
+      } else if (this.cancelled) {
+        this.setSessionComment(
+          buildLastTurnSummary({
+            userText: this.turnUserText,
+            assistantText: this.turnAssistantText,
+            fileOps: this.fileOps,
+            cancelled: true,
+          }),
+        );
+        this.setLiveStep(undefined);
       } else if (final.error) {
-        const transient = isTransientError(final.error);
-        const live = this.errorMessage(final.error, startedAt, final.attempts, transient);
-        if (canPing) await this.notify(live, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+        this.setSessionComment(
+          buildLastTurnSummary({
+            userText: this.turnUserText,
+            assistantText: this.turnAssistantText,
+            fileOps: this.fileOps,
+            error: final.error.message,
+          }),
+        );
+        this.setLiveStep(undefined);
+      }
+      if (final.result || this.cancelled) {
+        const liveMsg = this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
+        const pingDone = canPing && (this.foreground || !hasQueued);
+
+        // One-shot self-recheck: only after a real *user* turn (not meta/auto),
+        // with idle queue. skipSelfRecheck blocks loops after recheck / auto-batch.
+        // Also skipped when no files were modified, or when a quiet AI decision
+        // refuses (simple tasks, pure build, nothing worth re-verifying).
+        const wantSelfRecheck =
+          !!final.result &&
+          !this.cancelled &&
+          !hasQueued &&
+          this.cfg.selfRecheckEnabled &&
+          !this.skipSelfRecheck &&
+          !this.isSelfRecheckTurn;
+
+        let queuedRecheck = false;
+        if (wantSelfRecheck) {
+          this.preRecheckAssistantText = this.turnAssistantText;
+          // Strip COMPLEXITY wrapper so recheck + suggestions see the real ask.
+          this.suggestionUserText = stripDirectiveWrappers(this.turnUserText) || this.turnUserText;
+          this.preRecheckFileOps = cloneFileOps(this.fileOps);
+          this.setLiveStep("Deciding if self-recheck is needed\u2026");
+          this.changed();
+          const recheck = await this.maybePlanSelfRecheck();
+          this.setLiveStep(undefined);
+          // User may cancel during the quiet decision call — first turn still
+          // succeeded; never queue a recheck after cancel.
+          if (this.cancelled) {
+            this.preRecheckFileOps = new Map();
+            this.preRecheckAssistantText = "";
+          } else if (recheck) {
+            queuedRecheck = true;
+            // Front of queue; mark skip so the recheck turn never re-arms itself.
+            this.queue.unshift(
+              textPrompt(recheck, this.turnReplyTo, undefined, { skipSelfRecheck: true }),
+            );
+            this.changed();
+            if (pingDone) {
+              // Interim status + first-turn file list (final Done comes after recheck).
+              const firstFiles = summarizeFileOps(this.preRecheckFileOps, this.cwd);
+              await this.notify(
+                `\u{1F50D} Self-recheck \u2014 bugs, logic gaps, related follow-through (once)\u2026\n\n` +
+                  `\u{1F4C1} After first turn\n${firstFiles}`,
+                { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb },
+              );
+            }
+          } else {
+            // No recheck — clear frozen first-turn ops (nothing to split later).
+            this.preRecheckFileOps = new Map();
+            this.preRecheckAssistantText = "";
+          }
+        }
+
+        if (!queuedRecheck) {
+          // Post-turn suggestions on successful, non-cancelled Done with idle queue —
+          // both foreground and background (so switch-to-session can re-show them).
+          let doneMarkup = switchKb;
+          // After a recheck pass, rebuild Done with split first-turn / recheck files.
+          let doneText = this.isSelfRecheckTurn
+            ? this.completionMessageSplit(final.result?.stopReason, startedAt, streamedOutput)
+            : liveMsg;
+          if (final.result && !this.cancelled && !hasQueued) {
+            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+              // Only auto-queue high-need follow-ups when the user is watching;
+              // background sessions store buttons for the Done ping / switch replay.
+              autoQueue: this.foreground,
+            });
+            doneText = sug.text;
+            doneMarkup = sug.markup;
+          }
+          if (pingDone) await this.notify(doneText, { loud: true, replyTo: this.turnReplyTo, replyMarkup: doneMarkup });
+          // Clear frozen first-turn ops after final Done (recheck path done).
+          if (this.isSelfRecheckTurn) this.preRecheckFileOps = new Map();
+        }
+      } else if (final.error) {
+        // If the self-recheck pass itself failed, still surface Done for the
+        // original work (split files + suggestions) so the user is not stuck.
+        if (this.isSelfRecheckTurn && !hasQueued) {
+          const switchKb = this.switchKeyboard();
+          const pingDone = canPing && (this.foreground || !hasQueued);
+          let doneText =
+            this.completionMessageSplit(undefined, startedAt, streamedOutput) +
+            `\n\n\u26A0\uFE0F Self-recheck failed: ${final.error.message}`;
+          if (!this.cancelled) {
+            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+              autoQueue: this.foreground,
+            });
+            doneText = sug.text;
+            if (pingDone) {
+              await this.notify(doneText, {
+                loud: true,
+                replyTo: this.turnReplyTo,
+                replyMarkup: sug.markup,
+              });
+            }
+          } else if (pingDone) {
+            await this.notify(doneText, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+          }
+          this.preRecheckFileOps = new Map();
+        } else {
+          const transient = isTransientError(final.error);
+          const liveMsg = this.errorMessage(final.error, startedAt, final.attempts, transient);
+          if (canPing) await this.notify(liveMsg, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+        }
       }
     } catch (err) {
       // Unexpected failure outside the prompt path (e.g. while finalizing).
       await this.streamer?.finalize().catch(() => {});
-      const msg = `\u274C Error after ${fmtDuration(Date.now() - startedAt)}: ${(err as Error).message}`;
-      this.lastCompletion = msg;
-      if (this.foreground || this.cfg.notifyOtherSessions) {
-        const from = this.foreground ? "" : `\u{1F4E8} From other session ${this.sessionTag()}\n`;
-        await this.notify(`${from}${msg}`, { loud: true, replyTo: this.turnReplyTo, replyMarkup: this.switchKeyboard() });
+      const errMsg = (err as Error).message;
+      this.setSessionComment(
+        buildLastTurnSummary({
+          userText: this.turnUserText,
+          assistantText: this.turnAssistantText,
+          fileOps: this.fileOps,
+          error: errMsg,
+        }),
+      );
+      this.setLiveStep(undefined);
+      // If the self-recheck pass itself blew up, still surface Done for the
+      // original work (split files + suggestions) so the user is not stuck.
+      if (this.isSelfRecheckTurn && this.queue.length === 0) {
+        const switchKb = this.switchKeyboard();
+        const canPing = this.foreground || this.cfg.notifyOtherSessions;
+        let doneText =
+          this.completionMessageSplit(undefined, startedAt, this.streamer?.hasOutput ?? false) +
+          `\n\n\u26A0\uFE0F Self-recheck failed: ${errMsg}`;
+        try {
+          if (!this.cancelled) {
+            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+              autoQueue: this.foreground,
+            });
+            doneText = sug.text;
+            if (canPing) {
+              await this.notify(doneText, {
+                loud: true,
+                replyTo: this.turnReplyTo,
+                replyMarkup: sug.markup,
+              });
+            }
+          } else if (canPing) {
+            await this.notify(doneText, {
+              loud: true,
+              replyTo: this.turnReplyTo,
+              replyMarkup: switchKb,
+            });
+          }
+        } catch (e2) {
+          log.debug(`recheck catch recovery failed: ${(e2 as Error).message}`);
+          if (canPing) {
+            await this.notify(doneText, {
+              loud: true,
+              replyTo: this.turnReplyTo,
+              replyMarkup: switchKb,
+            }).catch(() => {});
+          }
+        }
+        this.preRecheckFileOps = new Map();
+      } else {
+        const msg = `\u274C Error after ${fmtDuration(Date.now() - startedAt)}: ${errMsg}`;
+        this.lastCompletion = msg;
+        if (this.foreground || this.cfg.notifyOtherSessions) {
+          const from = this.foreground ? "" : `\u{1F4E8} From other session ${this.sessionTag()}\n`;
+          await this.notify(`${from}${msg}`, {
+            loud: true,
+            replyTo: this.turnReplyTo,
+            replyMarkup: this.switchKeyboard(),
+          });
+        }
       }
     } finally {
       this.typing.stop();
       this.streamer = undefined;
+      this.capturingQuiet = false;
+      this.quietCaptureBuf = "";
       this.busy = false;
       this.activity(false);
       // The in-flight turn we may have been following live is over.
@@ -587,6 +1012,9 @@ export class SessionRuntime {
       // the bar is removed from the status panel, session cards and switch
       // messages. The finished streamed bubble keeps its own (frozen) bar.
       this.progress = undefined;
+      this.planEntries = undefined;
+      // Prefer stored summary on cards once idle (clear live step if still set).
+      if (!this.liveStep || this.sessionComment) this.liveStep = undefined;
       this.changed();
     }
 
@@ -596,6 +1024,183 @@ export class SessionRuntime {
   private activity(busy: boolean): void {
     try {
       this.onActivity?.(busy);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /**
+   * Quietly ask for 1–3 follow-ups, attach buttons to the Done text, store them
+   * for switch-replay, and optionally queue auto-approved items as **one**
+   * numbered multi-step prompt (`1) …\n2) …`).
+   */
+  private async collectAndApplySuggestions(
+    doneText: string,
+    switchKb: InlineKeyboard | undefined,
+    opts?: { autoQueue?: boolean },
+  ): Promise<{ text: string; markup?: InlineKeyboard }> {
+    if (!this.cfg.suggestionsEnabled || !this.sessionId) {
+      return { text: doneText, markup: switchKb };
+    }
+    let suggestions: Suggestion[] = [];
+    try {
+      suggestions = await this.fetchSuggestionsQuiet();
+    } catch (e) {
+      log.debug(`suggestions fetch failed: ${(e as Error).message}`);
+    }
+    if (suggestions.length === 0) return { text: doneText, markup: switchKb };
+
+    const batchId = ++this.suggestionBatchSeq;
+    this.suggestionBatches.set(batchId, suggestions);
+    // Bound memory: keep last ~20 batches.
+    if (this.suggestionBatches.size > 20) {
+      const oldest = [...this.suggestionBatches.keys()].sort((a, b) => a - b)[0]!;
+      this.suggestionBatches.delete(oldest);
+    }
+
+    const thr = this.cfg.suggestionsAutoApprovePct;
+    const autoQueue = opts?.autoQueue !== false;
+    const auto = autoQueue ? autoApproveSuggestions(suggestions, thr) : [];
+    let text = doneText;
+    let banner: string;
+    if (auto.length > 0) {
+      const batched = formatBatchedSuggestionsPrompt(auto);
+      const lines = auto.map((s, i) => `  ${i + 1}) ${s.need}% \u2014 ${s.text}`);
+      const autoBlock =
+        `\n\n\u{1F4A1} Auto-running ${auto.length} suggestion${auto.length === 1 ? "" : "s"}` +
+        ` as one prompt (\u2265 ${thr}% need):\n${lines.join("\n")}`;
+      text += autoBlock;
+      banner = `\u{1F4A1} Suggestions (auto-running ${auto.length} as one prompt):\n${lines.join("\n")}`;
+      // Single queue entry — agent executes 1) 2) 3) in one turn.
+      // skipSelfRecheck: auto-follow-ups must not arm another recheck cycle.
+      this.queue.push(textPrompt(batched, this.turnReplyTo, undefined, { skipSelfRecheck: true }));
+      this.changed();
+    } else {
+      text += "\n\n\u{1F4A1} Suggestions \u2014 tap one to continue:";
+      banner = "\u{1F4A1} Suggestions \u2014 tap one to continue:";
+    }
+
+    // Keep for switch-to-session replay (and for Done pings that already include
+    // the same keyboard). Cleared when a new turn starts.
+    this.pendingSuggestions = { batchId, suggestions, banner };
+
+    const markup = suggestionsKeyboard(batchId, suggestions, switchKb);
+    return { text, markup };
+  }
+
+  /**
+   * Decide whether to queue a self-recheck turn.
+   * - Hard skip when no files were modified this turn.
+   * - Quiet AI decision: refuse (simple / not needed) or write recheck prompt.
+   * - Returns the full recheck turn text, or undefined to skip.
+   */
+  private async maybePlanSelfRecheck(): Promise<string | undefined> {
+    if (this.fileOps.size === 0) {
+      log.info(`chat ${this.chatId}: self-recheck skipped (no files modified)`);
+      return undefined;
+    }
+    if (this.cancelled) return undefined;
+    const user =
+      this.suggestionUserText ||
+      stripDirectiveWrappers(this.turnUserText) ||
+      this.turnUserText;
+    const did = this.turnAssistantText;
+    const files = summarizeFileOpsShort(this.fileOps);
+
+    let decision;
+    try {
+      decision = await this.fetchSelfRecheckDecisionQuiet(user, did, files);
+    } catch (e) {
+      log.debug(`self-recheck decision failed: ${(e as Error).message}; skipping`);
+      return undefined;
+    }
+    if (this.cancelled) return undefined;
+    if (!decision.needed) {
+      log.info(
+        `chat ${this.chatId}: self-recheck skipped by agent` +
+          (decision.reason ? ` (${decision.reason})` : ""),
+      );
+      return undefined;
+    }
+
+    // Optional env template overrides the AI-written body when set.
+    if (this.cfg.selfRecheckPrompt) {
+      return buildSelfRecheckPrompt(user, did, this.cfg.selfRecheckPrompt);
+    }
+    if (decision.prompt.trim()) {
+      return composeSelfRecheckTurn(decision.prompt, user, did);
+    }
+    // needed=true but empty prompt — fall back to built-in default template.
+    return buildSelfRecheckPrompt(user, did);
+  }
+
+  /** Quiet JSON: should we recheck, and if so what prompt? Never streams. */
+  private async fetchSelfRecheckDecisionQuiet(
+    user: string,
+    did: string,
+    filesSummary: string,
+  ): Promise<ReturnType<typeof parseSelfRecheckDecision>> {
+    if (!this.sessionId) return { needed: false, reason: "no session" };
+    const prompt = buildSelfRecheckDecisionPrompt(user, did, filesSummary);
+    this.capturingQuiet = true;
+    this.quietCaptureBuf = "";
+    try {
+      await this.acp.prompt(this.sessionId, [{ type: "text", text: prompt }]);
+      return parseSelfRecheckDecision(this.quietCaptureBuf);
+    } finally {
+      this.capturingQuiet = false;
+      this.quietCaptureBuf = "";
+    }
+  }
+
+  /** Quiet JSON suggestion turn — never streams to Telegram. */
+  private async fetchSuggestionsQuiet(): Promise<Suggestion[]> {
+    if (!this.sessionId) return [];
+    // Prefer the original user ask (before self-recheck) so need scores stay honest.
+    const user =
+      this.suggestionUserText ||
+      stripDirectiveWrappers(this.turnUserText) ||
+      this.turnUserText;
+    const didParts = [this.preRecheckAssistantText, this.turnAssistantText].filter((s) => s?.trim());
+    const did = didParts.join("\n") || this.turnAssistantText;
+    const prompt = buildSuggestionsPrompt(user, did);
+    this.capturingQuiet = true;
+    this.quietCaptureBuf = "";
+    try {
+      await this.acp.prompt(this.sessionId, [{ type: "text", text: prompt }]);
+      return parseSuggestions(this.quietCaptureBuf);
+    } finally {
+      this.capturingQuiet = false;
+      this.quietCaptureBuf = "";
+    }
+  }
+
+  /** Resolve a tapped suggestion button; returns the prompt text or undefined. */
+  takeSuggestion(batchId: number, index: number): string | undefined {
+    const batch = this.suggestionBatches.get(batchId);
+    if (!batch) return undefined;
+    const s = batch[index];
+    if (!s) return undefined;
+    return s.text;
+  }
+
+  /** Attribute a finished turn's credits/context to the active saved account. */
+  private recordAccountUsage(): void {
+    const meta = this.contextInfo();
+    // Grok's metadata credits are typically a running session total — store the
+    // per-turn delta so /accounts totals stay accurate across many turns.
+    let turnCredits: number | undefined;
+    if (typeof meta?.credits === "number" && Number.isFinite(meta.credits)) {
+      const delta = meta.credits - this.lastReportedCredits;
+      turnCredits = delta > 0 ? delta : meta.credits > 0 && this.lastReportedCredits === 0 ? meta.credits : undefined;
+      if (meta.credits >= this.lastReportedCredits) this.lastReportedCredits = meta.credits;
+      else this.lastReportedCredits = meta.credits; // reset if agent restarted counters
+    }
+    try {
+      this.accountRotator?.recordTurnUsage({
+        credits: turnCredits,
+        contextPct: meta?.contextUsagePercentage,
+      });
     } catch {
       /* non-fatal */
     }
@@ -1022,6 +1627,28 @@ export class SessionRuntime {
     return `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`;
   }
 
+  /**
+   * Final Done after a self-recheck: head + split file lists (first turn vs recheck).
+   */
+  private completionMessageSplit(
+    stopReason: string | undefined,
+    startedAt: number,
+    streamedOutput: boolean,
+  ): string {
+    const head = this.doneHead(stopReason, startedAt, streamedOutput);
+    const tags = this.hashtags();
+    const files = summarizeFileOpsSplit(this.preRecheckFileOps, this.fileOps, this.cwd);
+    const base = `${head}\n${files}`;
+    this.lastCompletion = `${base}\n\n${tags}`;
+    if (this.foreground) {
+      return streamedOutput ? base : `${base}\n\n${tags}`;
+    }
+    return (
+      `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n` +
+      `${summarizeFileOpsShort(this.preRecheckFileOps)} \u2192 recheck ${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`
+    );
+  }
+
   /** The compact one-line status of a finished turn (no "end_turn" noise). */
   private doneHead(stopReason: string | undefined, startedAt: number, streamedOutput: boolean): string {
     const elapsed = fmtDuration(Date.now() - startedAt);
@@ -1077,7 +1704,16 @@ export class SessionRuntime {
 
   private async flushQueue(): Promise<void> {
     if (this.queue.length === 0 || this.busy) return;
-    const batch = mergeInputs(this.queue.splice(0, this.queue.length));
+    // Meta / system turns (self-recheck, auto-suggestion batches) must run
+    // alone: merging them with user messages corrupts the prompt and can drop
+    // the one-shot skipSelfRecheck guard via text concatenation.
+    const head = this.queue[0]!;
+    const isMeta =
+      !!head.skipSelfRecheck ||
+      isSelfRecheckPrompt(head.text);
+    const batch = isMeta
+      ? this.queue.shift()!
+      : mergeInputs(this.queue.splice(0, this.queue.length));
     if (this.foreground) await this.notify("\u25B6\uFE0F Processing queued message\u2026");
     void this.runTurn(batch);
   }
@@ -1087,36 +1723,73 @@ export class SessionRuntime {
     this.sessionUpdateCount++;
     const kind = update.sessionUpdate;
 
+    // Quiet meta turns (follow-up suggestions): capture prose only, never stream.
+    if (this.capturingQuiet) {
+      if (kind === "agent_message_chunk") {
+        const text = contentText(update.content);
+        if (text) this.quietCaptureBuf += text;
+      }
+      return;
+    }
+
     // Accumulate the turn's file-change summary + image-scan text even when this
     // session is in the background (its output isn't streamed here, but the
     // completion message still reports what changed / which images were made).
     if (kind === "tool_call" || kind === "tool_call_update") {
-      if (update.rawInput) this.imageScanText += " " + JSON.stringify(update.rawInput);
-      if (update.title) this.imageScanText += " " + update.title;
-      // Tool results often carry the saved path only in content_blocks (Imagine).
-      if (Array.isArray(update.content_blocks)) {
-        this.imageScanText += " " + JSON.stringify(update.content_blocks);
+      // Merge early so background live-step + file ops use full title/args.
+      const tid = update.toolCallId || "";
+      const mergedEarly = mergeToolSnapshot(tid ? this.toolCallCache.get(tid) : undefined, update);
+      if (tid) this.toolCallCache.set(tid, mergedEarly);
+
+      if (mergedEarly.rawInput) this.imageScanText += " " + JSON.stringify(mergedEarly.rawInput);
+      if (mergedEarly.title) this.imageScanText += " " + mergedEarly.title;
+      if (Array.isArray(mergedEarly.content_blocks)) {
+        this.imageScanText += " " + JSON.stringify(mergedEarly.content_blocks);
       }
-      // Some agents put free-form result text on `content`.
-      if (update.content?.text) this.imageScanText += " " + update.content.text;
-      const fo = fileOpFromUpdate(update);
+      const ct = contentText(mergedEarly.content);
+      if (ct) this.imageScanText += " " + ct;
+      const fo = fileOpFromUpdate(mergedEarly);
       if (fo) this.fileOps.set(fo.path, mergeFileOp(this.fileOps.get(fo.path), fo.op));
+      // Live card step — always, even for background sessions.
+      const step = stepFromToolUpdate(mergedEarly);
+      if (step) this.setLiveStep(step);
     } else if (kind === "agent_message_chunk") {
-      const text = update.content?.text;
-      if (typeof text === "string") this.imageScanText += text;
+      const text = contentText(update.content);
+      if (text) {
+        this.imageScanText += text;
+        this.turnAssistantText += text;
+      }
+    } else if (kind === "agent_thought_chunk") {
+      const text = contentText(update.content);
+      if (text?.trim()) this.setLiveStep(stepFromThought(text));
+    } else if (kind === "plan") {
+      // Always track plan entries (background too) so switch-to-live restores the board.
+      const entries = parsePlanUpdate(update);
+      if (entries?.length) {
+        this.planEntries = entries;
+        const one = renderPlanOneLine(entries);
+        if (one) this.setLiveStep(one);
+        this.changed();
+      }
     }
 
     // Only the live foreground turn streams to Telegram.
     if (!this.foreground || !this.streamer) return;
 
+    if (kind === "plan") {
+      if (this.planEntries?.length) {
+        this.streamer.setPlan(renderPlanMarkdown(this.planEntries));
+      }
+      return;
+    }
     if (kind === "agent_message_chunk") {
-      const text = update.content?.text;
-      if (typeof text === "string") this.streamer.appendOutput(text);
+      const text = contentText(update.content);
+      if (text) this.streamer.appendOutput(text);
       return;
     }
     if (kind === "agent_thought_chunk") {
-      const text = update.content?.text;
-      if (typeof text === "string") this.streamer.appendThought(text);
+      const text = contentText(update.content);
+      if (text) this.streamer.appendThought(text);
       return;
     }
     if (kind === "tool_call" || kind === "tool_call_update") {
@@ -1124,31 +1797,40 @@ export class SessionRuntime {
       const id = update.toolCallId || "";
       const status = (update.status || "").toLowerCase();
 
-      if (kind === "tool_call_update") {
-        // Skip "in_progress"/"pending" duplicates of an already-shown initial call.
-        if (status === "pending" || status === "in_progress") {
-          const hasNewContent =
-            Array.isArray(update.content_blocks) && update.content_blocks.length > 0;
-          if (!hasNewContent) return;
-        }
-        // For completed/failed: show once (so the user sees the final status).
-        const doneKey = (id || update.title || "") + ":done";
-        if (status === "completed" || status === "failed") {
-          if (this.shownToolIds.has(doneKey)) return;
-          this.shownToolIds.add(doneKey);
-        }
-      } else {
-        // Initial tool_call: dedupe by id to avoid double-showing.
-        const shownKey = id || `tool_call:${update.title ?? ""}`;
-        if (this.shownToolIds.has(shownKey)) return;
-        this.shownToolIds.add(shownKey);
+      // Snapshot already merged above for file-ops / live step.
+      const merged = (id && this.toolCallCache.get(id)) || mergeToolSnapshot(undefined, update);
+
+      // Skip hollow shells with nothing useful yet.
+      if (!snapshotHasDetail(merged) && status !== "completed" && status !== "failed") {
+        return;
       }
 
-      const md = formatToolCall(update, {
+      // Status-only mid-flight patches (no new content/input): skip if we already
+      // painted this tool once — upsert would be a no-op anyway.
+      if (kind === "tool_call_update" && (status === "pending" || status === "in_progress")) {
+        const hasNewContent =
+          (Array.isArray(update.content_blocks) && update.content_blocks.length > 0) ||
+          (Array.isArray(update.content) && (update.content as unknown[]).length > 0) ||
+          (!!update.rawInput && Object.keys(update.rawInput).length > 0) ||
+          update.rawOutput !== undefined;
+        const key = id || `tool_call:${update.title ?? ""}`;
+        if (!hasNewContent && this.shownToolIds.has(key)) return;
+      }
+
+      const md = formatToolCall(merged, {
         showDiffs: this.cfg.showEditDiffs,
         diffMaxLines: this.cfg.diffMaxLines,
       });
-      if (md) this.streamer.addTool(md);
+      if (!md) return;
+
+      // One live card per toolCallId: replace in place as output streams
+      // (no spam of new code sections). Session/agent context keeps full output.
+      const key = id || `tool_call:${merged.title ?? merged.name ?? ""}`;
+      this.shownToolIds.add(key);
+      if (status === "completed" || status === "failed") {
+        this.shownToolIds.add(key + ":done");
+      }
+      this.streamer.upsertTool(id || undefined, md);
     }
   }
 
@@ -1188,8 +1870,8 @@ export class SessionRuntime {
       }
       if (opts?.replyMarkup) extra.reply_markup = opts.replyMarkup;
       await this.api.sendMessage(this.chatId, text, extra);
-    } catch {
-      /* non-fatal */
+    } catch (e) {
+      log.debug("notify failed:", (e as Error).message);
     }
   }
 
