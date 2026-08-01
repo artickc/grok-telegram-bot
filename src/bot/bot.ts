@@ -196,7 +196,9 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   bot.callbackQuery(/^sug:(\d+):(\d+)$/, async (ctx) => {
     const batchId = Number(ctx.match![1]);
     const index = Number(ctx.match![2]);
-    const rt = deps.registry.get(ctx.chat!.id);
+    const { resolveScope } = await import("./scope.js");
+    const scope = resolveScope(ctx, deps);
+    const rt = scope.rt;
     const text = rt.takeSuggestion(batchId, index);
     if (!text) {
       await ctx.answerCallbackQuery({ text: "Suggestion expired", show_alert: true });
@@ -208,10 +210,14 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     try {
       const outcome = await rt.submit(textPrompt(text, ctx.callbackQuery.message?.message_id));
       if (outcome === "queued") {
-        await ctx.reply(`\u{1F4E5} Queued suggestion (position ${rt.queueLength}).`).catch(() => {});
+        await ctx
+          .reply(`\u{1F4E5} Queued suggestion (position ${rt.queueLength}).`, scope.threadExtra)
+          .catch(() => {});
       }
     } catch (e) {
-      await ctx.reply(`\u274C Couldn't run suggestion: ${(e as Error).message}`).catch(() => {});
+      await ctx
+        .reply(`\u274C Couldn't run suggestion: ${(e as Error).message}`, scope.threadExtra)
+        .catch(() => {});
     }
   });
 

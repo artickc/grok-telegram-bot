@@ -18,6 +18,7 @@ interface GroupBuffer {
   images: PromptImage[];
   replyTo?: number;
   quoted?: string;
+  threadId?: number;
   timer: NodeJS.Timeout;
 }
 
@@ -28,6 +29,7 @@ export function registerPhotos(bot: Bot, deps: BotDeps): void {
     if (!image) return;
     const chatId = ctx.chat!.id;
     const replyTo = ctx.message?.message_id;
+    const threadId = ctx.message?.message_thread_id;
     const quoted = extractReplyContext(ctx);
 
     // Don't hijack the task wizard.
@@ -38,7 +40,7 @@ export function registerPhotos(bot: Bot, deps: BotDeps): void {
 
     const groupId = ctx.message?.media_group_id;
     if (!groupId) {
-      await submit(deps, chatId, caption, [image], replyTo, quoted);
+      await submit(deps, chatId, caption, [image], replyTo, quoted, threadId);
       return;
     }
 
@@ -57,6 +59,7 @@ export function registerPhotos(bot: Bot, deps: BotDeps): void {
         images: [image],
         replyTo,
         quoted,
+        threadId,
         timer: setTimeout(() => flush(groups, groupId, deps), GROUP_DEBOUNCE_MS),
       });
     }
@@ -81,7 +84,7 @@ async function flush(groups: Map<string, GroupBuffer>, groupId: string, deps: Bo
   const buf = groups.get(groupId);
   if (!buf) return;
   groups.delete(groupId);
-  await submit(deps, buf.chatId, buf.caption, buf.images, buf.replyTo, buf.quoted);
+  await submit(deps, buf.chatId, buf.caption, buf.images, buf.replyTo, buf.quoted, buf.threadId);
 }
 
 async function submit(
@@ -91,13 +94,24 @@ async function submit(
   images: PromptImage[],
   replyTo?: number,
   quoted?: string,
+  threadId?: number,
 ): Promise<void> {
-  const rt = deps.registry.get(chatId);
+  let rt = deps.registry.get(chatId);
+  if (deps.forum && deps.cfg.topicGroupId === chatId && threadId !== undefined) {
+    const { forumThreadId } = await import("../../forum/thread.js");
+    const tid = forumThreadId(threadId);
+    const resolved = deps.forum.resolveCwd(tid);
+    if (resolved) {
+      rt = deps.registry.getForumTopic(chatId, tid, resolved.cwd, resolved.projectName);
+    }
+  }
   const outcome = await rt.submit({ text: caption, images, replyTo, quotedText: quoted });
   if (outcome === "queued") {
+    const extra = threadId !== undefined ? { message_thread_id: threadId } : {};
     await deps.api.sendMessage(
       chatId,
       `\u{1F4E5} Queued ${images.length} image${images.length > 1 ? "s" : ""} \u2014 will run after the current task.`,
+      extra,
     );
   }
 }

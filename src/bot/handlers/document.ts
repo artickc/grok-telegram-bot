@@ -75,10 +75,14 @@ export function registerDocuments(bot: Bot, deps: BotDeps): void {
     }
 
     try {
-      const rt = deps.registry.get(chatId);
-      const outcome = await rt.submit(textPrompt(promptText, replyTo, quoted));
+      const { resolveScope } = await import("../scope.js");
+      const scope = resolveScope(ctx, deps);
+      const outcome = await scope.rt.submit(textPrompt(promptText, replyTo, quoted));
       if (outcome === "queued") {
-        await ctx.reply(`\u{1F4E5} Queued "${name}" \u2014 will run after the current task.`);
+        await ctx.reply(
+          `\u{1F4E5} Queued "${name}" \u2014 will run after the current task.`,
+          scope.threadExtra,
+        );
       }
     } catch (e) {
       log.warn(`submit failed for "${name}":`, (e as Error).message);

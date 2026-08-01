@@ -9,11 +9,11 @@ import { HELP_TEXT } from "../commands.js";
 import { compactKeyboard } from "../menu/keyboard.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { extractReplyContext } from "../reply-context.js";
+import { resolveScope } from "../scope.js";
 import { openMainMenu } from "./menu.js";
 
 export function registerControl(bot: Bot, deps: BotDeps): void {
   bot.command("start", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
     const agent = deps.acp.agentInfo;
     const lines = [
       "\u{1F44B} Welcome! I bridge Telegram to Grok Build over ACP.",
@@ -36,34 +36,41 @@ export function registerControl(bot: Bot, deps: BotDeps): void {
   });
 
   bot.command("status", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
+    const scope = resolveScope(ctx, deps);
+    const rt = scope.rt;
     const lines = [
       "\u{1F4CA} Status",
+      scope.isForum ? `Topic: ${scope.projectName ?? "topic"}` : "",
       `Project: ${rt.projectName ?? (basename(rt.cwd) || rt.cwd)}`,
       `Folder: ${rt.cwd}`,
       `Session: ${rt.sessionId ?? "(none yet)"}`,
+      `Model: ${rt.model || "default"}`,
+      `Reasoning: ${rt.reasoning}`,
       `State: ${rt.isBusy ? "\u23F3 working" : "\u2705 idle"}`,
       `Queued follow-ups: ${rt.queueLength}`,
-    ];
+    ].filter(Boolean);
     const subagents = deps.registry.subagentSummaryForChat(ctx.chat.id);
     if (subagents) lines.push(`Subagents: ${subagents}`);
-    await ctx.reply(lines.join("\n"));
+    await ctx.reply(lines.join("\n"), scope.threadExtra);
   });
 
   bot.command("new", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
+    const scope = resolveScope(ctx, deps);
     try {
-      await deps.registry.controller(ctx.chat.id).addNew(rt.cwd, rt.projectName);
-      await refreshMenu(ctx, deps, `\u2728 New session started in ${rt.projectName ?? rt.cwd}`);
+      await scope.controller.addNew(scope.rt.cwd, scope.rt.projectName);
+      await refreshMenu(ctx, deps, `\u2728 New session started in ${scope.rt.projectName ?? scope.rt.cwd}`);
     } catch (err) {
-      await ctx.reply(`\u274C Could not start session: ${(err as Error).message}`);
+      await ctx.reply(`\u274C Could not start session: ${(err as Error).message}`, scope.threadExtra);
     }
   });
 
   bot.command("cancel", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
-    const cancelled = await rt.cancel();
-    await ctx.reply(cancelled ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.");
+    const scope = resolveScope(ctx, deps);
+    const cancelled = await scope.rt.cancel();
+    await ctx.reply(
+      cancelled ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.",
+      scope.threadExtra,
+    );
   });
 
   bot.command("btw", async (ctx) => {
@@ -72,31 +79,33 @@ export function registerControl(bot: Bot, deps: BotDeps): void {
       await ctx.reply("Usage: /btw <something for the agent to do — now if idle, otherwise next>");
       return;
     }
-    const rt = deps.registry.get(ctx.chat.id);
-    // Run it right away when idle; otherwise queue it to run automatically the
-    // moment the current turn finishes (can't interrupt an in-flight agent turn).
-    const outcome = await rt.submit(textPrompt(text, undefined, extractReplyContext(ctx)));
+    const scope = resolveScope(ctx, deps);
+    const outcome = await scope.rt.submit(textPrompt(text, undefined, extractReplyContext(ctx)));
     if (outcome === "queued") {
       await ctx.reply(
-        `\u{1F4E5} Queued (position ${rt.queueLength}) \u2014 it'll run automatically as soon as the current task finishes.`,
+        `\u{1F4E5} Queued (position ${scope.rt.queueLength}) \u2014 it'll run automatically as soon as the current task finishes.`,
+        scope.threadExtra,
       );
     } else {
-      await ctx.reply("\u25B6\uFE0F On it\u2026");
+      await ctx.reply("\u25B6\uFE0F On it\u2026", scope.threadExtra);
     }
   });
 
   bot.command("flush", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
+    const scope = resolveScope(ctx, deps);
+    const rt = scope.rt;
     if (rt.queueLength === 0) {
-      await ctx.reply("Queue is empty.");
+      await ctx.reply("Queue is empty.", scope.threadExtra);
       return;
     }
     if (rt.isBusy) {
-      await ctx.reply(`\u23F3 ${rt.queueLength} queued \u2014 they'll run automatically when the current turn ends.`);
+      await ctx.reply(
+        `\u23F3 ${rt.queueLength} queued \u2014 they'll run automatically when the current turn ends.`,
+        scope.threadExtra,
+      );
       return;
     }
-    // Idle: drain the queue by submitting an empty trigger that flushes.
-    await ctx.reply("\u25B6\uFE0F Running queued follow-ups\u2026");
+    await ctx.reply("\u25B6\uFE0F Running queued follow-ups\u2026", scope.threadExtra);
     const drained = rt.drainQueueToPrompt();
     if (drained) await rt.submit(drained);
   });

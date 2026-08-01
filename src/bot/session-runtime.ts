@@ -571,6 +571,8 @@ export class SessionRuntime {
 
   setPreferredAccountId(id: string | undefined): void {
     this.settings.updateKey(this.settingsKey, { preferredAccountId: id || undefined });
+    // Force re-apply on next ensureSession when user changes preference.
+    this.preferredAccountApplied = undefined;
     this.changed();
   }
 
@@ -696,18 +698,32 @@ export class SessionRuntime {
     if (!this.sessionId) await this.startNewSession(this.cwd, this.projectName);
   }
 
+  /** Last preferred account we successfully aligned to (avoids activate thrash). */
+  private preferredAccountApplied?: string;
+
   /**
    * If this scope prefers a saved account and the process is on another login,
-   * switch before binding the session (best-effort; never blocks the turn hard).
+   * switch before binding the session. Skips when another turn is in flight
+   * (account switch restarts the agent) or we already applied this preference.
    */
   private async applyPreferredAccount(): Promise<void> {
     const preferred = this.preferredAccountId;
     const rotator = this.accountRotator;
     if (!preferred || !rotator) return;
     const st = rotator.state();
-    if (st.activeId === preferred) return;
+    if (st.activeId === preferred) {
+      this.preferredAccountApplied = preferred;
+      return;
+    }
+    // User cleared or changed preference — allow one more activate.
+    if (this.preferredAccountApplied === preferred) return;
+    if (this.acp.hasInflightPrompt()) {
+      log.debug(`scope ${this.settingsKey}: skip preferred account (turn in flight)`);
+      return;
+    }
     try {
       await rotator.activate(preferred);
+      this.preferredAccountApplied = preferred;
       log.info(`scope ${this.settingsKey}: activated preferred account ${preferred.slice(0, 8)}`);
     } catch (e) {
       log.debug(`preferred account activate failed: ${(e as Error).message}`);

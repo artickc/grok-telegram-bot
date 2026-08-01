@@ -69,13 +69,18 @@ async function renderSessionPage(ctx: Context, deps: BotDeps, page: number): Pro
   const pageStr = totalPages > 1 ? ` \u00B7 page ${p + 1}/${totalPages}` : "";
   await deps.ephemeral.reply(ctx, `\u{1F5C2} ${heading} \u2014 ${metas.length} total${liveStr}${pageStr}`);
 
+  const { resolveScope } = await import("../scope.js");
+  const scope = resolveScope(ctx, deps);
   for (const m of slice) {
     const contextPct = deps.acp.metadataFor(m.sessionId)?.contextUsagePercentage;
-    const ctrl = deps.registry.controller(ctx.chat!.id);
-    const progress = ctrl.progressFor(m.sessionId);
+    const ctrl = scope.controller;
+    const progress =
+      ctrl.progressFor(m.sessionId) ??
+      deps.registry.forumControllerForSession(m.sessionId)?.progressFor(m.sessionId);
     // Live runtime → persisted comment → last assistant outcome from history.
     const comment =
       ctrl.commentFor(m.sessionId) ||
+      deps.registry.forumControllerForSession(m.sessionId)?.commentFor(m.sessionId) ||
       m.comment ||
       readLastCardSummary(deps.store.jsonlPath(m.sessionId));
     const { text, keyboard } = buildSessionCard(m, {
@@ -116,8 +121,12 @@ export function registerSessions(bot: Bot, deps: BotDeps): void {
   });
 
   bot.command("unwatch", async (ctx) => {
-    const rt = deps.registry.get(ctx.chat.id);
-    await ctx.reply(rt.stopWatch() ? "\u{1F6D1} Stopped watching." : "Not watching anything.");
+    const { resolveScope } = await import("../scope.js");
+    const scope = resolveScope(ctx, deps);
+    await ctx.reply(
+      scope.rt.stopWatch() ? "\u{1F6D1} Stopped watching." : "Not watching anything.",
+      scope.threadExtra,
+    );
   });
 
   bot.callbackQuery(new RegExp(`^sess:${UUID}$`), async (ctx) => {
@@ -129,19 +138,39 @@ export function registerSessions(bot: Bot, deps: BotDeps): void {
     }
     await ctx.answerCallbackQuery();
     await deps.ephemeral.clear(ctx.chat!.id); // remove the session cards
-    const fgCwd = deps.registry.get(ctx.chat!.id).cwd;
+    const { resolveScope } = await import("../scope.js");
+    const scope = resolveScope(ctx, deps);
+    const fgCwd = scope.rt.cwd;
     const cwd = meta.cwd || fgCwd;
     const projectName = basename(meta.cwd || fgCwd) || "session";
+    if (scope.controller.fixedCwd) {
+      const a = scope.controller.fixedCwd.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+      const b = cwd.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+      if (a !== b) {
+        await ctx.reply("That session is for a different project than this topic.", scope.threadExtra);
+        return;
+      }
+    }
     const prior = readHistory(deps.store.jsonlPath(id), 24);
     try {
-      const { result, alreadyControlled } = await deps.registry
-        .controller(ctx.chat!.id)
-        .addAttach(id, cwd, projectName, prior);
-      await ctx.reply(alreadyControlled ? `\u{1F500} Switched to ${meta.title}` : connectMessage(result, meta));
+      // Avoid dual ownership across DM ↔ topic controllers.
+      for (const c of deps.registry.allForumControllers()) {
+        if (c !== scope.controller && c.findBySession(id)) await c.close(id);
+      }
+      const { result, alreadyControlled } = await scope.controller.addAttach(
+        id,
+        cwd,
+        projectName,
+        prior,
+      );
+      await ctx.reply(
+        alreadyControlled ? `\u{1F500} Switched to ${meta.title}` : connectMessage(result, meta),
+        scope.threadExtra,
+      );
       await refreshMenu(ctx, deps, `\u{1F4C2} ${meta.title}`);
       await showHistory(deps, ctx.chat!.id, id, meta);
     } catch (err) {
-      await ctx.reply(`\u274C Could not connect: ${(err as Error).message}`);
+      await ctx.reply(`\u274C Could not connect: ${(err as Error).message}`, scope.threadExtra);
     }
   });
 
@@ -156,10 +185,12 @@ export function registerSessions(bot: Bot, deps: BotDeps): void {
     const id = ctx.match![1]!;
     await ctx.answerCallbackQuery();
     const meta = deps.store.get(id);
-    const rt = deps.registry.get(ctx.chat!.id);
-    rt.startWatch(deps.store.jsonlPath(id));
+    const { resolveScope } = await import("../scope.js");
+    const scope = resolveScope(ctx, deps);
+    scope.rt.startWatch(deps.store.jsonlPath(id));
     await ctx.reply(
       `\u{1F4E1} Watching live: ${meta?.title ?? id.slice(0, 8)}\nNew activity streams here. Send /unwatch to stop.`,
+      scope.threadExtra,
     );
   });
 }

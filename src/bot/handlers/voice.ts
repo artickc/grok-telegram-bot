@@ -37,10 +37,13 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
         return;
       }
       await ctx.reply(`\u{1F399} \u201C${text}\u201D`);
-      const rt = deps.registry.get(chatId);
+      const { resolveScope } = await import("../scope.js");
+      const scope = resolveScope(ctx, deps);
       const quoted = extractReplyContext(ctx);
-      const outcome = await rt.submit(textPrompt(text, ctx.message?.message_id, quoted));
-      if (outcome === "queued") await ctx.reply("\u{1F4E5} Queued \u2014 will run after the current task.");
+      const outcome = await scope.rt.submit(textPrompt(text, ctx.message?.message_id, quoted));
+      if (outcome === "queued") {
+        await ctx.reply("\u{1F4E5} Queued \u2014 will run after the current task.", scope.threadExtra);
+      }
     } catch (e) {
       log.warn("voice failed:", (e as Error).message);
       await ctx.reply(`\u274C Voice transcription failed: ${(e as Error).message}`);

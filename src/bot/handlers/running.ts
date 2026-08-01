@@ -187,21 +187,39 @@ function dedupeBySession(list: RunningSession[]): RunningSession[] {
 export async function switchAndShow(ctx: Context, deps: BotDeps, sessionId: string): Promise<void> {
   const { resolveScope } = await import("../scope.js");
   const scope = resolveScope(ctx, deps);
-  // Prefer switching in the current scope controller; fall back to forum/private.
+  // Always bring the session into *this* scope's controller (never switch FG on
+  // another surface — that would dual-own one ACP session across controllers).
   let res = await scope.controller.switchTo(sessionId);
   if (!res) {
-    const fc = deps.registry.forumControllerForSession(sessionId);
-    if (fc) res = await fc.switchTo(sessionId);
-  }
-  if (!res) {
-    res = await deps.registry.controller(ctx.chat!.id).switchTo(sessionId);
-  }
-  if (!res) {
-    // Attach from store into this scope (cross bot↔topic visibility).
     const meta = deps.store.get(sessionId);
-    if (meta?.cwd) {
-      const hist = (await import("../../sessions/history.js")).readHistory(deps.store.jsonlPath(sessionId));
-      await scope.controller.addAttach(sessionId, meta.cwd, meta.title || basenameSafe(meta.cwd), hist);
+    let cwd = meta?.cwd;
+    let name = meta?.title || (cwd ? basenameSafe(cwd) : undefined);
+    if (!cwd) {
+      // Discover cwd from whatever controller currently lists it.
+      for (const c of [scope.controller, ...deps.registry.allForumControllers()]) {
+        const hit = c.list().find((s) => s.sessionId === sessionId);
+        if (hit) {
+          cwd = (c as { fixedCwd?: string }).fixedCwd || scope.rt.cwd;
+          name = hit.projectName || name;
+          break;
+        }
+      }
+    }
+    if (cwd) {
+      // Topic controllers are fixed-path — refuse foreign projects.
+      if (scope.controller.fixedCwd && !samePath(scope.controller.fixedCwd, cwd)) {
+        await ctx.reply(
+          "That session belongs to a different project than this topic.",
+          scope.threadExtra,
+        );
+        return;
+      }
+      // Drop dual ownership: release from any other controller first.
+      await releaseSessionElsewhere(deps, scope.controller, sessionId);
+      const hist = (await import("../../sessions/history.js")).readHistory(
+        deps.store.jsonlPath(sessionId),
+      );
+      await scope.controller.addAttach(sessionId, cwd, name || basenameSafe(cwd), hist);
       res = await scope.controller.switchTo(sessionId);
     }
   }
@@ -210,6 +228,25 @@ export async function switchAndShow(ctx: Context, deps: BotDeps, sessionId: stri
     return;
   }
   await deliverSwitch(ctx, deps, res);
+}
+
+/** Stop controlling a session on every controller except `keep`. */
+async function releaseSessionElsewhere(
+  deps: BotDeps,
+  keep: import("../chat-controller.js").ChatController,
+  sessionId: string,
+): Promise<void> {
+  for (const c of deps.registry.allForumControllers()) {
+    if (c !== keep && c.findBySession(sessionId)) await c.close(sessionId);
+  }
+  for (const chatId of deps.settings.chatIds()) {
+    try {
+      const c = deps.registry.controller(chatId);
+      if (c !== keep && c.findBySession(sessionId)) await c.close(sessionId);
+    } catch {
+      /* skip */
+    }
+  }
 }
 
 function basenameSafe(p: string): string {
@@ -234,12 +271,21 @@ export function registerRunning(bot: Bot, deps: BotDeps): void {
     const { resolveScope } = await import("../scope.js");
     const scope = resolveScope(ctx, deps);
     let closed = await scope.controller.close(id);
+    // Card may show a session owned by the other surface — close on owner.
     if (!closed) {
       const fc = deps.registry.forumControllerForSession(id);
       if (fc) closed = await fc.close(id);
     }
-    if (!closed) await deps.registry.controller(ctx.chat!.id).close(id);
-    await ctx.answerCallbackQuery({ text: "Closed" });
+    if (!closed) {
+      for (const chatId of deps.settings.chatIds()) {
+        const c = deps.registry.controller(chatId);
+        if (c.findBySession(id)) {
+          closed = await c.close(id);
+          break;
+        }
+      }
+    }
+    await ctx.answerCallbackQuery({ text: closed ? "Closed" : "Not found" });
     await ctx.deleteMessage().catch(() => {}); // remove just this card
   });
 }
