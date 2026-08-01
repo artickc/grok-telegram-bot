@@ -19,7 +19,7 @@ import { subagentSummary } from "../render/subagent.js";
 import type { SessionStore } from "../sessions/store.js";
 import type { AccountRotator } from "./account-rotator.js";
 import { ChatController } from "./chat-controller.js";
-import { SessionRuntime } from "./session-runtime.js";
+import type { SessionRuntime } from "./session-runtime.js";
 
 export interface SessionDescription {
   /** Chat that owns the session (controlled session or subagent parent). */
@@ -35,10 +35,10 @@ export interface SessionDescription {
 export class RuntimeRegistry {
   private readonly controllers = new Map<number, ChatController>();
   /**
-   * Forum topic runtimes keyed by `chatId:threadId`. Each topic is one project
-   * session and always "foreground" within that topic.
+   * Forum topic controllers keyed by `chatId:threadId`.
+   * Each topic has its own multi-session controller + settings (model/reasoning).
    */
-  private readonly forumRuntimes = new Map<string, SessionRuntime>();
+  private readonly forumControllers = new Map<string, ChatController>();
   private refresher: ((chatId: number) => void) | undefined;
   private rotator: AccountRotator | undefined;
   /** Chat ids with a running turn, most-recently-started last. */
@@ -90,8 +90,48 @@ export class RuntimeRegistry {
   }
 
   /**
-   * Runtime for a forum topic (one topic = one project path). Creates lazily.
-   * Always foreground for that topic so streaming posts into the thread.
+   * Multi-session controller for a forum topic (fixed project path).
+   * Settings key: `{chatId}:t{threadId}` — own model / reasoning / sessions.
+   */
+  forumController(
+    chatId: number,
+    threadId: number,
+    cwd: string,
+    projectName?: string,
+  ): ChatController {
+    const key = `${chatId}:${threadId}`;
+    let c = this.forumControllers.get(key);
+    if (c && c.fixedCwd && normPath(c.fixedCwd) !== normPath(cwd)) {
+      // Path re-bind — dispose and recreate.
+      c.dispose();
+      this.forumControllers.delete(key);
+      c = undefined;
+    }
+    if (!c) {
+      c = new ChatController(
+        this.api,
+        chatId,
+        this.acp,
+        this.cfg,
+        this.settings,
+        this.store,
+        (id) => this.refresher?.(id),
+        (busy) => this.noteActivity(chatId, busy),
+        () => this.rotator,
+        {
+          messageThreadId: threadId,
+          settingsKey: `${chatId}:t${threadId}`,
+          fixedCwd: cwd,
+          fixedProjectName: projectName,
+        },
+      );
+      this.forumControllers.set(key, c);
+    }
+    return c;
+  }
+
+  /**
+   * Foreground runtime for a forum topic. Creates the topic controller lazily.
    */
   getForumTopic(
     chatId: number,
@@ -99,38 +139,27 @@ export class RuntimeRegistry {
     cwd: string,
     projectName?: string,
   ): SessionRuntime {
-    const key = `${chatId}:${threadId}`;
-    let rt = this.forumRuntimes.get(key);
-    if (rt) {
-      // Path re-bind (user fixed mapping) — update cwd if changed.
-      if (normPath(rt.cwd) !== normPath(cwd)) {
-        rt.dispose();
-        this.forumRuntimes.delete(key);
-        rt = undefined;
-      }
+    return this.forumController(chatId, threadId, cwd, projectName).foreground();
+  }
+
+  /** All forum topic controllers (for bidirectional session listing). */
+  allForumControllers(): ChatController[] {
+    return [...this.forumControllers.values()];
+  }
+
+  /** Forum controller that currently owns a session id, if any. */
+  forumControllerForSession(sessionId: string): ChatController | undefined {
+    for (const c of this.forumControllers.values()) {
+      if (c.findBySession(sessionId)) return c;
     }
-    if (!rt) {
-      rt = new SessionRuntime(this.api, chatId, this.acp, this.cfg, this.settings, {
-        cwd,
-        projectName,
-        messageThreadId: threadId,
-      });
-      rt.onStateChange = () => this.refresher?.(chatId);
-      rt.onActivity = (busy) => this.noteActivity(chatId, busy);
-      rt.accountRotator = this.rotator;
-      void rt.setForeground(true);
-      this.forumRuntimes.set(key, rt);
-    } else if (projectName) {
-      rt.projectName = projectName;
-    }
-    return rt;
+    return undefined;
   }
 
   disposeAll(): void {
     for (const c of this.controllers.values()) c.dispose();
     this.controllers.clear();
-    for (const rt of this.forumRuntimes.values()) rt.dispose();
-    this.forumRuntimes.clear();
+    for (const c of this.forumControllers.values()) c.dispose();
+    this.forumControllers.clear();
   }
 
   /** Find the chat that currently controls a given session id. */
@@ -138,9 +167,8 @@ export class RuntimeRegistry {
     for (const [chatId, c] of this.controllers) {
       if (c.findBySession(sessionId)) return chatId;
     }
-    // Forum runtimes: recover group chat id from `chatId:threadId` keys.
-    for (const [key, rt] of this.forumRuntimes) {
-      if (rt.sessionId === sessionId) {
+    for (const [key, c] of this.forumControllers) {
+      if (c.findBySession(sessionId)) {
         const chatId = Number(key.split(":")[0]);
         return Number.isFinite(chatId) ? chatId : undefined;
       }

@@ -22,16 +22,35 @@ const UUID = "([0-9a-fA-F-]{36})";
 
 export async function showSessions(ctx: Context, deps: BotDeps, query?: string): Promise<void> {
   const q = (query ?? "").trim().toLowerCase();
+  const { resolveScope } = await import("../scope.js");
+  const scope = resolveScope(ctx, deps);
   let metas = deps.store.list(q ? 400 : 200);
+  // In a forum topic, only show sessions for this project path (includes bot DMs).
+  if (scope.isForum && scope.projectPath) {
+    const want = scope.projectPath.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    metas = metas.filter((m) => (m.cwd || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() === want);
+  }
   if (q) {
     metas = metas.filter((m) => `${m.title} ${m.cwd} ${m.sessionId}`.toLowerCase().includes(q));
   }
   if (metas.length === 0) {
     await deps.ephemeral.open(ctx);
-    await deps.ephemeral.reply(ctx, q ? `No sessions match "${q}".` : "No saved sessions found in ~/.grok/sessions/cli.");
+    await deps.ephemeral.reply(
+      ctx,
+      q
+        ? `No sessions match "${q}".`
+        : scope.isForum
+          ? `No saved sessions for project **${scope.projectName}** yet.`
+          : "No saved sessions found in ~/.grok/sessions/cli.",
+    );
     return;
   }
-  deps.menuCache.setSessions(ctx.chat!.id, metas, q ? `Sessions matching "${q}"` : "Recent sessions");
+  const heading = scope.isForum
+    ? `Sessions \u00B7 ${scope.projectName ?? "topic"}`
+    : q
+      ? `Sessions matching "${q}"`
+      : "Recent sessions";
+  deps.menuCache.setSessions(ctx.chat!.id, metas, heading);
   await renderSessionPage(ctx, deps, 0);
 }
 

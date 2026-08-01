@@ -13,6 +13,7 @@ import { REASONING_LEVELS, type ReasoningEffort } from "../../app/types.js";
 import type { BotDeps } from "../deps.js";
 import { BAR_LABELS, compactKeyboard, mainMenuInline, MENU_BTN, RUNNING_BTN, STOP_BTN } from "../menu/keyboard.js";
 import { refreshMenu } from "../menu/refresh.js";
+import { resolveScope } from "../scope.js";
 import { showImportSources } from "./import-session.js";
 import { showKillConfirm } from "./kill.js";
 import { showMcp } from "./mcp.js";
@@ -23,14 +24,25 @@ import { showSessions } from "./sessions.js";
 import { showTasks } from "./tasks.js";
 import { showUsage } from "./usage.js";
 
-/** Open the full inline menu, showing the current model/reasoning. */
+/** Open the full inline menu, showing the current model/reasoning (topic-aware). */
 export async function openMainMenu(ctx: Context, deps: BotDeps): Promise<void> {
   await deps.ephemeral.open(ctx);
-  const rt = deps.registry.get(ctx.chat!.id);
-  await deps.ephemeral.reply(ctx, "\u2699\uFE0F Menu", {
+  const scope = resolveScope(ctx, deps);
+  const preferred = scope.rt.preferredAccountId;
+  const saved = preferred
+    ? deps.accounts.list().find((a) => a.id === preferred || a.loginId === preferred)
+    : undefined;
+  const accountLabel = saved?.label || preferred?.slice(0, 12) || undefined;
+  const title = scope.isForum
+    ? `\u2699\uFE0F Topic menu \u00B7 ${scope.projectName ?? "topic"}`
+    : "\u2699\uFE0F Menu";
+  await deps.ephemeral.reply(ctx, title, {
     reply_markup: mainMenuInline({
-      model: rt.model || "default",
-      reasoning: reasoningLabel(rt.reasoning),
+      model: scope.rt.model || "default",
+      reasoning: reasoningLabel(scope.rt.reasoning),
+      forumTopic: scope.isForum
+        ? { name: scope.projectName ?? "Topic", account: accountLabel }
+        : undefined,
     }),
   });
 }
@@ -39,14 +51,17 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
   // Compact persistent bar.
   bot.hears(BAR_LABELS, async (ctx) => {
     deps.wizard.abort(ctx.chat.id);
+    const scope = resolveScope(ctx, deps);
     switch (ctx.message?.text) {
       case MENU_BTN:
         return openMainMenu(ctx, deps);
       case RUNNING_BTN:
         return showRunning(ctx, deps);
       case STOP_BTN: {
-        const rt = deps.registry.get(ctx.chat.id);
-        return void ctx.reply((await rt.cancel()) ? "\u23F9 Cancelling\u2026" : "Nothing is running.");
+        return void ctx.reply(
+          (await scope.rt.cancel()) ? "\u23F9 Cancelling\u2026" : "Nothing is running.",
+          scope.threadExtra,
+        );
       }
     }
   });
@@ -57,7 +72,7 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
   // ── Reasoning ──────────────────────────────────────────────────────────────
   bot.callbackQuery(/^reason:(minimal|low|medium|high|max)$/, async (ctx) => {
     const level = ctx.match![1] as ReasoningEffort;
-    deps.registry.get(ctx.chat!.id).setReasoningPref(level);
+    resolveScope(ctx, deps).rt.setReasoningPref(level);
     await confirm(ctx, deps, `\u{1F9E0} Reasoning: ${reasoningLabel(level)}`);
   });
 
@@ -66,37 +81,52 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
     const entry = deps.acp.availableModels[Number(ctx.match![1])];
     if (!entry) return void ctx.answerCallbackQuery({ text: "Expired, tap Model again." });
     await ctx.answerCallbackQuery({ text: `\u{1F9E9} Model: ${entry.name}` });
-    const res = await deps.registry.get(ctx.chat!.id).setModelPref(entry.modelId);
+    const res = await resolveScope(ctx, deps).rt.setModelPref(entry.modelId);
     if (!res.ok) {
-      await ctx.reply(`\u26A0\uFE0F Model set failed: ${res.error}`).catch(() => {});
+      await ctx.reply(`\u26A0\uFE0F Model set failed: ${res.error}`, resolveScope(ctx, deps).threadExtra).catch(() => {});
     }
     await confirmUi(ctx, deps);
   });
   bot.callbackQuery("model:clear", async (ctx) => {
     await ctx.answerCallbackQuery({ text: "\u{1F9E9} Model: default" });
-    await deps.registry.get(ctx.chat!.id).setModelPref("");
+    await resolveScope(ctx, deps).rt.setModelPref("");
     await confirmUi(ctx, deps);
   });
 }
 
 /** Dispatch an inline-menu action (`m:<action>`). */
 async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promise<void> {
-  const chatId = ctx.chat!.id;
-  const rt = deps.registry.get(chatId);
+  const scope = resolveScope(ctx, deps);
+  const { chatId, rt, controller, threadExtra, isForum, projectName, projectPath } = scope;
   switch (action) {
     case "close":
       await ctx.answerCallbackQuery();
       return void ctx.deleteMessage().catch(() => {});
+    case "topicinfo":
+      await ctx.answerCallbackQuery();
+      return void deps.ephemeral.reply(
+        ctx,
+        `\u{1F4C1} **Topic project**\n${projectName ?? "?"}\n\`${projectPath ?? rt.cwd}\`\n\n` +
+          `Model / reasoning / running sessions on this menu are for **this topic only**.`,
+      );
     case "hidebar":
       await ctx.answerCallbackQuery();
       await ctx.deleteMessage().catch(() => {});
       return void ctx.reply("\u{1F648} Bar hidden \u2014 send /menu to bring it back.", {
         reply_markup: { remove_keyboard: true },
+        ...threadExtra,
       });
     case "showbar":
       await ctx.answerCallbackQuery();
-      return void ctx.reply("\u2328\uFE0F Bar restored.", { reply_markup: compactKeyboard() });
+      return void ctx.reply("\u2328\uFE0F Bar restored.", {
+        reply_markup: compactKeyboard(),
+        ...threadExtra,
+      });
     case "project":
+      if (isForum) {
+        await ctx.answerCallbackQuery({ text: "Project is fixed to this topic", show_alert: true });
+        return;
+      }
       await ctx.answerCallbackQuery();
       return showProjects(ctx, deps);
     case "running":
@@ -144,10 +174,10 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
     case "new":
       await ctx.answerCallbackQuery();
       try {
-        await deps.registry.controller(chatId).addNew(rt.cwd, rt.projectName);
+        await controller.addNew(rt.cwd, rt.projectName);
         return refreshMenu(ctx, deps, `\u2728 New session in ${rt.projectName ?? rt.cwd}`);
       } catch (e) {
-        return void ctx.reply(`\u274C ${(e as Error).message}`);
+        return void ctx.reply(`\u274C ${(e as Error).message}`, threadExtra);
       }
     case "stop": {
       // Answer first so a slow cancel never times out the callback query.
@@ -178,20 +208,25 @@ async function confirmUi(ctx: Context, deps: BotDeps): Promise<void> {
 }
 
 async function showReasoningMenu(ctx: Context, deps: BotDeps): Promise<void> {
-  const rt = deps.registry.get(ctx.chat!.id);
+  const rt = resolveScope(ctx, deps).rt;
   await deps.ephemeral.open(ctx);
   const kb = new InlineKeyboard();
   REASONING_LEVELS.forEach((l) => kb.text(`${l === rt.reasoning ? "\u2713 " : ""}${reasoningLabel(l)}`, `reason:${l}`));
-  await deps.ephemeral.reply(ctx, `Current reasoning: ${reasoningLabel(rt.reasoning)}\nChoose effort:`, { reply_markup: kb });
+  await deps.ephemeral.reply(ctx, `Current reasoning: ${reasoningLabel(rt.reasoning)}\nChoose effort:`, {
+    reply_markup: kb,
+  });
 }
 
 async function showModelMenu(ctx: Context, deps: BotDeps): Promise<void> {
-  const rt = deps.registry.get(ctx.chat!.id);
+  const rt = resolveScope(ctx, deps).rt;
   await ensureReady(ctx, rt);
   await deps.ephemeral.open(ctx);
   const models = deps.acp.availableModels;
   if (models.length === 0) {
-    await deps.ephemeral.reply(ctx, "No selectable models reported by Grok yet \u2014 send a message first, then try again.");
+    await deps.ephemeral.reply(
+      ctx,
+      "No selectable models reported by Grok yet \u2014 send a message first, then try again.",
+    );
     return;
   }
   const current = rt.model || deps.acp.currentModelId;

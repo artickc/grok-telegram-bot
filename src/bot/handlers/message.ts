@@ -95,7 +95,7 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   }
 
   let rt = deps.registry.get(chatId);
-  // Forum group: one topic = one project session.
+  // Forum group: topic-scoped multi-session controller (model/reasoning/running).
   if (deps.forum && deps.cfg.topicGroupId && chatId === deps.cfg.topicGroupId) {
     const resolved = await resolveForumRuntime(
       deps,
@@ -107,6 +107,16 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
     );
     if (resolved === "handled" || resolved === "ignore") return;
     rt = resolved.rt;
+    // If nothing is selected / no session yet, ensure a new session is created
+    // on first message (ensureSession inside submit). If FG has no sessionId
+    // after a closed session, start a fresh one for this topic.
+    if (!rt.sessionId && !rt.isBusy) {
+      try {
+        await rt.startNewSession(rt.cwd, rt.projectName);
+      } catch {
+        /* ensureSession on submit will retry */
+      }
+    }
   }
 
   const note = batch.parts.length > 1 ? ` (combined ${batch.parts.length} messages)` : "";

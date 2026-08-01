@@ -95,11 +95,21 @@ export class Ephemeral {
   async reply(ctx: Context, text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
     const chatId = ctx.chat?.id;
     if (chatId === undefined) return undefined;
+    // Stay in the forum topic when the trigger message was in a thread.
+    const msg = ctx.message ?? ctx.callbackQuery?.message;
+    const threadId =
+      msg && "message_thread_id" in msg
+        ? (msg as { message_thread_id?: number }).message_thread_id
+        : undefined;
+    const merged =
+      threadId !== undefined && extra.message_thread_id === undefined
+        ? { ...extra, message_thread_id: threadId }
+        : extra;
     return this.serialize(chatId, async () => {
       try {
-        const msg = await ctx.reply(text, extra);
-        this.remember(chatId, msg.message_id);
-        return msg.message_id;
+        const m = await ctx.reply(text, merged);
+        this.remember(chatId, m.message_id);
+        return m.message_id;
       } catch {
         return undefined;
       }

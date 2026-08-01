@@ -108,14 +108,55 @@ function buildRunningCard(s: RunningSession, deps: BotDeps, now: number): { text
 
 export async function showRunning(ctx: Context, deps: BotDeps): Promise<void> {
   await deps.ephemeral.open(ctx);
-  const list = dedupeBySession(deps.registry.controller(ctx.chat!.id).list());
+  const { resolveScope } = await import("../scope.js");
+  const scope = resolveScope(ctx, deps);
+  // Topic: only this topic's controlled sessions. Private: this chat + same-project forum sessions.
+  let list = dedupeBySession(scope.controller.list());
+  if (!scope.isForum) {
+    const path = scope.rt.cwd;
+    for (const fc of deps.registry.allForumControllers()) {
+      if (fc.fixedCwd && samePath(fc.fixedCwd, path)) {
+        list = dedupeBySession([...list, ...fc.list().map((s) => ({ ...s, projectName: `${s.projectName} \u00B7 topic` }))]);
+      }
+    }
+  } else {
+    // Also surface private-bot sessions for the same project path.
+    for (const chatId of deps.settings.chatIds()) {
+      if (chatId === scope.chatId) continue;
+      try {
+        const priv = deps.registry.controller(chatId);
+        for (const s of priv.list()) {
+          // Match by session cwd via store or name — use store meta if available.
+          if (s.sessionId) {
+            const meta = deps.store.get(s.sessionId);
+            if (meta?.cwd && samePath(meta.cwd, scope.rt.cwd)) {
+              list = dedupeBySession([
+                ...list,
+                { ...s, projectName: `${s.projectName} \u00B7 DM`, foreground: false },
+              ]);
+            }
+          }
+        }
+      } catch {
+        /* skip */
+      }
+    }
+  }
   if (list.length === 0) {
-    await deps.ephemeral.reply(ctx, "No sessions controlled yet. Use \u{1F4C1} Project or /new to start one.");
+    await deps.ephemeral.reply(
+      ctx,
+      scope.isForum
+        ? "No sessions in this topic yet. Send a message or tap \u{1F195} New."
+        : "No sessions controlled yet. Use \u{1F4C1} Project or /new to start one.",
+    );
     return;
   }
   const now = Date.now();
   const shown = list.slice(0, CARD_LIMIT);
-  await deps.ephemeral.reply(ctx, `\u{1F9ED} Sessions controlled by this chat (${list.length}) \u2014 tap \u{1F500} Switch on a card:`);
+  const header = scope.isForum
+    ? `\u{1F9ED} Running in topic **${scope.projectName ?? "topic"}** (${list.length})`
+    : `\u{1F9ED} Sessions controlled by this chat (${list.length}) \u2014 tap \u{1F500} Switch on a card:`;
+  await deps.ephemeral.reply(ctx, header);
   for (const s of shown) {
     const { text, kb } = buildRunningCard(s, deps, now);
     await deps.ephemeral.reply(ctx, text, { reply_markup: kb });
@@ -123,6 +164,11 @@ export async function showRunning(ctx: Context, deps: BotDeps): Promise<void> {
   if (list.length > shown.length) {
     await deps.ephemeral.reply(ctx, `\u2026and ${list.length - shown.length} more.`);
   }
+}
+
+function samePath(a: string, b: string): boolean {
+  return a.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() ===
+    b.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 /** Collapse any cards that share a session id (defensive — the controller
@@ -139,12 +185,37 @@ function dedupeBySession(list: RunningSession[]): RunningSession[] {
 
 /** Switch the chat to a session and show its summary + unread. */
 export async function switchAndShow(ctx: Context, deps: BotDeps, sessionId: string): Promise<void> {
-  const res = await deps.registry.controller(ctx.chat!.id).switchTo(sessionId);
+  const { resolveScope } = await import("../scope.js");
+  const scope = resolveScope(ctx, deps);
+  // Prefer switching in the current scope controller; fall back to forum/private.
+  let res = await scope.controller.switchTo(sessionId);
   if (!res) {
-    await ctx.reply("Session not found (it may have been closed).");
+    const fc = deps.registry.forumControllerForSession(sessionId);
+    if (fc) res = await fc.switchTo(sessionId);
+  }
+  if (!res) {
+    res = await deps.registry.controller(ctx.chat!.id).switchTo(sessionId);
+  }
+  if (!res) {
+    // Attach from store into this scope (cross bot↔topic visibility).
+    const meta = deps.store.get(sessionId);
+    if (meta?.cwd) {
+      const hist = (await import("../../sessions/history.js")).readHistory(deps.store.jsonlPath(sessionId));
+      await scope.controller.addAttach(sessionId, meta.cwd, meta.title || basenameSafe(meta.cwd), hist);
+      res = await scope.controller.switchTo(sessionId);
+    }
+  }
+  if (!res) {
+    await ctx.reply("Session not found (it may have been closed).", scope.threadExtra);
     return;
   }
   await deliverSwitch(ctx, deps, res);
+}
+
+function basenameSafe(p: string): string {
+  const n = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const i = n.lastIndexOf("/");
+  return i >= 0 ? n.slice(i + 1) : n;
 }
 
 export function registerRunning(bot: Bot, deps: BotDeps): void {
@@ -160,7 +231,14 @@ export function registerRunning(bot: Bot, deps: BotDeps): void {
 
   bot.callbackQuery(new RegExp(`^run:close:${UUID}$`), async (ctx) => {
     const id = ctx.match![1]!;
-    await deps.registry.controller(ctx.chat!.id).close(id);
+    const { resolveScope } = await import("../scope.js");
+    const scope = resolveScope(ctx, deps);
+    let closed = await scope.controller.close(id);
+    if (!closed) {
+      const fc = deps.registry.forumControllerForSession(id);
+      if (fc) closed = await fc.close(id);
+    }
+    if (!closed) await deps.registry.controller(ctx.chat!.id).close(id);
     await ctx.answerCallbackQuery({ text: "Closed" });
     await ctx.deleteMessage().catch(() => {}); // remove just this card
   });

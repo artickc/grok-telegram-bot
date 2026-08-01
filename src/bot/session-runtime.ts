@@ -219,6 +219,8 @@ export class SessionRuntime {
    * for this runtime are posted into that topic.
    */
   readonly messageThreadId: number | undefined;
+  /** Settings storage key (`chatId` or `chatId:t{threadId}`). */
+  readonly settingsKey: string;
 
   constructor(
     private readonly api: Api,
@@ -226,15 +228,22 @@ export class SessionRuntime {
     private readonly acp: GrokClient,
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
-    init?: { cwd: string; projectName?: string; sessionId?: string; messageThreadId?: number },
+    init?: {
+      cwd: string;
+      projectName?: string;
+      sessionId?: string;
+      messageThreadId?: number;
+      settingsKey?: string;
+    },
   ) {
     this.messageThreadId = init?.messageThreadId;
+    this.settingsKey = init?.settingsKey ?? String(chatId);
     if (init) {
       this.cwd = init.cwd;
       this.projectName = init.projectName;
       this.sessionId = init.sessionId;
     } else {
-      const s = settings.get(chatId);
+      const s = settings.getKey(this.settingsKey);
       this.cwd = s.projectPath ?? cfg.workspace;
       this.projectName = s.projectName;
       this.sessionId = s.sessionId;
@@ -397,13 +406,16 @@ export class SessionRuntime {
     this.changed();
   }
   get reasoning(): ReasoningEffort {
-    return this.settings.get(this.chatId).reasoning;
+    return this.settings.getKey(this.settingsKey).reasoning;
   }
   get agent(): string | undefined {
-    return this.settings.get(this.chatId).agent;
+    return this.settings.getKey(this.settingsKey).agent;
   }
   get model(): string | undefined {
-    return this.settings.get(this.chatId).model;
+    return this.settings.getKey(this.settingsKey).model;
+  }
+  get preferredAccountId(): string | undefined {
+    return this.settings.getKey(this.settingsKey).preferredAccountId;
   }
 
   /** Latest context-usage % / effort / credits for the current session. */
@@ -526,7 +538,7 @@ export class SessionRuntime {
   async setModelPref(modelId: string): Promise<{ ok: boolean; error?: string }> {
     // Persist the choice always; only talk to Grok when a session is live in
     // the current process (set_model on an unloaded session crashes the agent).
-    this.settings.update(this.chatId, { model: modelId });
+    this.settings.updateKey(this.settingsKey, { model: modelId });
     if (modelId && this.sessionLive && this.sessionId) {
       if (!this.acp.hasModel(modelId)) return { ok: false, error: `unknown model: ${modelId}` };
       try {
@@ -541,7 +553,7 @@ export class SessionRuntime {
   }
 
   async setAgentPref(agent: string): Promise<void> {
-    this.settings.update(this.chatId, { agent });
+    this.settings.updateKey(this.settingsKey, { agent });
     if (agent && this.sessionLive && this.sessionId && this.acp.hasMode(agent)) {
       try {
         await this.acp.setMode(this.sessionId, agent);
@@ -553,22 +565,27 @@ export class SessionRuntime {
   }
 
   setReasoningPref(effort: ReasoningEffort): void {
-    this.settings.update(this.chatId, { reasoning: effort });
+    this.settings.updateKey(this.settingsKey, { reasoning: effort });
+    this.changed();
+  }
+
+  setPreferredAccountId(id: string | undefined): void {
+    this.settings.updateKey(this.settingsKey, { preferredAccountId: id || undefined });
     this.changed();
   }
 
   private async applySessionPrefs(): Promise<void> {
-    const s = this.settings.get(this.chatId);
+    const s = this.settings.getKey(this.settingsKey);
     // Drop any persisted model the agent doesn't actually offer (an unknown id
     // is silently accepted by set_model but then breaks the next prompt).
     if (s.model && !this.acp.hasModel(s.model)) {
-      log.warn(`clearing invalid persisted model "${s.model}" for chat ${this.chatId}`);
-      this.settings.update(this.chatId, { model: "" });
+      log.warn(`clearing invalid persisted model "${s.model}" for scope ${this.settingsKey}`);
+      this.settings.updateKey(this.settingsKey, { model: "" });
     }
-    const cur = this.settings.get(this.chatId);
+    const cur = this.settings.getKey(this.settingsKey);
     // Adopt the session's current agent (mode) when the user hasn't chosen one.
     if (!cur.agent && this.acp.currentModeId) {
-      this.settings.update(this.chatId, { agent: this.acp.currentModeId });
+      this.settings.updateKey(this.settingsKey, { agent: this.acp.currentModeId });
     } else if (this.sessionId && cur.agent && this.acp.hasMode(cur.agent) && cur.agent !== this.acp.currentModeId) {
       try {
         await this.acp.setMode(this.sessionId, cur.agent);
@@ -654,6 +671,7 @@ export class SessionRuntime {
     // Account rotation restarts the process globally. Do not bind a new chat
     // to a candidate account until the owner has finished probing it.
     await this.accountRotator?.waitForIdle();
+    await this.applyPreferredAccount();
     if (this.rebindPending && this.sessionId) {
       // The ACP process is frequently mid-restart the first time we re-bind
       // (auto-restart after a crash, or a fresh bot boot), so a single attempt
@@ -676,6 +694,24 @@ export class SessionRuntime {
       return;
     }
     if (!this.sessionId) await this.startNewSession(this.cwd, this.projectName);
+  }
+
+  /**
+   * If this scope prefers a saved account and the process is on another login,
+   * switch before binding the session (best-effort; never blocks the turn hard).
+   */
+  private async applyPreferredAccount(): Promise<void> {
+    const preferred = this.preferredAccountId;
+    const rotator = this.accountRotator;
+    if (!preferred || !rotator) return;
+    const st = rotator.state();
+    if (st.activeId === preferred) return;
+    try {
+      await rotator.activate(preferred);
+      log.info(`scope ${this.settingsKey}: activated preferred account ${preferred.slice(0, 8)}`);
+    } catch (e) {
+      log.debug(`preferred account activate failed: ${(e as Error).message}`);
+    }
   }
 
   /** Reload a persisted session, retrying flaky failures with a short backoff.
@@ -1854,7 +1890,7 @@ export class SessionRuntime {
 
   private persist(): void {
     if (!this.foreground) return; // only the foreground session is the chat's restored default
-    this.settings.update(this.chatId, {
+    this.settings.updateKey(this.settingsKey, {
       projectPath: this.cwd,
       projectName: this.projectName,
       sessionId: this.sessionId,

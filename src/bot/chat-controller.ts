@@ -40,11 +40,25 @@ export interface SwitchResult {
   alreadyForeground: boolean;
 }
 
+export interface ChatControllerOpts {
+  /** Forum topic thread — all runtimes post into this topic. */
+  messageThreadId?: number;
+  /** Settings key (`chatId` or `chatId:t{thread}`). Defaults to String(chatId). */
+  settingsKey?: string;
+  /** Fixed project path (forum topics): never switch away via project picker. */
+  fixedCwd?: string;
+  fixedProjectName?: string;
+}
+
 export class ChatController {
   private readonly runtimes: SessionRuntime[] = [];
   private fg: SessionRuntime | undefined;
   private readonly lastRead = new Map<string, number>();
   private restored = false;
+  readonly settingsKey: string;
+  readonly messageThreadId: number | undefined;
+  readonly fixedCwd: string | undefined;
+  readonly fixedProjectName: string | undefined;
 
   constructor(
     private readonly api: Api,
@@ -56,14 +70,22 @@ export class ChatController {
     private readonly refresh: (chatId: number) => void,
     private readonly notifyActivity: (busy: boolean) => void,
     private readonly getRotator?: () => AccountRotator | undefined,
-  ) {}
+    opts?: ChatControllerOpts,
+  ) {
+    this.messageThreadId = opts?.messageThreadId;
+    this.settingsKey = opts?.settingsKey ?? String(chatId);
+    this.fixedCwd = opts?.fixedCwd;
+    this.fixedProjectName = opts?.fixedProjectName;
+  }
 
   /** The current foreground runtime (created/restored lazily). */
   foreground(): SessionRuntime {
     this.ensureRestored();
     if (!this.fg) {
-      const s = this.settings.get(this.chatId);
-      const rt = this.create({ cwd: s.projectPath ?? this.cfg.workspace, projectName: s.projectName, sessionId: s.sessionId });
+      const s = this.settings.getKey(this.settingsKey);
+      const cwd = this.fixedCwd ?? s.projectPath ?? this.cfg.workspace;
+      const name = this.fixedProjectName ?? s.projectName;
+      const rt = this.create({ cwd, projectName: name, sessionId: s.sessionId });
       this.runtimes.push(rt);
       this.fg = rt;
     }
@@ -301,27 +323,31 @@ export class ChatController {
   private ensureRestored(): void {
     if (this.restored) return;
     this.restored = true;
-    const s = this.settings.get(this.chatId);
+    const s = this.settings.getKey(this.settingsKey);
     const seen = new Set<string>();
     for (const cs of s.controlledSessions ?? []) {
       if (!cs.sessionId || seen.has(cs.sessionId)) continue; // never restore the same session twice
       seen.add(cs.sessionId);
+      // Forum topics only restore sessions for the fixed project path.
+      if (this.fixedCwd && normPath(cs.projectPath) !== normPath(this.fixedCwd)) continue;
       this.runtimes.push(this.create({ cwd: cs.projectPath, projectName: cs.projectName, sessionId: cs.sessionId }));
     }
     // Lazy project switches persist projectPath without a sessionId. If the
     // saved project is not among controlled sessions, recreate an unbound FG
     // so a restart lands on the project the user last chose.
-    if (s.projectPath) {
-      const key = normPath(s.projectPath);
+    const homePath = this.fixedCwd ?? s.projectPath;
+    const homeName = this.fixedProjectName ?? s.projectName;
+    if (homePath) {
+      const key = normPath(homePath);
       const hasProject = this.runtimes.some((r) => normPath(r.cwd) === key);
       if (!hasProject) {
-        this.runtimes.push(this.create({ cwd: s.projectPath, projectName: s.projectName }));
+        this.runtimes.push(this.create({ cwd: homePath, projectName: homeName, sessionId: s.sessionId }));
       }
     }
     if (this.runtimes.length > 0) {
       let fg = this.runtimes.find((r) => r.sessionId && r.sessionId === s.foregroundSessionId);
-      if (!fg && s.projectPath) {
-        const key = normPath(s.projectPath);
+      if (!fg && homePath) {
+        const key = normPath(homePath);
         fg = this.runtimes.find((r) => normPath(r.cwd) === key);
       }
       fg = fg ?? this.runtimes[0]!;
@@ -365,7 +391,11 @@ export class ChatController {
   }
 
   private create(init: { cwd: string; projectName?: string; sessionId?: string }): SessionRuntime {
-    const rt = new SessionRuntime(this.api, this.chatId, this.acp, this.cfg, this.settings, init);
+    const rt = new SessionRuntime(this.api, this.chatId, this.acp, this.cfg, this.settings, {
+      ...init,
+      messageThreadId: this.messageThreadId,
+      settingsKey: this.settingsKey,
+    });
     rt.onStateChange = () => this.refresh(this.chatId);
     rt.onActivity = (busy) => this.notifyActivity(busy);
     rt.accountRotator = this.getRotator?.();
@@ -415,15 +445,15 @@ export class ChatController {
       seen.add(r.sessionId);
       controlled.push({ sessionId: r.sessionId, projectPath: r.cwd, projectName: r.projectName });
     }
-    this.settings.update(this.chatId, {
+    this.settings.updateKey(this.settingsKey, {
       controlledSessions: controlled,
       foregroundSessionId: this.fg?.sessionId,
       // Keep the single-session restore fields aligned with the foreground so
       // the pinned status panel and a fresh restore never show a project that
       // belongs to a different (previously-foreground) session.
       sessionId: this.fg?.sessionId,
-      projectPath: this.fg?.cwd,
-      projectName: this.fg?.projectName,
+      projectPath: this.fixedCwd ?? this.fg?.cwd,
+      projectName: this.fixedProjectName ?? this.fg?.projectName,
     });
   }
 }

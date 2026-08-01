@@ -13,6 +13,11 @@ export interface ChatSettings {
   agent?: string;
   model?: string;
   reasoning: ReasoningEffort;
+  /**
+   * Preferred saved Grok account login id for this chat/topic (optional).
+   * Applied when starting turns if different from the process-active account.
+   */
+  preferredAccountId?: string;
   /** Telegram message id of the pinned status panel, if any. */
   statusMessageId?: number;
   /** Sessions this chat controls (for multi-session switching). */

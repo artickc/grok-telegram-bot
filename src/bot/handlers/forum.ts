@@ -128,6 +128,8 @@ export async function resolveForumRuntime(
     return "handled";
   }
 
-  const rt = deps.registry.getForumTopic(chatId, tid, resolved.cwd, resolved.projectName);
-  return { rt };
+  // Multi-session controller for this topic (own model/reasoning/running list).
+  // First message with no sessionId creates one via ensureSession on submit.
+  const controller = deps.registry.forumController(chatId, tid, resolved.cwd, resolved.projectName);
+  return { rt: controller.foreground() };
 }

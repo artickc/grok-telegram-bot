@@ -294,6 +294,13 @@ export function registerAccounts(bot: Bot, deps: BotDeps): void {
         await deps.acp.start(true).catch(() => {});
         throw e;
       }
+      // Remember preferred account for this chat/topic scope (model/reasoning peers).
+      try {
+        const { resolveScope } = await import("../scope.js");
+        resolveScope(ctx, deps).rt.setPreferredAccountId(id);
+      } catch {
+        /* non-fatal */
+      }
       const note = (await deps.usage.isLoggedIn())
         ? `\u2705 Now signed in as ${meta.label}. Your next message runs on this account.`
         : `\u26A0\uFE0F Switched to ${meta.label}, but no usable login is active. ${UNSUPPORTED_LOGIN_HELP}`;
