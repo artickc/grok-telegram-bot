@@ -17,6 +17,17 @@ The latest section is published verbatim as the GitHub Release notes by
   disconnected"* and stay stuck with edits blocked. Default: auto-approve + short
   Telegram notice.
 
+### Added
+
+- **Full Grok Build shell slash surface on Telegram** — ACP-useful shell
+  builtins (session, plan/goal/workflow, memory, media, extensions, account,
+  settings, …) are advertised in the command menu and/or forwarded via the
+  catch-all. Underscore forms map to Grok hyphens (`/view_plan` → `/view-plan`);
+  documented aliases (`show_plan`, `clear`→`/new`, …) resolve correctly.
+  Name collisions with bot commands use non-colliding aliases
+  (`/memory_flush`→`/flush`, `/grok_new`→`/new`, `/grok_usage`→`/usage`,
+  `/grok_btw`→`/btw`) so bot handlers keep their bare names.
+
 ### Fixed
 
 - **Grok Build slash commands from Telegram** — `/goal`, `/plan`, `/compact`,

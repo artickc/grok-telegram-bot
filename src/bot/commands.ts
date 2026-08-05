@@ -1,7 +1,14 @@
 /**
  * Bot command definitions (for the Telegram command menu) and help text.
+ *
+ * Telegram setMyCommands hard limit is 100 entries. Bot-local commands plus
+ * the advertised Grok shell subset must stay under that; catch-all forward
+ * still reaches non-menu Grok/skills slashes.
  */
-export const COMMANDS: { command: string; description: string }[] = [
+import { GROK_FORWARDED_COMMANDS } from "./handlers/grok-slash.js";
+
+/** Bot-local commands (not forwarded to Grok). */
+export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "start", description: "Welcome, menu & status panel" },
   { command: "menu", description: "Show the menu keyboard" },
   { command: "projects", description: "Projects: list / search <q> / open <path> / new <name>" },
@@ -26,18 +33,12 @@ export const COMMANDS: { command: string; description: string }[] = [
   { command: "reauth", description: "Sign in to Grok (login or import)" },
   { command: "accounts", description: "Switch between saved Grok accounts" },
   { command: "help", description: "Show help" },
-  // Grok Build slash commands (forwarded into the active session)
-  { command: "goal", description: "Grok /goal — set/status/pause/resume/clear" },
-  { command: "plan", description: "Grok /plan — enter plan mode" },
-  { command: "view_plan", description: "Grok /view-plan — show saved plan" },
-  { command: "compact", description: "Grok /compact — compress context" },
-  { command: "context", description: "Grok /context — context window breakdown" },
-  { command: "deep_research", description: "Grok /deep-research <query>" },
-  { command: "workflow", description: "Grok /workflow run|pause|resume|stop" },
-  { command: "workflows", description: "Grok /workflows — live runs" },
-  { command: "remember", description: "Grok /remember <note>" },
-  { command: "effort", description: "Grok /effort low|medium|high|xhigh" },
-  { command: "session_info", description: "Grok /session-info" },
+];
+
+/** Full Telegram menu: bot-local + Grok Build shell forwards (≤100). */
+export const COMMANDS: { command: string; description: string }[] = [
+  ...BOT_COMMANDS,
+  ...GROK_FORWARDED_COMMANDS.map(({ command, description }) => ({ command, description })),
 ];
 
 export const HELP_TEXT = [
@@ -49,7 +50,7 @@ export const HELP_TEXT = [
   "\u2022 While Grok is working, anything you send is queued and runs",
   "  automatically when the current turn finishes.",
   "",
-  "COMMANDS",
+  "BOT COMMANDS",
   "/projects \u2014 choose which folder Grok works in",
   "/sessions \u2014 resume one of your recent Grok sessions",
   "/active \u2014 attach to a session currently running on the PC",
@@ -62,14 +63,14 @@ export const HELP_TEXT = [
   "/reauth \u2014 sign in to Grok (grok login, or import an existing login)",
   "/accounts \u2014 switch between saved Grok accounts",
   "",
-  "GROK BUILD SLASH (in the current session)",
-  "/goal <objective|status|pause|resume|clear> \u2014 autonomous goal",
-  "/plan [description] \u2014 enter plan mode",
-  "/view_plan \u2014 show saved plan",
-  "/compact [note] \u2014 compress context",
-  "/context \u2014 context window usage",
-  "/deep_research <query> \u2014 background research workflow",
-  "/workflow / /workflows \u2014 workflows",
-  "/remember <note> \u2014 save to memory",
-  "Other Grok /commands are also forwarded if not a bot command.",
+  "GROK BUILD SLASH (forwarded into the active session)",
+  "/goal /plan /view_plan /compact /context /session_info",
+  "/deep_research /workflow /workflows /loop",
+  "/remember /memory /memory_flush /dream",
+  "/effort /always_approve /auto /fork /rewind",
+  "/imagine /imagine_video /hooks /plugins /skills",
+  "/docs /doctor /settings /config_agents /personas",
+  "/grok_new /grok_usage /grok_btw \u2014 Grok builtins that collide with bot names",
+  "Underscores map to hyphens (e.g. /view_plan \u2192 /view-plan).",
+  "Other non-bot Grok /commands and skills are also forwarded.",
 ].join("\n");
