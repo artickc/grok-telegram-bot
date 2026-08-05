@@ -2,7 +2,7 @@
  * Platform detection, launch-spec construction, and a small command runner
  * shared by the per-OS service controllers.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { PROJECT_ROOT, INSTANCE_DIR } from "../config.js";
 
@@ -47,18 +47,55 @@ export function buildLaunchSpec(): LaunchSpec {
   };
 }
 
-/** Run a command, returning combined output. Throws on non-zero exit. */
-export function run(cmd: string, args: string[]): string {
-  return execFileSync(cmd, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+/** Default max wait for schtasks/systemctl/powershell helpers — never hang the CLI. */
+const RUN_TIMEOUT_MS = 45_000;
+
+/** Run a command, returning combined output. Throws on non-zero exit or timeout. */
+export function run(cmd: string, args: string[], timeoutMs = RUN_TIMEOUT_MS): string {
+  return execFileSync(cmd, args, {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutMs,
+  });
 }
 
 /** Run a command, swallowing errors and returning { ok, out }. */
-export function runSafe(cmd: string, args: string[]): { ok: boolean; out: string } {
+export function runSafe(cmd: string, args: string[], timeoutMs = RUN_TIMEOUT_MS): { ok: boolean; out: string } {
   try {
-    return { ok: true, out: run(cmd, args) };
+    return { ok: true, out: run(cmd, args, timeoutMs) };
   } catch (e) {
-    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
+    const err = e as {
+      stdout?: Buffer | string;
+      stderr?: Buffer | string;
+      message?: string;
+      killed?: boolean;
+      code?: string;
+    };
+    // Node sets killed=true when the timeout option aborts the child.
+    if (err.killed || err.code === "ETIMEDOUT") {
+      return { ok: false, out: `timed out after ${timeoutMs}ms: ${cmd} ${args.join(" ")}` };
+    }
     const out = String(err.stdout ?? "") + String(err.stderr ?? "") || err.message || "failed";
     return { ok: false, out };
+  }
+}
+
+/**
+ * Fire-and-forget process (detached). Use for forever-restart supervisors
+ * (Windows VBS loop) so `grok-tg install|start|restart` does not hang waiting
+ * for a process that never exits.
+ */
+export function launchDetached(cmd: string, args: string[]): { ok: boolean; out: string } {
+  try {
+    const child = spawn(cmd, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    if (child.pid == null) return { ok: false, out: "spawn produced no pid" };
+    return { ok: true, out: `pid ${child.pid}` };
+  } catch (e) {
+    return { ok: false, out: (e as Error).message || "spawn failed" };
   }
 }

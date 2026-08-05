@@ -161,6 +161,25 @@ export class PermissionService {
     return this.pending.get(reqId)?.sessionId;
   }
 
+  /**
+   * ACP: when a session is cancelled, all pending permission requests for that
+   * session must complete with `cancelled`. Returns how many were cancelled.
+   * Does not touch other sessions.
+   */
+  cancelForSession(sessionId: string): number {
+    let n = 0;
+    for (const [reqId, p] of [...this.pending.entries()]) {
+      if (p.sessionId !== sessionId) continue;
+      clearTimeout(p.timer);
+      this.pending.delete(reqId);
+      void this.finishPrompt(p, "\u{1F510} (cancelled — turn stopped)");
+      p.resolve({ outcome: { outcome: "cancelled" } });
+      n++;
+    }
+    if (n > 0) log.info(`cancelled ${n} pending permission(s) for session ${sessionId.slice(0, 8)}`);
+    return n;
+  }
+
   /** Unpin (if pinned) and optionally rewrite the prompt message. */
   private async finishPrompt(p: Pending, text?: string): Promise<void> {
     if (p.messageId !== undefined && text) {

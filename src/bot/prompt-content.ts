@@ -77,6 +77,9 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
     images: inputs.flatMap((i) => i.images),
     resourceLinks: inputs.flatMap((i) => i.resourceLinks ?? []),
     replyTo: inputs.find((i) => i.replyTo !== undefined)?.replyTo,
+    // First prompt's id wins (same rule as replyTo) so merged queue turns keep
+    // one searchable #prompt_ tag threaded to the first anchor.
+    promptId: inputs.find((i) => i.promptId)?.promptId,
     quotedText: quotes.length > 0 ? [...new Set(quotes)].join("\n\n---\n\n") : undefined,
     skipSelfRecheck: skipSelfRecheck || undefined,
   };

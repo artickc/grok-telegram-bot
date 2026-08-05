@@ -10,6 +10,8 @@ export interface TagInput {
   projectName?: string;
   cwd?: string;
   sessionId?: string;
+  /** Short id for a single user turn; becomes `#prompt_<id>`. */
+  promptId?: string;
 }
 
 /** Sanitise a value into a Telegram-safe hashtag body (letters/digits/_ only). */
@@ -25,10 +27,12 @@ export function tagSafe(v: string): string {
 /**
  * Build the hashtag footer. `#proj_` is always present; `#sess_` is added only
  * when the session id is known, so partial callers (e.g. a static /history view)
- * still tag consistently. Order: project · session.
+ * still tag consistently. `#prompt_` is added when a turn-level id is known.
+ * Order: project · session · prompt.
  */
 export function sessionHashtags(input: TagInput): string {
   const tags = [`#proj_${tagSafe(input.projectName || basename(input.cwd || "") || "none")}`];
   if (input.sessionId) tags.push(`#sess_${tagSafe(input.sessionId.slice(0, 8))}`);
+  if (input.promptId) tags.push(`#prompt_${tagSafe(input.promptId)}`);
   return tags.join(" ");
 }

@@ -63,6 +63,11 @@ export interface PromptInput {
   /** Telegram message id of the prompt, so the reply threads to it. */
   replyTo?: number;
   /**
+   * Short id for the bot-owned prompt anchor (`#prompt_<id>`). All AI messages
+   * for this turn carry the same tag so the user can search related replies.
+   */
+  promptId?: string;
+  /**
    * Content of the message the user was replying to (or the portion they
    * quoted). Injected as context so the agent sees what the user is responding
    * to. See {@link ../bot/reply-context.ts}.
@@ -79,13 +84,14 @@ export function textPrompt(
   text: string,
   replyTo?: number,
   quotedText?: string,
-  opts?: { skipSelfRecheck?: boolean },
+  opts?: { skipSelfRecheck?: boolean; promptId?: string },
 ): PromptInput {
   return {
     text,
     images: [],
     resourceLinks: [],
     replyTo,
+    promptId: opts?.promptId,
     quotedText,
     skipSelfRecheck: opts?.skipSelfRecheck,
   };

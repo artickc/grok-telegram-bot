@@ -15,6 +15,7 @@ import { chunkMarkdown } from "../render/chunk.js";
 import { toTelegramMarkdown } from "../render/markdown.js";
 import { extractProgress, progressBar } from "../render/progress.js";
 import { estimateProgress } from "../render/progress-estimate.js";
+import { stripTelegramActionFences } from "../render/telegram-bridge.js";
 import { truncateMiddle } from "../render/truncate.js";
 import { safeEdit, safeSend } from "../bot/telegram-io.js";
 
@@ -80,10 +81,11 @@ export class ResponseStreamer {
     return this.footer ? `\n\n${this.footer}` : "";
   }
 
-  /** Strip `{progress: N%}` markers from rendered text, remembering the latest
-   *  value (sticky across flushes) and notifying the owner when it changes. */
+  /** Strip `{progress: N%}` markers and telegram action JSON fences from
+   *  rendered text, remembering the latest progress value. */
   private captureProgress(text: string): string {
-    const { value, cleaned } = extractProgress(text);
+    const withoutTg = stripTelegramActionFences(text);
+    const { value, cleaned } = extractProgress(withoutTg);
     if (value !== undefined) this.setProgressValue(value, true);
     return cleaned;
   }

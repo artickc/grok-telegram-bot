@@ -17,6 +17,7 @@ import { get } from "node:https";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JsonStore } from "./json-store.js";
+import { markIntentionalShutdown } from "./lifetime-flag.js";
 import { createLogger } from "../logger.js";
 import { extractChangelog, isNewer, isSafeVersion } from "./version.js";
 
@@ -145,27 +146,47 @@ export class Updater {
   }
 
   private async restart(): Promise<void> {
+    // Signal main/beforeExit that this exit is intentional (avoid keep-alive race).
+    markIntentionalShutdown("updater-reexec");
     await this.opts.shutdown().catch(() => {});
     // Under systemd/launchd, a clean exit triggers a managed relaunch (no double
     // instance). On Windows / foreground there is no supervisor, so re-exec.
     if (process.env.GROK_TG_SUPERVISED === "1") {
       log.info("exiting for supervisor to relaunch the updated bot");
+      try {
+        process.stderr.write("[updater] supervised exit for relaunch\n");
+      } catch {
+        /* ignore */
+      }
       setTimeout(() => process.exit(0), 250);
       return;
     }
     log.info("re-executing the updated bot");
     try {
+      // TTY: inherit stdio so `npm start` doesn't look like a silent death.
+      // Non-TTY (service): detach and ignore stdio.
+      const inherit = Boolean(process.stdout.isTTY);
       const child = spawn(
         process.execPath,
         ["--import", "tsx", join(this.opts.projectRoot, "src", "index.ts"), "--instance", this.opts.instanceDir],
-        { detached: true, stdio: "ignore", cwd: this.opts.projectRoot, env: process.env },
+        {
+          detached: !inherit,
+          stdio: inherit ? "inherit" : "ignore",
+          cwd: this.opts.projectRoot,
+          env: process.env,
+        },
       );
-      child.unref();
+      if (!inherit) child.unref();
       if (!child.pid) {
         log.error("re-exec spawn produced no pid — staying alive");
         return;
       }
-      log.info(`re-exec child pid ${child.pid}`);
+      log.info(`re-exec child pid ${child.pid} (stdio=${inherit ? "inherit" : "ignore"})`);
+      try {
+        process.stderr.write(`[updater] re-exec child pid ${child.pid}; parent exiting\n`);
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
       // Never exit if replacement failed — silent death is worse than stale code.
       log.error(`re-exec failed: ${(e as Error).message} — staying alive`);

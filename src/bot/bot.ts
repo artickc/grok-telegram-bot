@@ -22,7 +22,7 @@ import { Scheduler } from "../tasks/scheduler.js";
 import { TaskStore } from "../tasks/store.js";
 import { createAuthMiddleware } from "./auth.js";
 import { isStaleCallbackError, safeCallbackMiddleware } from "./callback.js";
-import { COMMANDS } from "./commands.js";
+import { COMMANDS, GROUP_COMMANDS } from "./commands.js";
 import { type BotDeps, MenuCache } from "./deps.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
@@ -52,6 +52,7 @@ import { PermissionService } from "./permission-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
 import { ForumManager } from "../forum/manager.js";
+import { TelegramBotService } from "./telegram-bots.js";
 
 const log = createLogger("bot");
 
@@ -107,6 +108,31 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
       ? new ForumManager(bot.api, cfg, projects)
       : undefined;
 
+  // Sibling bots + memory/topic actions for the agent telegram JSON bridge.
+  const telegramBots = new TelegramBotService(bot.api, cfg);
+  telegramBots.attachToBot(bot);
+  registry.setBridge({
+    store,
+    forum,
+    bots: telegramBots,
+    // Cross-topic orchestration: General can create a topic and send_prompt there.
+    submitTopicPrompt: async ({ threadId, cwd, projectName, prompt, newSession }) => {
+      if (cfg.topicGroupId === undefined) {
+        throw new Error("TOPIC_GROUP_ID unset");
+      }
+      const groupId = cfg.topicGroupId;
+      const controller = registry.forumController(groupId, threadId, cwd, projectName);
+      if (newSession) {
+        const rt = await controller.addNew(cwd, projectName);
+        const outcome = await rt.submit(textPrompt(prompt));
+        return { outcome, sessionId: rt.sessionId };
+      }
+      const rt = controller.foreground();
+      const outcome = await rt.submit(textPrompt(prompt));
+      return { outcome, sessionId: rt.sessionId };
+    },
+  });
+
   const deps: BotDeps = {
     api: bot.api,
     cfg,
@@ -144,6 +170,11 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
   acp.permissionHandler = (p) => permissions.handle(p);
+  // /stop and /cancel must cancel pending interactive permissions for that
+  // session only (ACP requires cancelled outcomes) — never kill the agent.
+  acp.onSessionCancel = (sessionId) => {
+    permissions.cancelForSession(sessionId);
+  };
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
   // message" service message for each pin. Delete those so the chat stays clean
@@ -155,14 +186,16 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   // handler forgets (prevents the loading spinner + unhandled 400 noise).
   bot.use(safeCallbackMiddleware());
 
-  // Keep history clean: after handling, delete the user's command (/…) and
-  // persistent-bar button taps. Plain prompts and wizard input are kept.
+  // Keep history clean: delete the user's command (/…) and persistent-bar
+  // button taps INSTANTLY (before handlers) so slow ACP/CLI work never leaves
+  // the raw slash sitting in chat. Handlers post bot status messages instead.
+  // Plain prompts are adopted separately (see prompt-anchor.ts).
   bot.on("message:text", async (ctx, next) => {
-    await next();
     const text = ctx.message?.text ?? "";
     if (text.startsWith("/") || BAR_LABELS.includes(text)) {
-      await ctx.deleteMessage().catch(() => {});
+      void ctx.deleteMessage().catch(() => {});
     }
+    await next();
   });
 
   bot.callbackQuery(/^perm:(\d+):(\d+)$/, async (ctx) => {
@@ -197,6 +230,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     const batchId = Number(ctx.match![1]);
     const index = Number(ctx.match![2]);
     const { resolveScope } = await import("./scope.js");
+    const { adoptUserPrompt } = await import("./prompt-anchor.js");
     const scope = resolveScope(ctx, deps);
     const rt = scope.rt;
     const text = rt.takeSuggestion(batchId, index);
@@ -208,10 +242,33 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     // Dim the keyboard so double-taps don't re-fire.
     await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
     try {
-      const outcome = await rt.submit(textPrompt(text, ctx.callbackQuery.message?.message_id));
+      const chatId = ctx.chat?.id;
+      const anchor =
+        chatId !== undefined
+          ? await adoptUserPrompt(deps.api, {
+              chatId,
+              text,
+              userMessageIds: [],
+              messageThreadId: scope.threadExtra.message_thread_id,
+              projectName: rt.projectName,
+              prefix: "\u{1F4A1} Suggestion",
+            })
+          : undefined;
+      const outcome = await rt.submit(
+        textPrompt(text, anchor?.replyTo ?? ctx.callbackQuery.message?.message_id, undefined, {
+          promptId: anchor?.promptId,
+        }),
+      );
       if (outcome === "queued") {
+        const extra: Record<string, unknown> = { ...scope.threadExtra };
+        if (anchor?.replyTo !== undefined) {
+          extra.reply_parameters = {
+            message_id: anchor.replyTo,
+            allow_sending_without_reply: true,
+          };
+        }
         await ctx
-          .reply(`\u{1F4E5} Queued suggestion (position ${rt.queueLength}).`, scope.threadExtra)
+          .reply(`\u{1F4E5} Queued suggestion (position ${rt.queueLength}).`, extra)
           .catch(() => {});
       }
     } catch (e) {
@@ -250,13 +307,40 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
       log.debug("stale callback query:", err.error instanceof Error ? err.error.message : err.error);
       return;
     }
-    log.error("unhandled bot error:", err.error instanceof Error ? err.error.message : err.error);
+    const e = err.error;
+    if (e instanceof Error) {
+      // Include Grammy error_code when present (429 / 403 / 409, etc.) for diagnosis.
+      const codeNum = (e as unknown as { error_code?: number }).error_code;
+      const code = typeof codeNum === "number" ? ` (code ${codeNum})` : "";
+      log.error(`unhandled bot error${code}:`, e.stack || e.message);
+    } else {
+      log.error("unhandled bot error:", e);
+    }
+    // Never rethrow — a middleware failure must not take down long polling.
   });
 
-  try {
-    await bot.api.setMyCommands(COMMANDS);
-  } catch (e) {
-    log.warn("setMyCommands failed:", (e as Error).message);
+  // Scoped command menus: private = full sorted list; groups = short list with
+  // cancel/menu first (reply keyboard is unreliable in forum topics).
+  const registerCommands = async (
+    commands: typeof COMMANDS,
+    scope?: { type: string; chat_id?: number },
+    label = "default",
+  ): Promise<void> => {
+    try {
+      await bot.api.setMyCommands(commands, scope ? { scope: scope as never } : undefined);
+    } catch (e) {
+      log.warn(`setMyCommands (${label}) failed:`, (e as Error).message);
+    }
+  };
+  await registerCommands(COMMANDS, undefined, "default");
+  await registerCommands(COMMANDS, { type: "all_private_chats" }, "private");
+  await registerCommands(GROUP_COMMANDS, { type: "all_group_chats" }, "groups");
+  if (cfg.topicGroupId !== undefined) {
+    await registerCommands(
+      GROUP_COMMANDS,
+      { type: "chat", chat_id: cfg.topicGroupId },
+      `chat:${cfg.topicGroupId}`,
+    );
   }
 
   const updater = new Updater({

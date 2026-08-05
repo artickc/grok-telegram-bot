@@ -40,6 +40,28 @@ test("read_file is NOT labeled MCP; shows path offset limit", () => {
   assert.ok(md.includes("180") || md.includes("limit"), md);
   assert.ok(!md.includes("Call MCP"), md);
   assert.ok(!/\*\*Other\*\*/.test(md), md);
+  // Path must be in inline code, not inside **bold** (Windows path MDV2 trap).
+  assert.ok(/\*\*Read\*\*/.test(md), md);
+  assert.ok(!/\*\*Read H:/.test(md) && !/\*\*Read .*session-runtime/.test(md), md);
+  assert.ok(md.includes("`") && md.includes("session-runtime"), md);
+});
+
+test("edit tool keeps Windows path in code not bold", () => {
+  const path =
+    "C:\\Users\\artic\\.grok\\sessions\\H%3A%5CLucru%5CDomains%5CApp\\plan.md";
+  const md = formatToolCall(
+    {
+      sessionUpdate: "tool_call",
+      kind: "edit",
+      title: "search_replace",
+      status: "completed",
+      rawInput: { file_path: path },
+    } as SessionUpdate,
+    opts,
+  );
+  assert.ok(/\*\*Edit\*\*/.test(md), md);
+  assert.ok(md.includes("`" + path + "`") || md.includes("`C:\\Users"), md);
+  assert.ok(!/\*\*Edit C:/.test(md), md);
 });
 
 test("grep shows pattern and path", () => {

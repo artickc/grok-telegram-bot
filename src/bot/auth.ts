@@ -32,6 +32,13 @@ export function createAuthMiddleware(cfg: AppConfig) {
   }
 
   return async (ctx: Context, next: NextFunction): Promise<void> => {
+    // Bot membership changes (promote/demote) must always reach handlers so
+    // forum readiness can re-probe — not gated on ALLOWED_USERS or from.is_bot.
+    if (ctx.myChatMember) {
+      await next();
+      return;
+    }
+
     const from = ctx.from;
     // Only a genuine USER action is subject to the auth gate. Ignore bot-authored
     // updates and missing `from` (service noise) so we never ⛔-spam ourselves.

@@ -34,6 +34,13 @@ export class ProjectManager {
 
   /** List projects, de-duplicated by (case-insensitive) name. */
   list(limit = 100): ProjectEntry[] {
+    const out = this.listAll();
+    if (!Number.isFinite(limit) || limit <= 0 || limit >= out.length) return out;
+    return out.slice(0, limit);
+  }
+
+  /** Full catalog (no slice). Used by forum topic setup for 1000+ projects. */
+  listAll(): ProjectEntry[] {
     const byName = new Map<string, ProjectEntry>();
 
     for (const root of this.roots) {
@@ -62,17 +69,23 @@ export class ProjectManager {
 
     // Freshest first (directory mtime); callers may refine `lastUsed` with
     // session activity and re-sort. Alphabetical as a stable tiebreak.
-    const out = [...byName.values()].sort(
+    return [...byName.values()].sort(
       (a, b) => b.lastUsed - a.lastUsed || a.name.localeCompare(b.name),
     );
-    return out.slice(0, limit);
+  }
+
+  /** Exact catalog name match (case-insensitive). */
+  findExactByName(name: string): ProjectEntry | undefined {
+    const key = name.trim().toLowerCase();
+    if (!key) return undefined;
+    return this.listAll().find((p) => p.name.toLowerCase() === key);
   }
 
   /** Projects whose name contains the query (case-insensitive). */
   search(query: string, limit = 100): ProjectEntry[] {
     const q = query.trim().toLowerCase();
     if (!q) return this.list(limit);
-    return this.list(1000)
+    return this.listAll()
       .filter((p) => p.name.toLowerCase().includes(q))
       .slice(0, limit);
   }

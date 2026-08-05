@@ -47,7 +47,7 @@ export function threadIdFromContext(ctx: Context): number | undefined {
 export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
   const chatId = ctx.chat!.id;
   const rawThread = threadIdFromContext(ctx);
-  const isForum = Boolean(deps.forum && deps.cfg.topicGroupId === chatId);
+  const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
   const threadExtra =
     isForum || rawThread !== undefined
       ? { message_thread_id: isForum ? forumThreadId(rawThread) : rawThread }

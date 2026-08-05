@@ -14,8 +14,8 @@ export interface SessionMeta {
   /** Size of the .jsonl history in bytes (proxy for conversation length). */
   historyBytes: number;
   /**
-   * Short status line for cards: current step while working, or chat summary
-   * when idle (persisted by the bot after turns).
+   * Short status for cards: last user prompt (persisted by the bot). While a
+   * turn is live, runtime may append last agent thinking as a second line.
    */
   comment?: string;
 }

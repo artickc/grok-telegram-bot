@@ -57,3 +57,15 @@ test("inline code and bold together", () => {
   assert.ok(md.includes("*bold*"), md);
   assert.ok(md.includes("`code`"), md);
 });
+
+test("Windows path in inline code stays code (not bold body)", () => {
+  const path =
+    "C:\\Users\\artic\\.grok\\sessions\\H%3A%5CLucru%5CDomains%5CApp\\plan.md";
+  const md = toTelegramMarkdown(`✏️ **Edit** \`${path}\` ✅`);
+  assert.ok(md.includes("*Edit*"), md);
+  // Path must appear inside a code span, not inside the bold entity.
+  assert.ok(md.includes("`"), md);
+  assert.ok(md.includes("plan.md") || md.includes("plan\\.md"), md);
+  // Bold entity should not swallow the drive letter alone as **Edit C:**.
+  assert.ok(!md.includes("*Edit C:"), md);
+});

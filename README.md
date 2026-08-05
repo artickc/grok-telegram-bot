@@ -27,9 +27,15 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Capability | What it does |
 |---|---|
 | 🗂 **Projects** | `/projects` browses your folders and runs Grok in the one you pick. |
+| 🏷 **Forum project topics** | Optional forum supergroup: one topic per project, **AI Chat** workspace, exact-name bind, `/forum_setup`. See **[docs/GROUP.md](./docs/GROUP.md)**. |
+| 🌉 **Telegram bridge** | Agent can `create_topic`, `set_path`, `send_prompt` across topics, `search_memory`, and call allowlisted sibling bots via JSON actions. |
+| 🔖 **Prompt anchors** | Each user prompt is re-posted with a searchable `#prompt_…` tag; stream/Done messages reply to that anchor (media re-attached). |
+| 🆕 **New session** | `/new` or the bar **New** button starts a fresh session; forum topics keep New on the topic menu. |
+| 💡 **Post-turn suggestions** | After Done, 1–3 scored follow-ups as buttons; high-score items can auto-queue as one multi-step prompt. |
+| 🔍 **Gated self-recheck** | After file-changing turns, an optional quality pass runs once before Done (`SELF_RECHECK`). |
 | ♻️ **Resume sessions** | `/sessions` lists recent Grok sessions; tap to resume one (`grok --session <id>`). |
 | 🟢 **Connect to live sessions** | `/active` shows sessions running **right now** on your PC. Watch them live, or continue them — see below. |
-| 🛑 **Kill a session / PID** | Each live `/sessions` · `/active` card has a **🛑 Kill · pid N** button (confirm-guarded) that stops that session's process and its child tree; `/killall` stops them all. The bot's own agent is never killable. |
+| 🛑 **Kill a session / PID** | Each live `/sessions` · `/active` card has a **🛑 Kill · pid N** button (confirm-guarded) that stops that session's process and its child tree; `/killall` stops them all. The bot's own agent is never killable. **Stop** only cancels the current session turn — never the shared agent. |
 | 📡 **Live watch** | Follow a running session read-only in real time (tails its event log). |
 | 🧭 **Always-visible menu** | A persistent keyboard plus a pinned status panel that appears while a task runs (and clears when idle), showing your current **project, agent, reasoning effort, model, session and queue**. |
 | ⏰ **Scheduled tasks** | Create prompts that run on a schedule (once / daily / weekly / monthly / every-N-minutes) in a chosen project, delivered back to your chat. |
@@ -49,7 +55,7 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | 💬 **Quality markdown** | Converts agent markdown to Telegram **MarkdownV2** with safe escaping and code-fence-aware splitting. |
 | 🔁 **Self-healing** | Auto-restarts the Grok agent with backoff and re-binds your session. |
 | 🖥 **Runs 24/7** | 1-click install as a background service that starts on boot — Windows, Linux, macOS, auto-detected. |
-| 🔒 **Access control** | Restrict to specific Telegram user IDs. |
+| 🔒 **Access control** | Restrict to specific Telegram user IDs (private chats **and** forum groups). |
 
 ---
 
@@ -59,6 +65,8 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 |---|:---:|:---:|
 | Connect Grok CLI to Telegram (ACP) | ✅ | ✅ |
 | Switch between projects | ✅ | ❌ |
+| **Forum topics = projects** + AI Chat workspace | ✅ | ❌ |
+| **Cross-topic agent bridge** (create / bind / send_prompt) | ✅ | ❌ |
 | Resume saved sessions | ✅ | ❌ |
 | Attach to **live** PC sessions (watch / fork) | ✅ | ❌ |
 | **Kill a session by PID** (or all at once) | ✅ | ❌ |
@@ -69,6 +77,7 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | **Session auto-approve** + **pinned** interactive permissions | ✅ | ❌ |
 | Multiple isolated sessions | ✅ | ❌ (single shared) |
 | Queued follow-ups while busy | ✅ | ❌ |
+| **Post-turn suggestions** + gated self-recheck | ✅ | ❌ |
 | **Scheduled tasks** (cron-like) | ✅ | ❌ |
 | **Multi-image** prompts (albums) | ✅ | ❌ |
 | Unified **edit diffs** | ✅ | ❌ |
@@ -216,14 +225,16 @@ Logs are written to `logs/grok-telegram-bot.log` (rotated at 5 MB).
 /tasks        Manage scheduled tasks
 /newtask      Create a scheduled task (wizard)
 /history      Show recent conversation history
-/new          Start a fresh session here
+/new          Start a fresh session here (also bar: 🆕 New session)
+/forum_setup  Re-probe / create forum topics (use inside the configured group)
 /status       Current session, project & queue
 /usage        Account info & current context usage
 /btw <text>   Run it now if idle, else queue to run right after the current task
 /flush        Send queued follow-ups now
 /queue        Show queued follow-ups
 /clearqueue   Clear the queue
-/cancel       Stop the current turn
+/cancel       Stop the current turn (session-scoped — never kills the shared agent)
+/stop         Same as /cancel
 /unwatch      Stop following a live session
 /model <id>   Switch the model for this session
 /restart      Restart the Grok agent
@@ -237,13 +248,28 @@ running, your messages are queued and sent automatically when it finishes.
 
 ---
 
+## 🏷 Forum project group (optional)
+
+Drive **many projects in parallel** from one Telegram forum supergroup: each
+topic is bound to a folder, and **AI Chat** stays on `GROK_WORKSPACE` for
+orchestration. Set `TOPIC_GROUP_ID`, make the bot admin with Manage Topics, and
+run `/forum_setup`. Full walkthrough (binding rules, agent bridge, access
+control, troubleshooting):
+
+**→ [docs/GROUP.md](./docs/GROUP.md)**
+
+---
+
 ## 🧭 The menu & status panel
 
-A tiny **persistent bar** sits under the message box — **☰ Menu · 🧭 Running ·
-⏹ Stop** — so common actions are one tap away without clutter. Tap **☰ Menu**
-(or `/menu`) to open a clean, grouped **inline menu**: Project · New · Running ·
-Sessions · Agent · Model · Reasoning · Tasks · Status · Usage · Stop · Kill all.
-The bar can be hidden (🙈) and restored (⌨️ Show bar or `/menu`).
+A tiny **persistent bar** sits under the message box — **☰ Menu · 🆕 New session
+· 🧭 Running · ⏹ Stop** (while idle/busy the middle button may show Running
+instead of New) — so common actions are one tap away without clutter. Tap
+**☰ Menu** (or `/menu`) to open a clean, grouped **inline menu**: Project ·
+Running · Sessions · Agent · Model · Reasoning · Tasks · Status · Usage · Stop ·
+Kill all. Forum topics keep **New** on the topic inline menu (reply keyboards are
+unreliable there). The bar can be hidden (🙈) and restored (⌨️ Show bar or
+`/menu`).
 
 While a task is running, a **pinned status panel** appears at the top of the chat
 showing your current **task progress, activity, queue, project, session, context
@@ -403,9 +429,9 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | **yes** | — | Bot token from @BotFather. |
-| `ALLOWED_USERS` | recommended | *(all)* | Comma-separated Telegram user IDs. Empty = anyone (unsafe). |
+| `ALLOWED_USERS` | recommended | *(all)* | Comma-separated Telegram user IDs for private chats **and** groups. Empty = anyone (unsafe — never leave empty with `TOPIC_GROUP_ID`). Unauthorized group members are ignored silently. |
 | `GROK_CLI_PATH` | no | auto / `grok` | Path to the `grok` binary. |
-| `GROK_WORKSPACE` | no | cwd | Default working directory. |
+| `GROK_WORKSPACE` | no | cwd | Default working directory (also AI Chat / General in a forum group). |
 | `XAI_API_KEY` | no | — | xAI API key, only for headless hosts with no browser. Normally you sign in with `grok login` (or `/reauth`) — no key needed. Exported to the agent when set. |
 | `GROK_MODEL` | no | `grok-4.5` | Default model for new sessions. |
 | `GROK_TG_DIR` | no | `~/.grok/tg` | Folder holding this instance's `.env`, `logs/`, `data/`. Resolution: `--instance` → `GROK_TG_DIR` → a `.env` in the current folder → `~/.grok/tg`. So a `.env` created once is loaded from any startup path. |
@@ -423,6 +449,18 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | `SHOW_PROGRESS` | no | `true` | Ask the agent to append a `{progress: N%}` marker to each message; the bot parses it, hides the marker, and renders a green 0–100% bar on the live message, in session cards, and in the status panel. |
 | `PROGRESS_FALLBACK` | no | `true` | When `SHOW_PROGRESS` is on but the agent emits **no** `{progress: N%}` marker (weaker/free models and long tool-heavy turns often skip it), render a **bot-computed** bar derived from real activity (completed tool calls, streamed output, elapsed time) so a live bar still advances — filling to 100% when the turn completes. The agent's own marker, when present, always takes precedence and stays monotonic. |
 | `NOTIFY_OTHER_SESSIONS` | no | `true` | Deliver a session's "Done" summary (with a short created/edited/deleted count) even when it's a background session, marked "From other session". `false` keeps background sessions silent. |
+| `SUGGESTIONS_ENABLED` | no | `true` | After Done, quietly ask for 1–3 scored follow-ups shown as buttons. |
+| `SUGGESTIONS_AUTO_APPROVE_PCT` | no | `95` | Auto-queue suggestions with need ≥ this % as one multi-step prompt (`0` = buttons only). |
+| `SELF_RECHECK` | no | `true` | After a successful user turn that modified files, optionally run one gated quality pass before Done. Alias: `SLEF_RECHECK`. |
+| `SELF_RECHECK_PROMPT` | no | — | Optional fixed recheck template when AI decides recheck is needed (`{{USER}}` / `{{DONE}}`). |
+| `QUIET_PROMPT_TIMEOUT_MS` | no | `90000` | Max wait for quiet meta prompts (recheck decision + suggestions). Timeout cancels the meta prompt so Done is not blocked. |
+| `TOPIC_GROUP_ID` | no | — | Forum supergroup id for project topics. Bot must be admin with Manage Topics. See **[docs/GROUP.md](./docs/GROUP.md)**. |
+| `TOPIC_AUTO_CREATE` | no | `true` | When forum is ready, create one topic per catalog project (paced + 429-retried). |
+| `TOPIC_AI_CHAT_NAME` | no | `AI Chat` | Display name for the workspace topic. |
+| `ALLOWED_TELEGRAM_BOTS` | no | — | Comma-separated sibling bot usernames the agent may call via bridge `bot_command` / `list_bots`. |
+| `TELEGRAM_BOT_COMMANDS` | no | — | Optional command catalogs for sibling bots (compact or JSON; see `.env.example`). |
+| `TELEGRAM_BOT_REPLY_TIMEOUT_MS` | no | `45000` | Hard timeout waiting for a sibling bot after `/cmd@bot`. |
+| `TELEGRAM_BOT_SETTLE_MS` | no | `2000` | Quiet settle after the last message/edit from that bot. |
 | `MCP_PROBE_TIMEOUT_MS` | no | `8000` | Per-server timeout for the `/mcp` live health-check. |
 | `MCP_PROBE_CONCURRENCY` | no | `6` | How many MCP health probes run at once. |
 | `GROK_AUTO_RESTART` | no | `true` | Auto-restart the agent if it exits. |
@@ -475,11 +513,12 @@ src/
 ├── grok/                 Grok bridge: headless client, JSONL types, models, session log
 ├── sessions/             Session discovery, history parser, live tail watcher
 ├── projects/             Project directory discovery
+├── forum/                Forum topic store, path bind, project icons
 ├── mcp/                  MCP config (list/toggle) + live health probe
 ├── render/               Markdown→MarkdownV2, diffs, tool formatting, chunking
 ├── stream/               Incremental edit-streaming
 ├── service/              Cross-platform daemon (windows/linux/macos + selector)
-└── bot/                  grammY bot, per-chat runtime, handlers
+└── bot/                  grammY bot, per-chat runtime, handlers, Telegram bridge
 ```
 
 ---
@@ -549,10 +588,13 @@ user. See [SECURITY.md](./SECURITY.md) for the full model.
 - [x] Device-code `/reauth` (no host browser) + real email labels from auth.json
 - [x] Rich per-kind tool-call detail (search / edit diffs / shell / MCP / …)
 - [x] README community sections — Contributors, Top Contributors, Stars, StarMapper
+- [x] Forum project topics + AI Chat workspace (`TOPIC_GROUP_ID`)
+- [x] Cross-topic Telegram bridge (`create_topic` / `set_path` / `send_prompt` / …)
+- [x] Prompt anchors, post-turn suggestions, gated self-recheck
 - [ ] **Token & cost meter** — per-session token counts and an estimated spend tally
 - [ ] **Text-to-speech replies** — optionally speak answers back as voice notes
 - [ ] **Scheduled-task chaining & conditions** — run task B after A, or only if a command/file check passes
-- [ ] **Team mode** — multiple authorized users with per-user sessions, roles, and an audit log
+- [ ] **Team mode** — roles and audit log beyond shared `ALLOWED_USERS` + forum topics
 - [ ] Localized bot UI (i18n)
 - [ ] Docker image with `grok` preinstalled
 - [ ] Webhook mode for serverless deployment
@@ -657,8 +699,9 @@ Grab the latest packaged build from the
 release ships a clean `grok-telegram-bot-<version>.zip` (no `node_modules` or
 secrets) plus GitHub's source archives. See [CHANGELOG.md](./CHANGELOG.md) for
 what changed in each version, **[docs/INSTALL.md](./docs/INSTALL.md)** for the
-full 1-click install guide, and **[docs/UPGRADE.md](./docs/UPGRADE.md)** for how
-to update an existing install (npm, zip, or source).
+full 1-click install guide, **[docs/UPGRADE.md](./docs/UPGRADE.md)** for how to
+update an existing install (npm, zip, or source), and
+**[docs/GROUP.md](./docs/GROUP.md)** for forum project topics.
 
 ---
 

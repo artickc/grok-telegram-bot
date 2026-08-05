@@ -57,7 +57,7 @@ export function registerDocuments(bot: Bot, deps: BotDeps): void {
 
     const caption = ctx.message.caption ?? "";
     const quoted = extractReplyContext(ctx);
-    const replyTo = ctx.message.message_id;
+    const userMsgId = ctx.message.message_id;
 
     let promptText: string;
     if (looksLikeText(buf, doc.mime_type, name)) {
@@ -76,12 +76,35 @@ export function registerDocuments(bot: Bot, deps: BotDeps): void {
 
     try {
       const { resolveScope } = await import("../scope.js");
+      const { adoptUserPrompt } = await import("../prompt-anchor.js");
       const scope = resolveScope(ctx, deps);
-      const outcome = await scope.rt.submit(textPrompt(promptText, replyTo, quoted));
+      const anchorPreview = caption.trim() || `File: ${name}`;
+      const anchor = await adoptUserPrompt(deps.api, {
+        chatId,
+        text: anchorPreview,
+        userMessageIds: [userMsgId],
+        messageThreadId: scope.threadExtra.message_thread_id,
+        projectName: scope.rt.projectName,
+        prefix: `\u{1F4CE} ${name}`,
+        // Re-post the file so it stays in chat after the user message is deleted.
+        media: [{ type: "document", fileId: doc.file_id, fileName: name }],
+      });
+      const outcome = await scope.rt.submit(
+        textPrompt(promptText, anchor?.replyTo ?? userMsgId, quoted, {
+          promptId: anchor?.promptId,
+        }),
+      );
       if (outcome === "queued") {
+        const extra: Record<string, unknown> = { ...scope.threadExtra };
+        if (anchor?.replyTo !== undefined) {
+          extra.reply_parameters = {
+            message_id: anchor.replyTo,
+            allow_sending_without_reply: true,
+          };
+        }
         await ctx.reply(
           `\u{1F4E5} Queued "${name}" \u2014 will run after the current task.`,
-          scope.threadExtra,
+          extra,
         );
       }
     } catch (e) {

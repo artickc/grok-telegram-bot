@@ -203,6 +203,12 @@ export interface AppConfig {
    */
   selfRecheckPrompt: string;
   /**
+   * Max wait for quiet meta ACP prompts (self-recheck decision, suggestions).
+   * On timeout the session prompt is cancelled so Done is not blocked forever.
+   * QUIET_PROMPT_TIMEOUT_MS, default 90s.
+   */
+  quietPromptTimeoutMs: number;
+  /**
    * Telegram forum supergroup id for project topics (TOPIC_GROUP_ID). When set
    * and the bot is admin, the bot manages topics: AI Chat + optional one topic
    * per catalog project. Empty/undefined disables forum management.
@@ -215,6 +221,26 @@ export interface AppConfig {
   topicAutoCreateProjects: boolean;
   /** Display name for the default AI chat topic (TOPIC_AI_CHAT_NAME). */
   topicAiChatName: string;
+  /**
+   * Sibling Telegram bot usernames the agent may call via telegram bridge
+   * `bot_command` / `list_bots` (ALLOWED_TELEGRAM_BOTS, comma-separated, with
+   * or without @). Empty = feature off.
+   */
+  allowedTelegramBots: string[];
+  /**
+   * Optional command catalogs per bot (TELEGRAM_BOT_COMMANDS). Keys are
+   * usernames (no @); values are command names without slash + optional
+   * description. Shown by list_bots / first-prompt directive.
+   */
+  telegramBotCommands: Record<string, Array<{ command: string; description?: string }>>;
+  /** Hard timeout waiting for a sibling bot's reply (TELEGRAM_BOT_REPLY_TIMEOUT_MS). */
+  telegramBotReplyTimeoutMs: number;
+  /**
+   * After the last message/edit from the triggered bot, wait this many ms of
+   * silence before treating the reply as finished (TELEGRAM_BOT_SETTLE_MS).
+   * Streaming bots that edit one message need this "typing done" equivalent.
+   */
+  telegramBotSettleMs: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -320,14 +346,118 @@ export function loadConfig(): AppConfig {
       true,
     ),
     selfRecheckPrompt: (process.env.SELF_RECHECK_PROMPT ?? "").trim(),
+    quietPromptTimeoutMs: num(process.env.QUIET_PROMPT_TIMEOUT_MS, 90_000),
     topicGroupId: parseTopicGroupId(
       process.env.TOPIC_GROUP_ID ?? process.env.FORUM_GROUP_ID,
     ),
     topicAutoCreateProjects: bool(process.env.TOPIC_AUTO_CREATE, true),
     topicAiChatName: (process.env.TOPIC_AI_CHAT_NAME ?? "AI Chat").trim() || "AI Chat",
+    allowedTelegramBots: parseTelegramBotUsernames(process.env.ALLOWED_TELEGRAM_BOTS),
+    telegramBotCommands: parseTelegramBotCommands(process.env.TELEGRAM_BOT_COMMANDS),
+    telegramBotReplyTimeoutMs: num(process.env.TELEGRAM_BOT_REPLY_TIMEOUT_MS, 45_000),
+    telegramBotSettleMs: num(process.env.TELEGRAM_BOT_SETTLE_MS, 2_000),
   };
 
   return cfg;
+}
+
+/** Normalize comma-separated bot usernames (strip @, lowercase, unique). */
+export function parseTelegramBotUsernames(raw: string | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of list(raw)) {
+    const u = t.replace(/^@/, "").toLowerCase();
+    if (!u || seen.has(u)) continue;
+    // Telegram usernames: 5–32 characters (letter first, then alnum/underscore).
+    if (!/^[a-z][a-z0-9_]{4,31}$/i.test(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+}
+
+/**
+ * Parse optional command catalogs.
+ *
+ * Formats (both supported):
+ *  1) Compact: `helperbot:status,help,ping;otherbot:start|Start the bot,info`
+ *     - `;` separates bots, `:` separates username from commands
+ *     - `,` separates commands; optional `cmd|description`
+ *  2) JSON object: `{"helperbot":["status","help"],"otherbot":[{"command":"start","description":"…"}]}`
+ */
+export function parseTelegramBotCommands(
+  raw: string | undefined,
+): Record<string, Array<{ command: string; description?: string }>> {
+  const out: Record<string, Array<{ command: string; description?: string }>> = {};
+  if (raw === undefined || raw.trim() === "") return out;
+  const trimmed = raw.trim();
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
+          const u = key.replace(/^@/, "").toLowerCase();
+          if (!u) continue;
+          const cmds = normalizeCommandList(val);
+          if (cmds.length) out[u] = cmds;
+        }
+      }
+    } catch {
+      /* fall through to compact parser */
+    }
+    if (Object.keys(out).length > 0) return out;
+  }
+
+  for (const botPart of trimmed.split(";")) {
+    const piece = botPart.trim();
+    if (!piece) continue;
+    const colon = piece.indexOf(":");
+    if (colon <= 0) continue;
+    const u = piece.slice(0, colon).replace(/^@/, "").toLowerCase().trim();
+    if (!u) continue;
+    const rest = piece.slice(colon + 1).trim();
+    if (!rest) continue;
+    const cmds = normalizeCommandList(rest.split(",").map((s) => s.trim()).filter(Boolean));
+    if (cmds.length) out[u] = cmds;
+  }
+  return out;
+}
+
+function normalizeCommandList(
+  val: unknown,
+): Array<{ command: string; description?: string }> {
+  const items: unknown[] = Array.isArray(val)
+    ? val
+    : typeof val === "string"
+      ? val.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+  const seen = new Set<string>();
+  const out: Array<{ command: string; description?: string }> = [];
+  for (const item of items) {
+    let command = "";
+    let description: string | undefined;
+    if (typeof item === "string") {
+      const pipe = item.indexOf("|");
+      if (pipe >= 0) {
+        command = item.slice(0, pipe).trim();
+        description = item.slice(pipe + 1).trim() || undefined;
+      } else {
+        command = item.trim();
+      }
+    } else if (item && typeof item === "object") {
+      const rec = item as Record<string, unknown>;
+      command = String(rec.command ?? rec.cmd ?? rec.name ?? "").trim();
+      const d = String(rec.description ?? rec.desc ?? rec.help ?? "").trim();
+      if (d) description = d;
+    }
+    command = command.replace(/^\//, "").toLowerCase();
+    if (!command || !/^[a-z0-9_]{1,32}$/.test(command) || seen.has(command)) continue;
+    seen.add(command);
+    out.push(description ? { command, description: description.slice(0, 120) } : { command });
+    if (out.length >= 40) break;
+  }
+  return out;
 }
 
 /** Parse a Telegram chat/group id (may be negative for supergroups). */

@@ -11,7 +11,15 @@ import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { reasoningLabel } from "../../app/reasoning.js";
 import { REASONING_LEVELS, type ReasoningEffort } from "../../app/types.js";
 import type { BotDeps } from "../deps.js";
-import { BAR_LABELS, compactKeyboard, mainMenuInline, MENU_BTN, RUNNING_BTN, STOP_BTN } from "../menu/keyboard.js";
+import {
+  BAR_LABELS,
+  compactKeyboard,
+  mainMenuInline,
+  MENU_BTN,
+  NEW_BTN,
+  RUNNING_BTN,
+  STOP_BTN,
+} from "../menu/keyboard.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { resolveScope } from "../scope.js";
 import { showImportSources } from "./import-session.js";
@@ -55,11 +63,21 @@ export function registerMenu(bot: Bot, deps: BotDeps): void {
     switch (ctx.message?.text) {
       case MENU_BTN:
         return openMainMenu(ctx, deps);
+      case NEW_BTN: {
+        await ctx.reply("\u2728 Creating new session\u2026", scope.threadExtra).catch(() => {});
+        try {
+          await scope.controller.addNew(scope.rt.cwd, scope.rt.projectName);
+          return refreshMenu(ctx, deps, `\u2728 New session in ${scope.rt.projectName ?? scope.rt.cwd}`);
+        } catch (e) {
+          return void ctx.reply(`\u274C ${(e as Error).message}`, scope.threadExtra);
+        }
+      }
       case RUNNING_BTN:
         return showRunning(ctx, deps);
       case STOP_BTN: {
+        const cancelled = await scope.rt.cancel();
         return void ctx.reply(
-          (await scope.rt.cancel()) ? "\u23F9 Cancelling\u2026" : "Nothing is running.",
+          cancelled ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.",
           scope.threadExtra,
         );
       }
@@ -172,7 +190,8 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
       await ctx.answerCallbackQuery();
       return showKillConfirm(ctx, deps);
     case "new":
-      await ctx.answerCallbackQuery();
+      await ctx.answerCallbackQuery({ text: "Creating session\u2026" });
+      await ctx.reply("\u2728 Creating new session\u2026", threadExtra).catch(() => {});
       try {
         await controller.addNew(rt.cwd, rt.projectName);
         return refreshMenu(ctx, deps, `\u2728 New session in ${rt.projectName ?? rt.cwd}`);
@@ -181,8 +200,16 @@ async function dispatchMenu(ctx: Context, deps: BotDeps, action: string): Promis
       }
     case "stop": {
       // Answer first so a slow cancel never times out the callback query.
-      await ctx.answerCallbackQuery({ text: rt.isBusy ? "Cancelling\u2026" : "Nothing is running" });
-      if (rt.isBusy) await rt.cancel();
+      const busy = rt.isBusy;
+      await ctx.answerCallbackQuery({ text: busy ? "Cancelling\u2026" : "Nothing is running" });
+      const cancelled = busy ? await rt.cancel() : false;
+      // Visible in-topic feedback (callback toasts are easy to miss in groups).
+      await ctx
+        .reply(
+          cancelled || busy ? "\u23F9 Cancelling current turn\u2026" : "Nothing is running.",
+          threadExtra,
+        )
+        .catch(() => {});
       return;
     }
     default:

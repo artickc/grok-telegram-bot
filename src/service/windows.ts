@@ -8,7 +8,7 @@
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runSafe } from "./platform.js";
+import { launchDetached, runSafe } from "./platform.js";
 import type { LaunchSpec, ServiceController, ServiceResult } from "./types.js";
 
 const TASK = "GrokTelegramBot";
@@ -105,7 +105,11 @@ export const windowsController: ServiceController = {
     } catch (e) {
       return fail(`Startup-folder install failed: ${(e as Error).message}`);
     }
-    if (!isRunning(spec)) runSafe("wscript.exe", [startupVbs]); // launch now
+    // Detached: the VBS is a forever-restart loop — never wait on it (hangs install/start/restart).
+    if (!isRunning(spec)) {
+      const launched = launchDetached("wscript.exe", [startupVbs]);
+      if (!launched.ok) return fail(`Installed launcher but failed to start: ${launched.out}`);
+    }
     return ok(
       `Installed via the Startup folder — starts hidden at logon, no admin needed — and launched it.\n` +
         `(Tip: run "grok-tg install" from an elevated terminal to use a hidden Scheduled Task instead.)`,
@@ -124,13 +128,21 @@ export const windowsController: ServiceController = {
   async start(spec) {
     if (isRunning(spec)) return ok("Already running.");
     if (taskInstalled()) {
+      // schtasks /Run returns once the task is queued (does not wait for the bot).
       const res = runSafe("schtasks", ["/Run", "/TN", TASK]);
       return res.ok ? ok("Started.") : fail(res.out);
     }
     const startupVbs = startupVbsPath();
     if (startupVbs && existsSync(startupVbs)) {
-      runSafe("wscript.exe", [startupVbs]);
-      return ok("Started.");
+      // Forever-restart VBS — must be detached or this CLI never returns.
+      const launched = launchDetached("wscript.exe", [startupVbs]);
+      return launched.ok ? ok("Started.") : fail(launched.out);
+    }
+    // Local run-service.vbs in the package dir (task points here when elevated).
+    const local = vbsPath(spec);
+    if (existsSync(local)) {
+      const launched = launchDetached("wscript.exe", [local]);
+      return launched.ok ? ok("Started.") : fail(launched.out);
     }
     return fail(`Not installed. Run "grok-tg install" first.`);
   },

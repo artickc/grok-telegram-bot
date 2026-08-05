@@ -23,10 +23,7 @@ export interface RunningSession {
   unread: number;
   /** Latest task-completion % (0–100) for this session, if known. */
   progress?: number;
-  /**
-   * Card comment: live step while working, chat summary when idle
-   * ("what is happening / what was done").
-   */
+  /** Card comment: last user prompt (+ last AI thinking while busy). */
   comment?: string;
 }
 
@@ -50,6 +47,9 @@ export interface ChatControllerOpts {
   fixedProjectName?: string;
 }
 
+/** Optional Telegram bridge services attached to every runtime in this chat. */
+export type ChatBridgeServices = SessionRuntime["bridge"];
+
 export class ChatController {
   private readonly runtimes: SessionRuntime[] = [];
   private fg: SessionRuntime | undefined;
@@ -59,6 +59,9 @@ export class ChatController {
   readonly messageThreadId: number | undefined;
   readonly fixedCwd: string | undefined;
   readonly fixedProjectName: string | undefined;
+
+  /** Telegram bridge (forum / memory / sibling bots); set by the registry. */
+  bridge?: ChatBridgeServices;
 
   constructor(
     private readonly api: Api,
@@ -301,7 +304,7 @@ export class ChatController {
     return this.runtimes.find((r) => r.sessionId === sessionId)?.taskProgress;
   }
 
-  /** Live step / chat summary for a controlled session id. */
+  /** Last user prompt (+ thinking when busy) for a controlled session id. */
   commentFor(sessionId?: string): string | undefined {
     if (!sessionId) return undefined;
     this.ensureRestored();
@@ -399,6 +402,7 @@ export class ChatController {
     rt.onStateChange = () => this.refresh(this.chatId);
     rt.onActivity = (busy) => this.notifyActivity(busy);
     rt.accountRotator = this.getRotator?.();
+    rt.bridge = this.bridge;
     // A logical fork (auto-fork-on-error / lost-session recovery) swaps the
     // runtime's session id in place — re-persist the controlled list with the
     // new id and treat the fresh session as already-seen.

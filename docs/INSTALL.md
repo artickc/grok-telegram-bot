@@ -41,6 +41,9 @@ grok-tg run                     # run in the foreground (Ctrl-C to stop)
 
 > ⚠️ **Set `ALLOWED_USERS`** in `.env` to your Telegram user ID(s). Empty means
 > *anyone* who finds the bot can run commands on your machine.
+>
+> Optional: drive one project per **forum topic** with `TOPIC_GROUP_ID` — see
+> **[GROUP.md](./GROUP.md)** after the bot is running.
 
 ### Startup options (`grok-tg <command>`)
 

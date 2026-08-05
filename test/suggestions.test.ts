@@ -7,11 +7,13 @@ import {
   composeSelfRecheckTurn,
   DEFAULT_SELF_RECHECK_PROMPT,
   formatBatchedSuggestionsPrompt,
+  hasSelfRecheckFinishRules,
   isSelfRecheckDecisionPrompt,
   isSelfRecheckPrompt,
   isSuggestionsMetaPrompt,
   parseSelfRecheckDecision,
   parseSuggestions,
+  SELF_RECHECK_COMPOSE_RULES,
   SELF_RECHECK_DECISION_MARKER,
   SELF_RECHECK_MARKER,
 } from "../src/bot/suggestions.js";
@@ -91,6 +93,16 @@ test("self-recheck prompt is detectable and one-shot safe", () => {
   assert.ok(DEFAULT_SELF_RECHECK_PROMPT.includes("{{USER}}"));
 });
 
+test("default self-recheck requires finish-all + production gaps + per-bug checklist", () => {
+  const t = DEFAULT_SELF_RECHECK_PROMPT.toLowerCase();
+  assert.ok(t.includes("still need"), "finish-all bans still-need leftovers");
+  assert.ok(t.includes("production"), "production-related completeness");
+  assert.ok(t.includes("rate limit") || t.includes("rate limits"), "auth/production example");
+  assert.ok(t.includes("per-bug") || t.includes("plausible bug"), "per-bug recheck section");
+  assert.ok(SELF_RECHECK_COMPOSE_RULES.toLowerCase().includes("still need"));
+  assert.ok(SELF_RECHECK_COMPOSE_RULES.toLowerCase().includes("per-bug"));
+});
+
 test("self-recheck prompt supports env template placeholders", () => {
   const p = buildSelfRecheckPrompt(
     "add password reset",
@@ -110,6 +122,10 @@ test("self-recheck decision prompt is meta-only and detectable", () => {
   assert.equal(isSelfRecheckDecisionPrompt("normal user text"), false);
   assert.ok(p.includes("fix auth"));
   assert.ok(p.includes("FILES MODIFIED"));
+  const lower = p.toLowerCase();
+  assert.ok(lower.includes("finish-all") || lower.includes("still need"), "decision requires finish-all in generated prompt");
+  assert.ok(lower.includes("production"), "decision requires production-related section");
+  assert.ok(lower.includes("per-bug") || lower.includes("plausible bug"), "decision requires bug checklist section");
 });
 
 test("parseSelfRecheckDecision accepts refuse and needed+prompt", () => {
@@ -162,6 +178,10 @@ test("composeSelfRecheckTurn wraps AI prompt with marker and context", () => {
   assert.ok(t.includes("Verify mergeInputs"));
   assert.ok(t.includes("harden self-recheck"));
   assert.ok(t.includes("fixed merge"));
+  const lower = t.toLowerCase();
+  assert.ok(lower.includes("still need"), "compose rules ban still-need leftovers");
+  assert.ok(lower.includes("per-bug") || lower.includes("plausible bug"), "compose rules require bug recheck");
+  assert.ok(lower.includes("production") || lower.includes("rate limit"), "compose rules mention production gaps");
 });
 
 test("composeSelfRecheckTurn does not double-wrap on casual USER mention alone", () => {
@@ -174,4 +194,30 @@ test("composeSelfRecheckTurn does not double-wrap on casual USER mention alone",
   // Context sections appended once (agent body lacked WHAT WAS JUST DONE).
   assert.ok(t.includes("WHAT WAS JUST DONE"));
   assert.ok(t.includes("card preview"));
+});
+
+test("compose injects finish-all rules even when headers make body look complete", () => {
+  // AI brief copied section headers but omitted production/finish-all/per-bug.
+  const thin = [
+    "Re-read the auth handler and fix edge cases.",
+    "",
+    "USER'S REQUEST:",
+    "add login",
+    "",
+    "WHAT WAS JUST DONE (summary):",
+    "added route",
+  ].join("\n");
+  assert.equal(hasSelfRecheckFinishRules(thin), false);
+  const t = composeSelfRecheckTurn(thin, "add login", "added route");
+  assert.ok(isSelfRecheckPrompt(t));
+  assert.ok(hasSelfRecheckFinishRules(t), "rules injected despite looksComplete headers");
+  assert.ok(t.toLowerCase().includes("still need"));
+  // Default full template already has rules — no double "Finish-all:" spam.
+  const full = composeSelfRecheckTurn(
+    DEFAULT_SELF_RECHECK_PROMPT.replace("{{USER}}", "x").replace("{{DONE}}", "y"),
+    "x",
+    "y",
+  );
+  const finishHits = (full.match(/Finish-all/gi) || []).length;
+  assert.ok(finishHits >= 1 && finishHits <= 2, `expected 1–2 Finish-all mentions, got ${finishHits}`);
 });

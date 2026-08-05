@@ -8,6 +8,10 @@
  * rapid consecutive text messages per chat within a short debounce window
  * (`MESSAGE_BATCH_MS`) into a single prompt — one submission, one confirmation.
  *
+ * User messages are replaced by a bot-owned prompt anchor (`#prompt_<id>`) so
+ * the chat shows immediate life while CLI/ACP starts, and all AI replies thread
+ * to that anchor with the same searchable tag.
+ *
  * While a turn is running, the combined message is queued and runs
  * automatically when the current turn finishes.
  * (Wizard input and menu-button text are intercepted by earlier handlers.)
@@ -17,6 +21,7 @@ import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
 import { batchKey, forumThreadId } from "../../forum/thread.js";
 import type { BotDeps } from "../deps.js";
+import { adoptUserPrompt } from "../prompt-anchor.js";
 import { extractReplyContext } from "../reply-context.js";
 import { resolveForumRuntime } from "./forum.js";
 
@@ -50,7 +55,7 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
     const chatId = ctx.chat.id;
     const id = ctx.message.message_id;
     const rawThreadId = ctx.message.message_thread_id;
-    const isForum = Boolean(deps.cfg.topicGroupId && chatId === deps.cfg.topicGroupId);
+    const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
     const threadId = isForum ? forumThreadId(rawThreadId) : rawThreadId;
     const quoted = extractReplyContext(ctx);
     const key = batchKey(chatId, rawThreadId, isForum);
@@ -96,7 +101,7 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
 
   let rt = deps.registry.get(chatId);
   // Forum group: topic-scoped multi-session controller (model/reasoning/running).
-  if (deps.forum && deps.cfg.topicGroupId && chatId === deps.cfg.topicGroupId) {
+  if (deps.forum?.isActiveForumChat(chatId)) {
     const resolved = await resolveForumRuntime(
       deps,
       deps.forum,
@@ -120,22 +125,42 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   }
 
   const note = batch.parts.length > 1 ? ` (combined ${batch.parts.length} messages)` : "";
+  // Hoisted so a submit failure after a successful adopt can still thread the error.
+  let replyTo: number | undefined = batch.ids[0];
   try {
-    // Thread the reply to the prompt message (the user's message is left intact;
-    // the agent's response + Done reply to it, and carry searchable hashtags).
-    const outcome = await rt.submit(textPrompt(combined, batch.ids[0], batch.quoted));
+    // Instant bot anchor: user sees the prompt adopted immediately while CLI warms.
+    // All AI output + Done reply to this message and carry #prompt_<id>.
+    const anchor = await adoptUserPrompt(deps.api, {
+      chatId,
+      text: combined,
+      userMessageIds: batch.ids,
+      messageThreadId: threadId,
+      projectName: rt.projectName,
+      prefix: "\u{1F4DD} Prompt",
+    });
+    replyTo = anchor?.replyTo ?? batch.ids[0];
+    const outcome = await rt.submit(
+      textPrompt(combined, replyTo, batch.quoted, { promptId: anchor?.promptId }),
+    );
     if (outcome === "queued") {
       await send(
         deps,
         chatId,
         `\u{1F4E5} Queued (position ${rt.queueLength})${note} \u2014 I'm still working on the previous task. It'll run next.`,
         threadId,
+        replyTo,
       );
     }
     // "ran": turn started; complexity is steered silently by the agent.
   } catch (err) {
     log.warn(`submit failed for chat ${chatId}: ${(err as Error).message}`);
-    await send(deps, chatId, `\u274C Couldn't start your message: ${(err as Error).message}`, threadId);
+    await send(
+      deps,
+      chatId,
+      `\u274C Couldn't start your message: ${(err as Error).message}`,
+      threadId,
+      replyTo,
+    );
   }
 }
 
@@ -144,10 +169,14 @@ async function send(
   chatId: number,
   text: string,
   threadId?: number,
+  replyTo?: number,
 ): Promise<void> {
   try {
     const extra: Record<string, unknown> = {};
     if (threadId !== undefined) extra.message_thread_id = threadId;
+    if (replyTo !== undefined) {
+      extra.reply_parameters = { message_id: replyTo, allow_sending_without_reply: true };
+    }
     await deps.api.sendMessage(chatId, text, extra);
   } catch {
     /* non-fatal */

@@ -6,18 +6,64 @@
  * Lifetime rules (critical):
  *  - Prefer staying up over clean-but-dead exits.
  *  - Uncaught errors are logged; the process keeps polling Telegram.
- *  - grammY long-poll is restarted on transport/network death.
- *  - Supervised launches (GROK_TG_SUPERVISED=1 / service) may exit for relaunch;
- *    bare/manual runs re-exec when possible rather than dying silently.
+ *  - grammY long-poll is restarted on transport/network death, 429, 409, etc.
+ *  - Never exit without a clear stderr + log line.
+ *  - Interactive `npm start` stays in-process (no silent detach re-exec).
+ *  - Supervised launches (GROK_TG_SUPERVISED=1) may exit for external relaunch.
  */
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type { Bot } from "grammy";
+import { GrammyError, HttpError } from "grammy";
 import { GrokClient } from "./grok/client.js";
 import { createBot } from "./bot/bot.js";
-import { CANONICAL_DIR, INSTANCE_DIR, loadConfig } from "./config.js";
+import { CANONICAL_DIR, loadConfig } from "./config.js";
 import { InstanceLock } from "./app/instance-lock.js";
+import {
+  isIntentionalShutdown,
+  markIntentionalShutdown,
+} from "./app/lifetime-flag.js";
 import { createLogger, enableFileLogging, setLogLevel } from "./logger.js";
+
+/** Last known reason for process end (read by exit/beforeExit handlers). */
+let exitReason = "unknown";
+/** Intentional exit in progress (SIGINT, fatal, lock, supervised relaunch). */
+let shuttingDown = false;
+/** beforeExit keep-alive armed at most once (avoid infinite 60s re-arm spam). */
+let beforeExitKeepalive: ReturnType<typeof setInterval> | undefined;
+/** Set immediately after config load; used by scream/shutdown. */
+let log!: ReturnType<typeof createLogger>;
+
+function noteExit(reason: string): void {
+  exitReason = reason;
+}
+
+function beginShutdown(reason: string): void {
+  shuttingDown = true;
+  markIntentionalShutdown(reason);
+  noteExit(reason);
+  if (beforeExitKeepalive) {
+    clearInterval(beforeExitKeepalive);
+    beforeExitKeepalive = undefined;
+  }
+}
+
+function scream(msg: string): void {
+  try {
+    process.stderr.write(`${msg}\n`);
+  } catch {
+    /* ignore */
+  }
+  try {
+    process.stdout.write(`${msg}\n`);
+  } catch {
+    /* ignore */
+  }
+  try {
+    log?.error(msg);
+  } catch {
+    /* ignore */
+  }
+}
 
 async function main(): Promise<void> {
   process.stdout.write("\u{1F916} Grok Telegram Bot — starting…\n");
@@ -25,16 +71,49 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   setLogLevel(cfg.logLevel);
   enableFileLogging(cfg.logFile);
-  const log = createLogger("main");
+  log = createLogger("main");
+
+  // Always leave a trail — silent process death was the top reliability bug.
+  process.on("exit", (code) => {
+    const line = `[main] process exit code=${code} reason=${exitReason}`;
+    try {
+      // File logger may already be gone; still try console.
+      console.error(line);
+    } catch {
+      /* ignore */
+    }
+  });
+  process.on("beforeExit", (code) => {
+    // Never fight an intentional shutdown / fatal exit / updater re-exec.
+    if (shuttingDown || isIntentionalShutdown()) return;
+    if (beforeExitKeepalive) return; // already holding the process open
+    // Event loop emptied without an intentional shutdown — keep a handle alive
+    // so we don't vanish with code 0 and no explanation.
+    scream(
+      `\u26A0\uFE0F Event loop emptying (beforeExit code=${code}, reason=${exitReason}). ` +
+        `Keeping process alive — this usually means polling stopped unexpectedly.`,
+    );
+    noteExit(`beforeExit:${exitReason}`);
+    // One ref'd interval (not stacking setTimeouts that re-fire beforeExit forever).
+    beforeExitKeepalive = setInterval(() => {
+      if (shuttingDown || isIntentionalShutdown()) {
+        if (beforeExitKeepalive) clearInterval(beforeExitKeepalive);
+        return;
+      }
+      log?.warn(`beforeExit keepalive still holding process (reason=${exitReason})`);
+    }, 60_000);
+    beforeExitKeepalive.ref?.();
+  });
 
   // Single-instance guard: kill any ghost/duplicate already polling this token.
   const lock = new InstanceLock(cfg.token, join(CANONICAL_DIR, "locks"), process.env.GROK_TG_SUPERVISED === "1");
   if (cfg.singleInstance && !(await lock.acquire())) {
     const msg =
       "Another Grok Telegram Bot is already running for this token (a background service). Use `grok-tg restart`, or `grok-tg stop` first.";
+    beginShutdown("instance-lock-held");
     log.warn(msg);
-    process.stdout.write(`\u26D4 ${msg}\n`);
-    process.exit(0);
+    scream(`\u26D4 ${msg}`);
+    process.exit(1);
   }
 
   log.info("starting Grok Telegram Bot");
@@ -47,13 +126,15 @@ async function main(): Promise<void> {
   // partially inconsistent one. Registering these handlers overrides Node's
   // default "print and exit" for uncaughtException.
   process.on("uncaughtException", (err) => {
+    noteExit(`uncaughtException:${err.message}`);
     log.error("uncaughtException (process stays up):", err);
+    scream(`\u26A0\uFE0F uncaughtException (staying up): ${err.stack || err.message}`);
   });
   process.on("unhandledRejection", (reason) => {
-    log.error(
-      "unhandledRejection (process stays up):",
-      reason instanceof Error ? reason : String(reason),
-    );
+    const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+    noteExit(`unhandledRejection:${msg.slice(0, 120)}`);
+    log.error("unhandledRejection (process stays up):", reason instanceof Error ? reason : String(reason));
+    scream(`\u26A0\uFE0F unhandledRejection (staying up): ${msg}`);
   });
 
   const grok = new GrokClient({
@@ -75,6 +156,7 @@ async function main(): Promise<void> {
     } catch (e) {
       const wait = Math.min(60_000, 1000 * 2 ** Math.min(attempt, 5));
       log.error(`Grok ACP start failed (attempt ${attempt}): ${(e as Error).message}; retry in ${wait}ms`);
+      scream(`\u26A0\uFE0F Grok ACP start failed (attempt ${attempt}): ${(e as Error).message}; retry in ${wait}ms`);
       await sleep(wait);
     }
   }
@@ -94,7 +176,9 @@ async function main(): Promise<void> {
       break;
     } catch (e) {
       const wait = Math.min(60_000, 1000 * 2 ** Math.min(attempt, 5));
-      log.error(`createBot failed (attempt ${attempt}): ${(e as Error).message}; retry in ${wait}ms`);
+      const detail = formatTelegramError(e);
+      log.error(`createBot failed (attempt ${attempt}): ${detail}; retry in ${wait}ms`);
+      scream(`\u26A0\uFE0F createBot failed (attempt ${attempt}): ${detail}; retry in ${wait}ms`);
       await sleep(wait);
     }
   }
@@ -102,11 +186,11 @@ async function main(): Promise<void> {
   scheduler!.start();
   await updater!.start();
 
-  let shuttingDown = false;
-  const shutdown = (code: number): void => {
+  const shutdown = (code: number, reason: string): void => {
     if (shuttingDown) return;
-    shuttingDown = true;
-    log.info("shutting down…");
+    beginShutdown(reason);
+    log.info(`shutting down (code=${code}, reason=${reason})…`);
+    scream(`\u{1F6D1} Shutting down (code=${code}, reason=${reason})`);
     try {
       scheduler!.stop();
     } catch {
@@ -130,45 +214,66 @@ async function main(): Promise<void> {
 
   grok.on("restarted", () => log.info("Grok bridge re-bound; sessions continue on next message."));
 
-  process.on("SIGINT", () => shutdown(0));
-  process.on("SIGTERM", () => shutdown(0));
+  process.on("SIGINT", () => shutdown(0, "SIGINT"));
+  process.on("SIGTERM", () => shutdown(0, "SIGTERM"));
 
-  // Refresh the single-instance lock periodically so a long-running process
-  // stays clearly "alive" on disk (start time + pid).
-  const lockHeartbeat = setInterval(() => {
+  // Keepalive + lock heartbeat — REF'd so the process cannot exit with an empty
+  // event loop while we still intend to run (unref was a silent-death footgun).
+  let botUsername = "?";
+  const keepalive = setInterval(() => {
     try {
-      if (!shuttingDown) lock.touch();
-    } catch {
-      /* non-fatal */
+      if (shuttingDown || isIntentionalShutdown()) return;
+      lock.touch();
+      log.info(
+        `keepalive: alive as @${botUsername} polling=${bot!.isRunning()} ` +
+          `pid=${process.pid} uptime=${Math.floor(process.uptime())}s`,
+      );
+    } catch (e) {
+      log.warn(`keepalive tick failed: ${(e as Error).message}`);
     }
-  }, 60_000);
-  lockHeartbeat.unref?.();
+  }, 5 * 60_000);
+  // Explicitly ref — do not unref.
+  keepalive.ref?.();
 
-  // Keep long-polling forever. On network / 409 / grammY fatal, wait and restart
-  // the poller instead of ending the process (silent death was a critical bug).
-  // If the inner loop still returns without shutdown, attempt self-relaunch; if
-  // that fails, resume polling rather than dying.
-  while (!shuttingDown) {
-    await runPollingForever(bot!, log, () => shuttingDown);
-    if (shuttingDown) break;
-    log.error("Telegram polling loop exited unexpectedly; attempting self-relaunch");
-    const replaced = await selfRelaunch(cfg.projectRoot, log);
-    if (replaced) {
-      clearInterval(lockHeartbeat);
-      shutdown(1);
+  // Keep long-polling forever. On network / 409 / 429 / grammY fatal, wait and
+  // restart the poller in-process. Interactive runs never detach-relaunch
+  // (that looked like a silent death in the terminal).
+  while (!shuttingDown && !isIntentionalShutdown()) {
+    await runPollingForever(
+      bot!,
+      log,
+      () => shuttingDown || isIntentionalShutdown(),
+      (name) => {
+        botUsername = name;
+      },
+    );
+    if (shuttingDown || isIntentionalShutdown()) break;
+
+    // runPollingForever should only return when shuttingDown; if not, recover.
+    scream("\u26A0\uFE0F Telegram polling loop returned unexpectedly; recovering in-process");
+    log.error("Telegram polling loop returned unexpectedly; recovering in-process (no silent exit)");
+    noteExit("polling-loop-returned");
+
+    if (process.env.GROK_TG_SUPERVISED === "1") {
+      log.info("supervised mode — exiting for external relaunch");
+      noteExit("supervised-relaunch");
+      clearInterval(keepalive);
+      shutdown(1, "supervised-relaunch");
       return;
     }
-    log.error("self-relaunch failed; resuming Telegram polling in 5s");
-    await sleep(5000);
+
+    // Stay in this process — re-enter polling after a short pause.
+    await sleep(3000);
   }
-  clearInterval(lockHeartbeat);
+  clearInterval(keepalive);
 }
 
-/** grammY start with automatic recovery. */
+/** grammY start with automatic recovery and loud classification of API errors. */
 async function runPollingForever(
   bot: Bot,
   log: ReturnType<typeof createLogger>,
   isShuttingDown: () => boolean,
+  onOnline: (username: string) => void,
 ): Promise<void> {
   let attempt = 0;
   while (!isShuttingDown()) {
@@ -176,20 +281,25 @@ async function runPollingForever(
       attempt = 0;
       await bot.start({
         onStart: (info) => {
+          onOnline(info.username);
           log.info(`bot online as @${info.username}`);
           process.stdout.write(`\u2705 Online as @${info.username}. Send it a message on Telegram.\n`);
         },
       });
-      // bot.start resolves when polling is stopped (bot.stop).
+      // bot.start resolves when polling is stopped (bot.stop) or loop ends.
       if (isShuttingDown()) return;
       log.warn("bot.start resolved without shutdown; restarting polling in 2s");
+      scream("\u26A0\uFE0F bot.start resolved without shutdown; restarting polling in 2s");
       await sleep(2000);
     } catch (e) {
       attempt++;
-      const wait = Math.min(60_000, 2000 * 2 ** Math.min(attempt, 5));
-      log.error(
-        `Telegram polling failed (attempt ${attempt}): ${(e as Error).message}; retry in ${wait}ms`,
-      );
+      const classified = classifyPollingError(e);
+      const wait = classified.waitMs ?? Math.min(60_000, 2000 * 2 ** Math.min(attempt, 5));
+      const line =
+        `Telegram polling failed (attempt ${attempt}, ${classified.kind}): ${classified.message}; ` +
+        `retry in ${wait}ms`;
+      log.error(line);
+      scream(`\u26A0\uFE0F ${line}`);
       try {
         await bot.stop();
       } catch {
@@ -200,32 +310,49 @@ async function runPollingForever(
   }
 }
 
-/**
- * Spawn a fresh bot process then let the caller exit (manual / non-supervised).
- * Returns true when a replacement was started (or supervised exit is expected).
- */
-async function selfRelaunch(projectRoot: string, log: ReturnType<typeof createLogger>): Promise<boolean> {
-  if (process.env.GROK_TG_SUPERVISED === "1") {
-    log.info("supervised mode — exiting for external relaunch");
-    return true;
-  }
-  try {
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", join(projectRoot, "src", "index.ts"), "--instance", INSTANCE_DIR],
-      { detached: true, stdio: "ignore", cwd: projectRoot, env: process.env },
-    );
-    child.unref();
-    if (!child.pid) {
-      log.error("self-relaunch spawn produced no pid — staying alive");
-      return false;
+function classifyPollingError(e: unknown): { kind: string; message: string; waitMs?: number } {
+  const message = formatTelegramError(e);
+  if (e instanceof GrammyError) {
+    if (e.error_code === 429) {
+      const ra = e.parameters?.retry_after;
+      const waitMs = typeof ra === "number" ? (ra + 1) * 1000 : 10_000;
+      return { kind: "429-rate-limit", message, waitMs };
     }
-    log.info(`spawned replacement pid ${child.pid}`);
-    return true;
-  } catch (e) {
-    log.error(`self-relaunch failed: ${(e as Error).message} — staying alive`);
-    return false;
+    if (e.error_code === 409) {
+      return {
+        kind: "409-conflict",
+        message: `${message} (another getUpdates consumer for this token?)`,
+        waitMs: 15_000,
+      };
+    }
+    if (e.error_code === 401) {
+      return {
+        kind: "401-unauthorized",
+        message: `${message} (check TELEGRAM_BOT_TOKEN)`,
+        waitMs: 60_000,
+      };
+    }
+    return { kind: `grammy-${e.error_code}`, message };
   }
+  if (e instanceof HttpError) {
+    return { kind: "http-network", message, waitMs: 5_000 };
+  }
+  const msg = (e as Error)?.message ?? String(e);
+  if (/ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang|fetch failed|network/i.test(msg)) {
+    return { kind: "network", message: msg, waitMs: 5_000 };
+  }
+  return { kind: "unknown", message: msg };
+}
+
+function formatTelegramError(e: unknown): string {
+  if (e instanceof GrammyError) {
+    const ra = e.parameters?.retry_after;
+    const extra = typeof ra === "number" ? ` retry_after=${ra}s` : "";
+    return `${e.message} (code ${e.error_code}${extra})`;
+  }
+  if (e instanceof HttpError) return `HttpError: ${e.message}`;
+  if (e instanceof Error) return e.message;
+  return String(e);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -233,7 +360,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err instanceof Error ? err.stack || err.message : err);
-  // Delay exit so logs flush; VBS restart loop / supervisor can bring us back.
+  // Mark intentional exit so beforeExit keep-alive cannot swallow a real fatal.
+  beginShutdown(`fatal:${err instanceof Error ? err.message : String(err)}`);
+  const text = err instanceof Error ? err.stack || err.message : String(err);
+  console.error("Fatal:", text);
+  scream(`\u274C Fatal (exiting in 1s): ${text}`);
   setTimeout(() => process.exit(1), 1000);
 });

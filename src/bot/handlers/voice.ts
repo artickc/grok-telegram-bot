@@ -14,8 +14,16 @@ import { extractReplyContext } from "../reply-context.js";
 
 const log = createLogger("voice");
 
+type VoiceMediaKind = "voice" | "audio" | "video_note";
+
 export function registerVoice(bot: Bot, deps: BotDeps): void {
-  const handle = async (ctx: Context, fileId: string, mime: string, name: string): Promise<void> => {
+  const handle = async (
+    ctx: Context,
+    fileId: string,
+    mime: string,
+    name: string,
+    mediaKind: VoiceMediaKind,
+  ): Promise<void> => {
     const chatId = ctx.chat!.id;
     if (deps.wizard.isActive(chatId)) {
       await ctx.reply("Finish or /cancel the task wizard before sending voice.");
@@ -36,13 +44,40 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
         await ctx.reply("\u{1F399} I couldn't make out any speech.");
         return;
       }
-      await ctx.reply(`\u{1F399} \u201C${text}\u201D`);
       const { resolveScope } = await import("../scope.js");
+      const { adoptUserPrompt } = await import("../prompt-anchor.js");
       const scope = resolveScope(ctx, deps);
       const quoted = extractReplyContext(ctx);
-      const outcome = await scope.rt.submit(textPrompt(text, ctx.message?.message_id, quoted));
+      const userMsgId = ctx.message?.message_id;
+      const media =
+        mediaKind === "video_note"
+          ? [{ type: "video_note" as const, fileId }]
+          : mediaKind === "voice"
+            ? [{ type: "voice" as const, fileId }]
+            : [{ type: "audio" as const, fileId, fileName: name }];
+      const anchor = await adoptUserPrompt(deps.api, {
+        chatId,
+        text: `\u201C${text}\u201D`,
+        userMessageIds: userMsgId !== undefined ? [userMsgId] : [],
+        messageThreadId: scope.threadExtra.message_thread_id,
+        projectName: scope.rt.projectName,
+        prefix: "\u{1F399} Voice",
+        media,
+      });
+      const outcome = await scope.rt.submit(
+        textPrompt(text, anchor?.replyTo ?? userMsgId, quoted, {
+          promptId: anchor?.promptId,
+        }),
+      );
       if (outcome === "queued") {
-        await ctx.reply("\u{1F4E5} Queued \u2014 will run after the current task.", scope.threadExtra);
+        const extra: Record<string, unknown> = { ...scope.threadExtra };
+        if (anchor?.replyTo !== undefined) {
+          extra.reply_parameters = {
+            message_id: anchor.replyTo,
+            allow_sending_without_reply: true,
+          };
+        }
+        await ctx.reply("\u{1F4E5} Queued \u2014 will run after the current task.", extra);
       }
     } catch (e) {
       log.warn("voice failed:", (e as Error).message);
@@ -51,7 +86,13 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
   };
 
   bot.on("message:voice", (ctx) =>
-    handle(ctx, ctx.message.voice.file_id, ctx.message.voice.mime_type || "audio/ogg", "voice.ogg"),
+    handle(
+      ctx,
+      ctx.message.voice.file_id,
+      ctx.message.voice.mime_type || "audio/ogg",
+      "voice.ogg",
+      "voice",
+    ),
   );
   bot.on("message:audio", (ctx) =>
     handle(
@@ -59,10 +100,11 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
       ctx.message.audio.file_id,
       ctx.message.audio.mime_type || "audio/mpeg",
       ctx.message.audio.file_name || "audio.mp3",
+      "audio",
     ),
   );
   bot.on("message:video_note", (ctx) =>
-    handle(ctx, ctx.message.video_note.file_id, "video/mp4", "note.mp4"),
+    handle(ctx, ctx.message.video_note.file_id, "video/mp4", "note.mp4", "video_note"),
   );
 }
 

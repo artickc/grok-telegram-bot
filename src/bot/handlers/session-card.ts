@@ -24,8 +24,8 @@ export interface SessionCardExtras {
   /** Latest task-completion % (0–100) for this session, if this chat runs it. */
   progress?: number;
   /**
-   * Live step (while working) or chat summary (when idle). Overrides
-   * `m.comment` when provided by the controlling chat runtime.
+   * Last user prompt (and, when busy, last AI thinking on a second line).
+   * Overrides `m.comment` when provided by the controlling chat runtime.
    */
   comment?: string;
 }
@@ -34,6 +34,8 @@ export interface SessionCard {
   text: string;
   keyboard: InlineKeyboard;
 }
+
+const COMMENT_LINE_MAX = 250;
 
 /** Build the card body + buttons for one session. */
 export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}): SessionCard {
@@ -44,10 +46,16 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
 
   const lines = [`${dot} ${m.title}`, `\u{1F4C1} ${proj}`];
   if (m.cwd) lines.push(`   ${m.cwd}`);
-  // Always surface "what is happening / what was done" when we have it.
+  // Last user prompt always; second line = thinking while running.
   if (comment) {
-    const icon = m.active || typeof extra.progress === "number" ? "\u23F3" : "\u{1F4AC}";
-    lines.push(`${icon} ${comment.length > 160 ? comment.slice(0, 159) + "\u2026" : comment}`);
+    const busy = m.active || typeof extra.progress === "number";
+    const parts = comment.split("\n").map((l) => l.trim()).filter(Boolean);
+    parts.forEach((part, i) => {
+      const clipped = part.length > COMMENT_LINE_MAX ? part.slice(0, COMMENT_LINE_MAX - 1) + "\u2026" : part;
+      // First line: user prompt; later lines (thinking): hourglass when busy.
+      const icon = i === 0 ? (busy ? "\u23F3" : "\u{1F4AC}") : "\u{1F9E0}";
+      lines.push(`${icon} ${clipped}`);
+    });
   }
   lines.push(`\u{1F552} updated ${relTime(m.updatedAt)} \u00B7 created ${relTime(m.createdAt)}`);
   const ctx = typeof extra.contextPct === "number" ? ` \u00B7 \u{1F9E0} ctx ${Math.round(extra.contextPct)}%` : "";

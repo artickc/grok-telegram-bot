@@ -4,8 +4,10 @@
  * Self-recheck (once per real user turn, when enabled):
  *  1. Hard-skip if no files were modified.
  *  2. Quiet meta ask: AI refuses (simple / pure build / nothing to re-verify)
- *     or writes a focused recheck prompt.
- *  3. That prompt is queued as the one-shot SELF-RECHECK turn.
+ *     or writes a complete recheck brief (bugs + production gaps + finish-all +
+ *     per-bug checklist).
+ *  3. That prompt is queued as the one-shot SELF-RECHECK turn (compose always
+ *     injects finish-all / per-bug rules when the body omitted them).
  *  4. Then Done + suggestions.
  *
  * After Done, the bot quietly asks for 1–3 short next steps as JSON with a
@@ -30,21 +32,36 @@ export const SELF_RECHECK_MARKER = "SELF-RECHECK (automatic quality pass";
 export const DEFAULT_SELF_RECHECK_PROMPT = [
   `${SELF_RECHECK_MARKER} — once only).`,
   "Do a rigorous self-review of the work just completed for the user request below.",
+  "You are a bugs/logic finder AND a production-completeness pass for the SAME feature.",
   "",
-  "You are both a bugs/logic finder AND a completeness checker for related follow-ups.",
-  "Look for:",
-  "1) Bugs, regressions, incomplete steps, wrong assumptions, missing verification, edge cases.",
-  "2) Logical gaps the user would still need — e.g. if they asked for password reset and you",
-  "   shipped the happy path only, also cover brute-force protection, rate limits, token expiry,",
-  "   email enumeration, CSRF, audit logging, and similar security/ops follow-through that a",
-  "   solid implementation of THAT feature should include (not a random new product idea).",
+  "A) Bugs & regressions",
+  "1) Incomplete steps, wrong assumptions, missing verification, edge cases, broken paths.",
+  "2) Logic mismatches (UI vs backend, state vs render, happy path vs error path).",
+  "",
+  "B) Production-related functionality (same domain only — not a new product idea)",
+  "Continue development toward an ideal production version of WHAT WAS BUILT:",
+  "- Game with water → waves/physics/collision where missing; entity that can die → death state; etc.",
+  "- Auth form → rate limits, lockout, CSRF, secure tokens, validation, error handling.",
+  "- API write → input validation, authz, idempotency/errors, logging where expected.",
+  "- UI control → empty/loading/error states, accessibility basics tied to the control.",
+  "Only add what a solid implementation of THIS feature should already include.",
+  "",
+  "C) Finish-all — no honest leftovers",
+  "- Do NOT leave half-done work with 'still need…', 'remaining…', 'TODO for user',",
+  "  incomplete honest footers, or progress stuck low because work is unfinished.",
+  "- Finish critical gaps now so Done does not rely on follow-up suggestion buttons",
+  "  for unfinished must-have work from this request.",
+  "- Do NOT ask the user questions. Do NOT call enter_plan_mode unless truly necessary.",
+  "",
+  "D) Per-bug recheck checklist (REQUIRED at the end of this pass)",
+  "1) List every plausible bug/edge case for THESE changes (race, null, authz, wrong path,",
+  "   regression, missing test, off-by-one, bad default, security hole, etc.).",
+  "2) For each item: verify with tools or fix it. Briefly note only real findings.",
+  "3) Prefer {progress: 100%} only when this checklist is done and nothing critical remains.",
   "",
   "Rules:",
-  "- Prefer fixing real problems with tools when needed; do not invent unrelated features.",
-  "- If something is unfinished relative to the user request (or a tightly related follow-up",
-  "  that leaves the feature incomplete/insecure), finish or fix it now.",
+  "- Prefer fixing real problems with tools; do not invent unrelated features.",
   "- If everything checks out, briefly confirm what you verified (no long essay).",
-  "- Do NOT ask the user questions. Do NOT call enter_plan_mode unless truly necessary.",
   "- End with an honest {progress: N%} marker for this recheck pass.",
   "",
   "USER'S REQUEST:",
@@ -52,6 +69,19 @@ export const DEFAULT_SELF_RECHECK_PROMPT = [
   "",
   "WHAT WAS JUST DONE (summary):",
   "{{DONE}}",
+].join("\n");
+
+/** Shared rules appended when wrapping a short AI-written recheck body. */
+export const SELF_RECHECK_COMPOSE_RULES = [
+  "Rules:",
+  "- Fix real bugs and logic mismatches with tools when needed; no unrelated features.",
+  "- Production-related completeness for the SAME feature (e.g. water→waves, auth→rate limits,",
+  "  API writes→validation/errors). Close gaps a solid production build of this feature needs.",
+  "- Finish-all: do NOT leave 'still need…', 'remaining…', incomplete honest footers, or",
+  "  half-done work that would force critical follow-up buttons. Finish those gaps now.",
+  "- End with a per-bug recheck: list plausible bugs for these changes and verify/fix each.",
+  "- Do NOT ask the user questions. Do NOT call enter_plan_mode unless truly necessary.",
+  "- End with an honest {progress: N%} marker for this recheck pass (100 only when checklist done).",
 ].join("\n");
 
 export interface Suggestion {
@@ -231,9 +261,20 @@ export function buildSelfRecheckDecisionPrompt(
     "- Non-trivial code/config changed and edge cases, regressions, or incomplete",
     "  follow-through are plausible (auth, multi-file logic, concurrency, data paths).",
     "- A focused second pass with tools could catch real bugs or finish related gaps.",
+    "- The first pass left honest leftovers ('still need…', unfinished production logic,",
+    "  incomplete feature pieces) that a recheck should finish instead of the user.",
     "",
-    "If needed=true, write a focused recheck prompt: imperative instructions for a one-shot",
-    "second pass that may use tools to fix REAL issues. Do not invent unrelated features.",
+    "If needed=true, write prompt = a COMPLETE recheck brief for a one-shot agent pass.",
+    "The prompt MUST include ALL of the following sections (imperative, concrete, domain-specific):",
+    "1) Bugs/logic: what to re-read, verify, and fix for THIS change set.",
+    "2) Production-related functionality: continue to ideal production for the SAME feature",
+    "   (examples: game water→waves; auth→rate limits/lockout/CSRF; API→validation/errors;",
+    "   UI→empty/loading/error). Not unrelated product ideas.",
+    "3) Finish-all: explicitly order the agent to finish incomplete work and NOT leave",
+    "   'still need…', 'remaining…', incomplete honest footers, or half-done bottoms.",
+    "4) Per-bug recheck (at the BOTTOM of the prompt): list every plausible bug/edge case",
+    "   for these changes and instruct the agent to verify or fix EACH one with tools.",
+    "Do not invent unrelated features. Keep the prompt actionable (not vague).",
     "If needed=false, give a short reason.",
     "",
     "USER'S REQUEST:",
@@ -248,7 +289,7 @@ export function buildSelfRecheckDecisionPrompt(
     "Reply with ONLY one JSON object (no markdown fences, no commentary):",
     '{"needed":false,"reason":"short reason"}',
     "or",
-    '{"needed":true,"prompt":"focused recheck / fix instructions for the agent"}',
+    '{"needed":true,"prompt":"complete recheck brief with bugs + production gaps + finish-all + per-bug checklist"}',
   ].join("\n");
 }
 
@@ -373,6 +414,26 @@ export function buildSelfRecheckPrompt(
 }
 
 /**
+ * True when the recheck body already encodes finish-all + per-bug expectations
+ * (default template or a strong AI brief). Used to avoid double-appending rules.
+ */
+export function hasSelfRecheckFinishRules(text: string): boolean {
+  const t = text.toLowerCase();
+  const finish =
+    t.includes("still need") || t.includes("finish-all") || t.includes("finish all");
+  const bugs = t.includes("per-bug") || t.includes("plausible bug");
+  return finish && bugs;
+}
+
+/** Append SHARED compose rules when the body omitted finish-all / per-bug language. */
+export function ensureSelfRecheckComposeRules(text: string): string {
+  const body = text.trim();
+  if (!body) return SELF_RECHECK_COMPOSE_RULES;
+  if (hasSelfRecheckFinishRules(body)) return body;
+  return `${body}\n\n${SELF_RECHECK_COMPOSE_RULES}`;
+}
+
+/**
  * Turn an AI-written recheck body into a full one-shot turn (marker + context).
  */
 export function composeSelfRecheckTurn(
@@ -396,23 +457,22 @@ export function composeSelfRecheckTurn(
     isSelfRecheckPrompt(body) ||
     (/USER'S REQUEST:/i.test(body) && /WHAT WAS JUST DONE/i.test(body));
   if (looksComplete) {
-    return ensureSelfRecheckMarker(body);
+    // Still inject finish-all / per-bug rules if a "complete-looking" AI brief
+    // only copied headers and omitted production/finish-all/per-bug sections.
+    return ensureSelfRecheckMarker(ensureSelfRecheckComposeRules(body));
   }
   return ensureSelfRecheckMarker(
-    [
-      body,
-      "",
-      "Rules:",
-      "- Prefer fixing real problems with tools when needed; do not invent unrelated features.",
-      "- Do NOT ask the user questions. Do NOT call enter_plan_mode unless truly necessary.",
-      "- End with an honest {progress: N%} marker for this recheck pass.",
-      "",
-      "USER'S REQUEST:",
-      user,
-      "",
-      "WHAT WAS JUST DONE (summary):",
-      did,
-    ].join("\n"),
+    ensureSelfRecheckComposeRules(
+      [
+        body,
+        "",
+        "USER'S REQUEST:",
+        user,
+        "",
+        "WHAT WAS JUST DONE (summary):",
+        did,
+      ].join("\n"),
+    ),
   );
 }
 

@@ -159,7 +159,24 @@ function formatByKind(
   }
 }
 
-// ---- helpers for code fences ----
+// ---- helpers for code fences / path labels ----
+
+/**
+ * File paths in **bold** break Telegram MarkdownV2 (Windows `\`, dots, long
+ * session paths). Always put paths in inline code; keep only the verb bold.
+ *   ✏️ **Edit** `C:\Users\…\plan.md`
+ */
+function pathCode(path: string | undefined | null, fallback = "file"): string {
+  const p = (path || "").trim() || fallback;
+  // Inline code cannot contain raw backticks unescaped in our MD pipeline;
+  // replace rare ` in paths so the span stays closed.
+  return "`" + p.replace(/`/g, "'") + "`";
+}
+
+/** `**Edit** \`path\`` style header fragment (no leading emoji). */
+function boldVerbPath(verb: string, path: string | undefined | null, fallback = "file"): string {
+  return "**" + verb + "** " + pathCode(path, fallback);
+}
 
 /** Fence that lengthens itself when the body contains backticks (avoids MD break). */
 function fence(text: string, lang?: string): string {
@@ -197,8 +214,8 @@ function formatExecute(
 ): string {
   const cmd = extractCommand(raw);
   const cwd = strOf(raw.cwd) || strOf(raw.working_directory) || strOf(raw.workingDirectory);
-  const title = "Run command" + (cwd ? " in " + truncate(cwd, 80) : "");
-  let out = "\u{1F4BB} **" + title + "**" + tail;
+  let out = "\u{1F4BB} **Run command**" + tail;
+  if (cwd) out += " in " + pathCode(truncate(cwd, 80));
   if (toolName && toolName !== "execute" && toolName !== "shell" && toolName !== "bash") {
     out += `\n  tool: \`${toolName}\``;
   }
@@ -226,8 +243,7 @@ function formatEdit(
   toolName: string,
 ): string {
   const path = extractPath(raw);
-  const title = "Edit " + (path || "file");
-  let out = "\u270F\uFE0F **" + title + "**" + tail;
+  let out = "\u270F\uFE0F " + boldVerbPath("Edit", path) + tail;
   if (toolName && !/edit|replace/i.test(toolName)) out += `\n  tool: \`${toolName}\``;
   if (opts.showDiffs) {
     const diff = buildEditDiff(u, raw, opts.diffMaxLines);
@@ -242,7 +258,7 @@ function formatEdit(
 function formatWrite(u: SessionUpdate, kind: string, raw: Record<string, unknown>, tail: string): string {
   const path = extractPath(raw);
   const verb = kind === "create" ? "Create" : "Write";
-  let out = "\u{1F4DD} **" + verb + " " + (path || "file") + "**" + tail;
+  let out = "\u{1F4DD} " + boldVerbPath(verb, path) + tail;
   const content = extractContent(raw) || extractToolOutput(u);
   if (content) {
     out += "\n" + fence(truncateMiddleLines(content, OUTPUT_PREVIEW_LINES, CONTENT_PREVIEW_MAX), detectLang(path)) + "\n";
@@ -258,14 +274,13 @@ function formatRead(
 ): string {
   const path = extractPath(raw, u);
   const range = extractReadRange(raw);
-  let title = "Read " + (path || "file");
   const parts: string[] = [];
   if (range.startLine) parts.push("line " + range.startLine);
   if (range.offset) parts.push("offset " + range.offset);
   if (range.limit) parts.push("limit " + range.limit);
   if (range.pages) parts.push("pages " + range.pages);
-  if (parts.length) title += " (" + parts.join(", ") + ")";
-  let out = "\u{1F4D6} **" + title + "**" + tail;
+  let out = "\u{1F4D6} " + boldVerbPath("Read", path) + tail;
+  if (parts.length) out += " (" + parts.join(", ") + ")";
   if (toolName && toolName !== "read" && toolName !== "read_file") {
     out += `\n  tool: \`${toolName}\``;
   }
@@ -292,11 +307,11 @@ function formatList(
     strOf(raw.target_directory) ||
     strOf(raw.targetDirectory) ||
     ".";
-  let out = "\u{1F4C1} **List " + truncate(path, 120) + "**" + tail;
+  let out = "\u{1F4C1} " + boldVerbPath("List", truncate(path, 120), ".") + tail;
   if (toolName) out += `\n  tool: \`${toolName}\``;
   const filters = extractFilters(raw);
-  if (filters.include) out += "\n  include: " + filters.include;
-  if (filters.exclude) out += "\n  exclude: " + filters.exclude;
+  if (filters.include) out += "\n  include: `" + filters.include.replace(/`/g, "'") + "`";
+  if (filters.exclude) out += "\n  exclude: `" + filters.exclude.replace(/`/g, "'") + "`";
   const body = extractToolOutput(u);
   if (body) {
     out += "\n" + fence(truncateMiddleLines(body, OUTPUT_PREVIEW_LINES, OUTPUT_PREVIEW_MAX)) + "\n";
@@ -314,16 +329,16 @@ function formatSearch(
   const path = extractSearchPath(raw);
   const filters = extractFilters(raw);
   const isGlob = /glob/i.test(toolName) || (!!filters.include && !query);
-  let title = isGlob ? "Glob" : "Search";
-  if (query) title += ": " + truncate(query, 120);
-  else if (path) title += " " + path;
-  let out = "\u{1F50E} **" + title + "**" + tail;
+  const verb = isGlob ? "Glob" : "Search";
+  let out = "\u{1F50E} **" + verb + "**" + tail;
+  if (query) out += " " + pathCode(truncate(query, 120), "query");
+  else if (path) out += " " + pathCode(truncate(path, 120));
   if (toolName && toolName !== "search" && toolName !== "grep") {
     out += `\n  tool: \`${toolName}\``;
   }
-  if (path && !(query && query.includes(path))) out += "\n  \u{1F4C2} in: " + truncate(path, 100);
-  if (filters.include) out += "\n  \u{1F4C1} include: " + filters.include;
-  if (filters.exclude) out += "\n  \u{1F6AB} exclude: " + filters.exclude;
+  if (path && query) out += "\n  \u{1F4C2} in: " + pathCode(truncate(path, 100));
+  if (filters.include) out += "\n  \u{1F4C1} include: " + pathCode(filters.include);
+  if (filters.exclude) out += "\n  \u{1F6AB} exclude: " + pathCode(filters.exclude);
   if (raw.case_sensitive !== undefined) {
     out += "\n  case-sensitive: " + (raw.case_sensitive ? "yes" : "no");
   }
@@ -338,7 +353,7 @@ function formatSearch(
 
 function formatDelete(raw: Record<string, unknown>, tail: string): string {
   const path = extractPath(raw);
-  return "\u{1F5D1}\uFE0F **Delete " + (path || "file") + "**" + tail;
+  return "\u{1F5D1}\uFE0F " + boldVerbPath("Delete", path) + tail;
 }
 
 function formatMove(kind: string, raw: Record<string, unknown>, tail: string): string {
@@ -352,20 +367,20 @@ function formatMove(kind: string, raw: Record<string, unknown>, tail: string): s
       "**" +
       tail +
       "\n  \u{1F4C4} " +
-      truncate(src, 100) +
+      pathCode(truncate(src, 100)) +
       "\n  \u27A1\uFE0F " +
-      truncate(dst, 100)
+      pathCode(truncate(dst, 100))
     );
   }
-  return "\u{1F4E6} **" + verb + " " + (src || dst || "file") + "**" + tail;
+  return "\u{1F4E6} " + boldVerbPath(verb, src || dst) + tail;
 }
 
 function formatFetch(u: SessionUpdate, raw: Record<string, unknown>, tail: string): string {
   const url = extractUrl(raw);
   const method = strOf(raw.method) || strOf(raw.verb) || "GET";
-  let title = "Fetch URL";
-  if (url) title = "Fetch " + truncate(url, 200);
-  let out = "\u{1F310} **" + title + "**" + tail;
+  let out = url
+    ? "\u{1F310} **Fetch** " + pathCode(truncate(url, 200), "URL") + tail
+    : "\u{1F310} **Fetch URL**" + tail;
   if (method && method !== "GET") out += "\n  method: " + method;
   const headers = raw.headers;
   if (headers && typeof headers === "object") {
@@ -384,9 +399,8 @@ function formatFetch(u: SessionUpdate, raw: Record<string, unknown>, tail: strin
 function formatWebSearch(u: SessionUpdate, raw: Record<string, unknown>, tail: string): string {
   const query = extractSearchQuery(raw) || extractUrl(raw);
   const count = strOf(raw.count) || strOf(raw.num) || strOf(raw.num_results) || numStr(raw.num_results);
-  let title = "Web search";
-  if (query) title += ": " + truncate(query, 150);
-  let out = "\u{1F310} **" + title + "**" + tail;
+  let out = "\u{1F310} **Web search**" + tail;
+  if (query) out += " " + pathCode(truncate(query, 150), "query");
   if (count) out += "\n  results: " + count;
   const result = extractToolOutput(u);
   if (result) {
@@ -428,7 +442,7 @@ function formatImage(raw: Record<string, unknown>, tail: string, toolName: strin
   const path = extractPath(raw) || strOf(raw.image) || strOf(raw.output);
   let out = "\u{1F5BC}\uFE0F **Image**" + tail;
   if (toolName) out += `\n  tool: \`${toolName}\``;
-  if (path) out += "\n  " + truncate(path, 200);
+  if (path) out += "\n  " + pathCode(truncate(path, 200));
   const prompt = strOf(raw.prompt);
   if (prompt) out += "\n  prompt: " + truncate(prompt, 200);
   return out;
@@ -482,27 +496,32 @@ function formatGeneric(
   const path = extractPath(raw);
   const cmd = extractCommand(raw);
   const query = extractSearchQuery(raw);
-  // Never show a bare "Other" / "Tool call" — prefer real tool name / path / cmd.
+  // Never show a bare "Other" / "Tool call" — prefer real tool name. Paths/queries
+  // go in inline code (not bold) so Windows paths cannot break MarkdownV2.
   let label =
     (toolName && !/^tool[_ ]?call$/i.test(toolName) ? toolName : "") ||
     (u.title && !/^other$/i.test(u.title.trim()) && !/^tool[_ ]?call$/i.test(u.title.trim())
       ? u.title.trim()
       : "") ||
-    (path ? capitalize(kind !== "other" ? kind : "use") + " " + path : "") ||
+    (path ? capitalize(kind !== "other" ? kind : "use") : "") ||
     (cmd ? "Run command" : "") ||
-    (query ? "Search: " + truncate(query, 80) : "") ||
+    (query ? "Search" : "") ||
     (kind && kind !== "other" ? capitalize(kind) : "") ||
     (toolName || "Tool");
   if (/^other$/i.test(label) || /^tool[_ ]?call$/i.test(label)) {
-    label = toolName && !/^tool[_ ]?call$/i.test(toolName) ? toolName : path || cmd || query || "Tool";
+    label = toolName && !/^tool[_ ]?call$/i.test(toolName) ? toolName : "Tool";
+  }
+  // Titles that accidentally embed a path stay short: drop path from bold label.
+  if (path && label.includes(path)) {
+    label = label.replace(path, "").replace(/\s+/g, " ").trim() || capitalize(kind !== "other" ? kind : "Tool");
   }
 
   let out = icon + " **" + label + "**" + tail;
   if (toolName && toolName !== label) out += `\n  tool: \`${toolName}\``;
-  if (path && !label.includes(path)) out += "\n  \u{1F4C4} " + truncate(path, 120);
+  if (path) out += "\n  \u{1F4C4} " + pathCode(truncate(path, 120));
   if (cmd) out += "\n" + fence(truncateMiddle(cmd, PREVIEW_MAX), "bash") + "\n";
-  else if (query && !label.includes(query)) out += "\n  query: " + truncate(query, 150);
-  else {
+  else if (query) out += "\n  query: " + pathCode(truncate(query, 150), "query");
+  else if (!path && !cmd) {
     const args = formatArgLines(raw);
     if (args) out += "\n" + fence(truncateMiddle(args, PREVIEW_MAX)) + "\n";
   }

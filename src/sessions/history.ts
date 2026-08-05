@@ -5,6 +5,11 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { extractProgress, PROGRESS_DIRECTIVE } from "../render/progress.js";
+import {
+  extractTelegramActions,
+  TELEGRAM_BRIDGE_MARKER,
+  TELEGRAM_BRIDGE_RESULTS_MARKER,
+} from "../render/telegram-bridge.js";
 import type { HistoryEntry, HistoryRole } from "./types.js";
 
 const TAIL_WINDOWS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024]; // grow until entries found
@@ -49,6 +54,7 @@ export function jsonlMtimeMs(jsonlPath: string): number {
 /**
  * Best-effort card blurb from the tail of a session log: last assistant prose
  * (what was solved), else last user prompt. Skips import-confirm noise.
+ * @deprecated Prefer {@link readLastUserPrompt} for session card comments.
  */
 export function readLastCardSummary(jsonlPath: string, maxEntries = 30): string {
   const entries = readHistory(jsonlPath, maxEntries);
@@ -71,7 +77,24 @@ export function readLastCardSummary(jsonlPath: string, maxEntries = 30): string 
   return "";
 }
 
-function cleanCardProse(raw: string, max = 200): string {
+/**
+ * Last user prompt from the session log for card comments (newest → oldest).
+ * Strips complexity wrappers / import-confirm noise. Empty when none found.
+ */
+export function readLastUserPrompt(jsonlPath: string, maxEntries = 40, maxLen = 250): string {
+  const entries = readHistory(jsonlPath, maxEntries);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!;
+    if (e.role !== "user" || !e.text.trim()) continue;
+    const t = cleanCardProse(e.text, maxLen);
+    if (!t) continue;
+    if (/session import complete/i.test(t)) continue;
+    return t;
+  }
+  return "";
+}
+
+function cleanCardProse(raw: string, max = 250): string {
   let t = extractProgress(raw).cleaned;
   t = t.replace(/```[\s\S]*?```/g, " ");
   t = t.replace(/^COMPLEXITY \(decide yourself[\s\S]*?User task:\s*/i, "");
@@ -203,23 +226,41 @@ function toEntry(ev: RawEvent): HistoryEntry | undefined {
 function cleanStoredText(text: string): string {
   if (!text) return text;
   let t = extractProgress(text).cleaned;
+  t = extractTelegramActions(t).cleaned;
   if (t.includes(PROGRESS_DIRECTIVE)) t = t.split(PROGRESS_DIRECTIVE).join("").trim();
   if (t.includes(IMAGE_OUTPUT_DIRECTIVE)) t = t.split(IMAGE_OUTPUT_DIRECTIVE).join("").trim();
-  // Strip first-prompt auto-complexity steering (and legacy forced-complex wrapper)
-  // so history / cards show the real user task, not bot plumbing.
-  const taskMarker = "User task:";
-  const ti = t.lastIndexOf(taskMarker);
-  if (
-    ti !== -1 &&
-    (/^COMPLEXITY \(decide yourself/i.test(t) || /^TASK COMPLEXITY:/i.test(t))
+  // Prefer "User task (continued):" BEFORE plain "User task:" — the continued
+  // marker contains the substring "User task:", so lastIndexOf("User task:")
+  // would slice into "(continued):…" and leak bridge teaching into cards/logs.
+  const cont = "User task (continued):";
+  const ci = t.lastIndexOf(cont);
+  if (ci !== -1) {
+    t = t.slice(ci + cont.length).trim();
+  } else if (
+    /^COMPLEXITY \(decide yourself/i.test(t) ||
+    /^TASK COMPLEXITY:/i.test(t)
   ) {
-    t = t.slice(ti + taskMarker.length).trim();
+    const taskMarker = "User task:";
+    const ti = t.indexOf(taskMarker);
+    if (ti !== -1) t = t.slice(ti + taskMarker.length).trim();
+  }
+  // Strip leftover telegram bridge teaching if still present (directive-only wrap).
+  if (t.includes(TELEGRAM_BRIDGE_MARKER)) {
+    const mi = t.indexOf(TELEGRAM_BRIDGE_MARKER);
+    if (mi === 0) {
+      const after = t.slice(TELEGRAM_BRIDGE_MARKER.length);
+      const dbl = after.search(/\n\n(?![-*`])/);
+      t = dbl !== -1 ? after.slice(dbl).trim() : "";
+    } else {
+      t = t.slice(0, mi).trim();
+    }
   }
   // Drop removed/quiet meta-prompts if they landed in history.
   if (/^Session status update \(meta only\)/i.test(t.trim())) t = "";
   if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t.trim())) t = "";
   if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t.trim())) t = "";
   if (/^SELF-RECHECK \(automatic quality pass/i.test(t.trim())) t = "";
+  if (t.trimStart().startsWith(TELEGRAM_BRIDGE_RESULTS_MARKER)) t = "";
   return t;
 }
 

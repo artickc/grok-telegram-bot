@@ -65,13 +65,19 @@ export class StatusPanel {
     if (subagents) activity.push(`\u{1F465} ${subagents}`);
     lines.push(activity.join(SEP));
 
-    // 3b) What is happening now / last summary (same source as Running cards).
-    // Prefer plan one-liner over a redundant tool-step when a plan is active.
-    const comment = rt.planSummary && rt.isBusy ? undefined : rt.cardComment;
+    // 3b) Last user prompt (+ thinking while busy) — same source as Running cards.
+    // When a plan board is already shown above, still surface the user prompt;
+    // skip only a pure thinking second line if plan is active (less noise).
+    const comment = rt.cardComment;
     if (comment) {
-      const icon = rt.isBusy ? "\u23F3" : "\u{1F4AC}";
-      const shown = comment.length > 120 ? `${comment.slice(0, 119)}\u2026` : comment;
-      lines.push(`${icon} ${shown}`);
+      const parts = comment.split("\n").map((l) => l.trim()).filter(Boolean);
+      const hideThinking = !!(rt.planSummary && rt.isBusy);
+      parts.forEach((part, i) => {
+        if (hideThinking && i > 0) return;
+        const icon = i === 0 ? (rt.isBusy ? "\u23F3" : "\u{1F4AC}") : "\u{1F9E0}";
+        const shown = part.length > 250 ? `${part.slice(0, 249)}\u2026` : part;
+        lines.push(`${icon} ${shown}`);
+      });
     }
 
     // 4) Where: project | session | context usage.

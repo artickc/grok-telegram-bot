@@ -10,7 +10,7 @@
 import { type Bot, type Context, InlineKeyboard } from "grammy";
 import { basename } from "node:path";
 import type { BotDeps } from "../deps.js";
-import { readHistory, readLastCardSummary } from "../../sessions/history.js";
+import { readHistory, readLastUserPrompt } from "../../sessions/history.js";
 import type { SessionMeta } from "../../sessions/types.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { showHistory } from "./history.js";
@@ -77,12 +77,12 @@ async function renderSessionPage(ctx: Context, deps: BotDeps, page: number): Pro
     const progress =
       ctrl.progressFor(m.sessionId) ??
       deps.registry.forumControllerForSession(m.sessionId)?.progressFor(m.sessionId);
-    // Live runtime → persisted comment → last assistant outcome from history.
+    // Live runtime (user + thinking) → last user from history → disk comment.
     const comment =
       ctrl.commentFor(m.sessionId) ||
       deps.registry.forumControllerForSession(m.sessionId)?.commentFor(m.sessionId) ||
-      m.comment ||
-      readLastCardSummary(deps.store.jsonlPath(m.sessionId));
+      readLastUserPrompt(deps.store.jsonlPath(m.sessionId)) ||
+      m.comment;
     const { text, keyboard } = buildSessionCard(m, {
       contextPct,
       selfPid: deps.acp.pid,

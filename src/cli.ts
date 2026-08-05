@@ -83,12 +83,14 @@ async function main(): Promise<void> {
 
     case "logs":
       printLogs(arg ? Number(arg) || 100 : 100);
+      process.exit(0);
       break;
 
     case "help":
     case "--help":
     case "-h":
       console.log(HELP);
+      process.exit(0);
       break;
 
     default:

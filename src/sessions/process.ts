@@ -16,6 +16,13 @@ const log = createLogger("sessions:process");
  */
 export function killPid(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Never kill this bot process (or a mistaken self-target). Session locks for
+  // multiplexed ACP turns store the child agent pid, not node — but a recycled
+  // or mis-attributed lock must not take the Telegram poller down.
+  if (pid === process.pid) {
+    log.warn(`refusing to kill pid ${pid} (this bot process)`);
+    return false;
+  }
   try {
     if (process.platform === "win32") {
       execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });

@@ -62,6 +62,17 @@ import {
   type Suggestion,
   suggestionsKeyboard,
 } from "./suggestions.js";
+import type { ForumManager } from "../forum/manager.js";
+import type { SessionStore } from "../sessions/store.js";
+import type { TelegramBotService } from "./telegram-bots.js";
+import { executeTelegramActions } from "./telegram-actions.js";
+import {
+  buildTelegramBridgeDirective,
+  buildTelegramBridgeResultsPrompt,
+  extractTelegramActions,
+  isTelegramBridgeResultsPrompt,
+  wrapTelegramBridgePrompt,
+} from "../render/telegram-bridge.js";
 import {
   parsePlanUpdate,
   renderPlanMarkdown,
@@ -69,9 +80,11 @@ import {
   type PlanEntry,
 } from "../render/plan.js";
 import {
-  buildLastTurnSummary,
+  buildSessionCardComment,
+  clampThinking,
   cleanCommentLine,
   cleanUserPreview,
+  COMMENT_MAX,
   stepFromThought,
   stepFromToolUpdate,
   stripDirectiveWrappers,
@@ -144,6 +157,8 @@ export class SessionRuntime {
   private turnCount = 0;
   /** Telegram message id of the current turn's prompt, so replies thread to it. */
   private turnReplyTo: number | undefined;
+  /** Short id for `#prompt_<id>` on all AI messages of this turn. */
+  private turnPromptId: string | undefined;
   private imageScanText = "";
   private sentImagesThisTurn = new Set<string>();
   /** Monotonic count used to reject ACP "success" responses with no turn updates. */
@@ -172,19 +187,52 @@ export class SessionRuntime {
   accountRotator: AccountRotator | undefined;
   /** Session ids that already received the first-prompt auto-complexity directive. */
   private complexitySteered = new Set<string>();
+  /** Session ids that already received the first-prompt Telegram bridge directive. */
+  private telegramBridgeSteered = new Set<string>();
+  /**
+   * How many TELEGRAM BRIDGE RESULTS follow-ups are chained after the current
+   * user turn. Caps infinite list_bots/bot_command loops; reset on real user work.
+   */
+  private bridgeResultDepth = 0;
+  /** Max sequential bridge result turns per user request. */
+  private static readonly BRIDGE_CHAIN_MAX = 4;
+  /**
+   * Optional Telegram bridge services (forum / session store / sibling bots).
+   * Injected by the registry after construct.
+   */
+  bridge?: {
+    store: SessionStore;
+    forum?: ForumManager;
+    bots: TelegramBotService;
+    /** Cross-topic prompt dispatch (create_topic → send_prompt orchestration). */
+    submitTopicPrompt?: import("./telegram-actions.js").SubmitTopicPromptFn;
+  };
   /** Last credits total reported for this session (for per-turn delta accounting). */
   private lastReportedCredits = 0;
-  /** Live "what is happening now" line while a turn is in flight. */
+  /** Live "what is happening now" line while a turn is in flight (tools/plan). */
   private liveStep: string | undefined;
-  /** Idle card comment (AI/local summary of the chat after the last turn). */
+  /**
+   * Card comment on disk / idle: last user prompt (≤ COMMENT_MAX).
+   * While busy, {@link cardComment} also appends last agent thinking.
+   */
   private sessionComment: string | undefined;
+  /** Cleaned last user prompt for cards (not overwritten by self-recheck meta). */
+  private cardUserPrompt: string | undefined;
+  /** Accumulated agent_thought_chunk text for the current turn (card display). */
+  private cardThinking = "";
   /** User text of the turn currently running (for local card-comment fallback). */
   private turnUserText = "";
-  /** Assistant prose streamed this turn — used to build the idle card summary. */
+  /** Assistant prose streamed this turn — used for suggestions / completion. */
   private turnAssistantText = "";
   /** Quiet meta capture (suggestions) — never stream to Telegram. */
   private capturingQuiet = false;
   private quietCaptureBuf = "";
+  /**
+   * Done delivery bookkeeping for this turn: expect a loud Done ping, and whether
+   * one was successfully sent (finally forces a short Done if expected but missing).
+   */
+  private turnExpectDone = false;
+  private turnDonePinged = false;
   /** Batches of post-turn suggestions for inline-button callbacks. */
   private suggestionBatches = new Map<number, Suggestion[]>();
   private suggestionBatchSeq = 0;
@@ -315,14 +363,23 @@ export class SessionRuntime {
   }
 
   /**
-   * One-line status for Running/Sessions cards:
-   * live step while busy, otherwise the last chat summary / comment.
+   * Session card comment:
+   *   always — last user prompt (≤250)
+   *   busy   — plus last AI agent thinking on the next line (≤250)
    */
   get cardComment(): string | undefined {
-    if (this.busy && this.liveStep) return this.liveStep;
-    if (this.sessionComment) return this.sessionComment;
-    if (this.sessionId) return this.acp.sessionComment(this.sessionId);
-    return undefined;
+    const user =
+      this.cardUserPrompt ||
+      this.sessionComment ||
+      (this.sessionId ? this.acp.sessionComment(this.sessionId) : undefined) ||
+      cleanUserPreview(this.suggestionUserText || this.turnUserText || "", COMMENT_MAX) ||
+      undefined;
+    const built = buildSessionCardComment({
+      userPrompt: user,
+      thinking: this.busy && this.cardThinking ? this.cardThinking : undefined,
+      busy: this.busy,
+    });
+    return built || undefined;
   }
 
   /** Record a new progress value and refresh the status panel / cards. The bar
@@ -335,7 +392,7 @@ export class SessionRuntime {
     this.changed();
   }
 
-  /** Update the live step shown on session cards (throttled by equality). */
+  /** Update the live step (tools/plan) — kept for diagnostics; cards use user+thinking. */
   private setLiveStep(step: string | undefined): void {
     const next = step?.trim() ? cleanCommentLine(step) : undefined;
     if (next === this.liveStep) return;
@@ -343,9 +400,21 @@ export class SessionRuntime {
     this.changed();
   }
 
-  /** Persist idle card comment (disk + memory) so /running and /sessions see it. */
+  /** Append thought text and refresh cards when the display line changes. */
+  private appendCardThinking(chunk: string): void {
+    const piece = chunk.replace(/\s+/g, " ").trim();
+    if (!piece) return;
+    const prevShown = this.cardThinking ? clampThinking(this.cardThinking, COMMENT_MAX) : "";
+    this.cardThinking = this.cardThinking ? `${this.cardThinking} ${piece}` : piece;
+    const nextShown = clampThinking(this.cardThinking, COMMENT_MAX);
+    if (nextShown !== prevShown) this.changed();
+  }
+
+  /** Persist last user prompt (disk + memory) so /running and /sessions see it. */
   private setSessionComment(comment: string | undefined): void {
-    const next = comment?.trim() ? cleanCommentLine(comment) : undefined;
+    const next = comment?.trim()
+      ? cleanUserPreview(comment, COMMENT_MAX) || cleanCommentLine(comment, COMMENT_MAX)
+      : undefined;
     if (next === this.sessionComment) return;
     this.sessionComment = next;
     if (next && this.sessionId) {
@@ -358,11 +427,25 @@ export class SessionRuntime {
     this.changed();
   }
 
-  /** Hydrate comment from disk after bind/resume. */
+  /** Keep disk/memory comment = last real user prompt after a turn ends. */
+  private persistCardUserPrompt(): void {
+    const prompt =
+      this.cardUserPrompt ||
+      cleanUserPreview(this.suggestionUserText || this.turnUserText || "", COMMENT_MAX);
+    if (prompt) {
+      this.cardUserPrompt = prompt;
+      this.setSessionComment(prompt);
+    }
+  }
+
+  /** Hydrate last user prompt from disk after bind/resume. */
   private loadPersistedComment(): void {
     if (!this.sessionId) return;
     const c = this.acp.sessionComment(this.sessionId);
-    if (c) this.sessionComment = c;
+    if (c) {
+      this.sessionComment = c;
+      if (!this.cardUserPrompt) this.cardUserPrompt = cleanUserPreview(c, COMMENT_MAX) || c;
+    }
   }
 
   /** Searchable hashtag footer for this session (project В· session В· model В·
@@ -385,7 +468,17 @@ export class SessionRuntime {
       if (this.busy && !this.streamer) {
         // Any transient follow-watch of this session is now superseded.
         if (this.watchIsFollow) this.stopWatch();
-        this.streamer = new ResponseStreamer(this.api, this.chatId, this.cfg.streamThrottleMs, this.turnReplyTo, this.hashtags(), (pct) => this.setProgress(pct), this.cfg.progressFallback, this.turnStartedAt);
+        this.streamer = new ResponseStreamer(
+          this.api,
+          this.chatId,
+          this.cfg.streamThrottleMs,
+          this.turnReplyTo,
+          this.hashtags(),
+          (pct) => this.setProgress(pct),
+          this.cfg.progressFallback,
+          this.turnStartedAt,
+          this.messageThreadId,
+        );
         // Restore the live plan board so steps stay visible above the progress bar.
         if (this.planEntries?.length) {
           this.streamer.setPlan(renderPlanMarkdown(this.planEntries));
@@ -459,6 +552,8 @@ export class SessionRuntime {
     this.lastReportedCredits = 0;
     this.liveStep = undefined;
     this.sessionComment = undefined;
+    this.cardUserPrompt = undefined;
+    this.cardThinking = "";
     await this.applySessionPrefs();
     this.persist();
     this.sessionChanged();
@@ -514,8 +609,8 @@ export class SessionRuntime {
   async startImportedSession(cwd: string, projectName: string | undefined, priming: string): Promise<void> {
     await this.startNewSession(cwd, projectName);
     if (priming.trim()) this.primingContext = priming;
-    // Imported transcripts already have context — skip first-prompt complexity steering.
-    this.markComplexitySteered();
+    // Imported transcripts already have context — skip first-prompt directives.
+    this.markFirstPromptSteered();
   }
 
   startWatch(jsonlPath: string, follow = false): void {
@@ -613,35 +708,64 @@ export class SessionRuntime {
       this.changed();
       return "queued";
     }
-    // First prompt of a fresh session: steer the agent to decide complexity
-    // itself (plan if complex, implement if simple) — never ask the user.
-    let toRun = input;
-    if (this.shouldSteerComplexity()) {
-      toRun = wrapAutoComplexityPrompt(input);
-      this.markComplexitySteered();
-      log.info(`chat ${this.chatId}: first-prompt auto-complexity steering applied`);
-    }
-    void this.runTurn(toRun);
+    // First-prompt steering is applied inside runTurn so queued first messages
+    // (and flushQueue) get the same complexity + telegram bridge directives.
+    void this.runTurn(input);
     return "ran";
   }
 
-  private markComplexitySteered(): void {
-    if (this.sessionId) this.complexitySteered.add(this.sessionId);
+  private markFirstPromptSteered(): void {
+    if (!this.sessionId) return;
+    this.complexitySteered.add(this.sessionId);
+    this.telegramBridgeSteered.add(this.sessionId);
+  }
+
+  private telegramBridgeDirective(): string {
+    return buildTelegramBridgeDirective({
+      forumReady: !!this.bridge?.forum?.isReady,
+      topicGroupId: this.cfg.topicGroupId,
+      allowedBots: this.cfg.allowedTelegramBots,
+      botCommands: this.cfg.telegramBotCommands,
+    });
   }
 
   /**
-   * Apply auto-complexity directive only on the first prompt of a brand-new
-   * conversation (no prior user turns in this process / session jsonl).
+   * Complexity + telegram bridge teaching on the first prompt of a brand-new
+   * conversation only (no prior user turns in this process / session jsonl).
    */
-  private shouldSteerComplexity(): boolean {
+  private applyFirstPromptSteering(input: PromptInput): PromptInput {
+    if (!this.shouldSteerFirstPrompt(input)) return input;
+    let toRun = wrapAutoComplexityPrompt(input);
+    toRun = wrapTelegramBridgePrompt(toRun, this.telegramBridgeDirective());
+    this.markFirstPromptSteered();
+    log.info(`chat ${this.chatId}: first-prompt complexity + telegram bridge applied`);
+    return toRun;
+  }
+
+  /**
+   * Apply first-prompt directives only on a brand-new conversation (no prior
+   * user turns in this process / session jsonl).
+   */
+  private shouldSteerFirstPrompt(input: PromptInput): boolean {
     if (!this.sessionId) return false;
-    if (this.complexitySteered.has(this.sessionId)) return false;
+    if (this.complexitySteered.has(this.sessionId) && this.telegramBridgeSteered.has(this.sessionId)) {
+      return false;
+    }
     if (this.turnCount > 0) return false;
+    // Never wrap meta follow-ups even if somehow first.
+    if (
+      input.skipSelfRecheck ||
+      isSelfRecheckPrompt(input.text) ||
+      isTelegramBridgeResultsPrompt(input.text)
+    ) {
+      return false;
+    }
     try {
       const path = join(this.cfg.sessionsDir, `${this.sessionId}.jsonl`);
       const hist = readHistory(path, 8);
       if (hist.some((e) => e.role === "user" && e.text.trim().length > 0)) {
         this.complexitySteered.add(this.sessionId);
+        this.telegramBridgeSteered.add(this.sessionId);
         return false;
       }
     } catch {
@@ -650,9 +774,16 @@ export class SessionRuntime {
     return true;
   }
 
+  /**
+   * Stop the current turn for this runtime only.
+   * Soft ACP cancel + session-scoped force-complete; never kills the shared
+   * agent (that would stop every multiplexed chat and take the bot offline).
+   */
   async cancel(): Promise<boolean> {
     if (!this.busy || !this.sessionId) return false;
     this.cancelled = true;
+    // Clear queue of follow-ups for this turn? No — only stop the active turn;
+    // queued user messages remain so the user can flush later if they want.
     await this.acp.cancel(this.sessionId);
     return true;
   }
@@ -770,20 +901,46 @@ export class SessionRuntime {
   }
 
   private async runTurn(input: PromptInput): Promise<void> {
+    // Apply before any turn bookkeeping so card previews / logs see the wrapped
+    // text the same way the agent does (also covers flushQueue first messages).
+    input = this.applyFirstPromptSteering(input);
+
     this.busy = true;
     this.cancelled = false;
     this.turnReplyTo = input.replyTo;
+    this.turnPromptId = input.promptId;
     this.turnUserText = input.text;
     this.turnAssistantText = "";
+    this.cardThinking = "";
+    this.turnExpectDone = false;
+    this.turnDonePinged = false;
     this.isSelfRecheckTurn = isSelfRecheckPrompt(input.text);
-    // Meta turns (recheck, auto-suggestion batches) never arm another recheck.
-    this.skipSelfRecheck = !!input.skipSelfRecheck || this.isSelfRecheckTurn;
-    // Fresh user work resets suggestion anchors; recheck keeps the original ask.
+    // Meta turns (recheck, bridge results, auto-suggestion batches) never arm another recheck.
+    const isBridgeResults = isTelegramBridgeResultsPrompt(input.text);
+    this.skipSelfRecheck =
+      !!input.skipSelfRecheck ||
+      this.isSelfRecheckTurn ||
+      isBridgeResults;
+    // Fresh user work resets bridge-chain depth + suggestion anchors.
+    if (!this.isSelfRecheckTurn && !isBridgeResults) {
+      this.bridgeResultDepth = 0;
+    }
+    // Fresh user work resets suggestion anchors; recheck / bridge results keep the original ask.
     // Strip complexity/reply wrappers so suggestions + recheck see the real ask.
-    if (!this.isSelfRecheckTurn) {
+    if (!this.isSelfRecheckTurn && !isBridgeResults) {
       this.suggestionUserText = stripDirectiveWrappers(input.text) || input.text;
       this.preRecheckAssistantText = "";
       this.preRecheckFileOps = new Map();
+      // Card comment: last real user prompt (not self-recheck / empty meta).
+      const preview = input.text.trim()
+        ? cleanUserPreview(input.text, COMMENT_MAX)
+        : input.images.length
+          ? "Attached image(s)"
+          : "";
+      if (preview) {
+        this.cardUserPrompt = preview;
+        this.setSessionComment(preview);
+      }
     }
     this.shownToolIds = new Set();
     this.toolCallCache = new Map();
@@ -855,6 +1012,15 @@ export class SessionRuntime {
       if (final.result && !this.cancelled) this.streamer?.completeFallback();
       if (this.streamer) await this.streamer.finalize();
       if (this.foreground) await this.sendTurnImages();
+
+      // Telegram bridge actions (JSON fences in the agent reply). Process on
+      // normal turns AND bridge-results follow-ups so multi-step bot_command /
+      // search chains work; depth cap prevents infinite loops.
+      let queuedBridgeResults = false;
+      if (final.result && !this.cancelled) {
+        queuedBridgeResults = await this.processTelegramBridgeActions();
+      }
+
       // Always build the completion (records `lastCompletion` so switching back
       // to this session can replay its Done + summary). Only PING the chat for
       // the foreground turn, or a background turn when NOTIFY_OTHER_SESSIONS is on.
@@ -867,49 +1033,40 @@ export class SessionRuntime {
         this.turnCount++;
         // Persist real per-account usage (turns + reported credits) for /accounts and /usage.
         this.recordAccountUsage();
-        // Card comment: what this turn solved (assistant result + files) — no extra agent call.
-        this.setSessionComment(
-          buildLastTurnSummary({
-            userText: this.turnUserText,
-            assistantText: this.turnAssistantText,
-            fileOps: this.fileOps,
-            stopReason: final.result.stopReason,
-          }),
-        );
-        this.setLiveStep(undefined);
+        // Card comment: last user prompt (thinking cleared when idle).
+        this.persistCardUserPrompt();
+        this.cardThinking = "";
+        // Keep live step while bridge/sibling-bot results are still queued —
+        // clearing here made "Waiting for bot" vanish before the interim notify.
+        if (!queuedBridgeResults) this.setLiveStep(undefined);
       } else if (this.cancelled) {
-        this.setSessionComment(
-          buildLastTurnSummary({
-            userText: this.turnUserText,
-            assistantText: this.turnAssistantText,
-            fileOps: this.fileOps,
-            cancelled: true,
-          }),
-        );
+        this.persistCardUserPrompt();
+        this.cardThinking = "";
         this.setLiveStep(undefined);
       } else if (final.error) {
-        this.setSessionComment(
-          buildLastTurnSummary({
-            userText: this.turnUserText,
-            assistantText: this.turnAssistantText,
-            fileOps: this.fileOps,
-            error: final.error.message,
-          }),
-        );
+        this.persistCardUserPrompt();
+        this.cardThinking = "";
         this.setLiveStep(undefined);
       }
       if (final.result || this.cancelled) {
-        const liveMsg = this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
-        const pingDone = canPing && (this.foreground || !hasQueued);
+        // Bridge results in the queue mean "not Done yet" — never treat as a
+        // completion ping even in the foreground. Do not post bridge status
+        // spam to the chat (live step / status panel only).
+        const pingDone =
+          canPing && (this.foreground || !hasQueued) && !queuedBridgeResults;
+        // Expect a Done this turn unless we defer for recheck (bridge already excluded).
+        this.turnExpectDone = pingDone;
 
         // One-shot self-recheck: only after a real *user* turn (not meta/auto),
         // with idle queue. skipSelfRecheck blocks loops after recheck / auto-batch.
         // Also skipped when no files were modified, or when a quiet AI decision
         // refuses (simple tasks, pure build, nothing worth re-verifying).
+        // Delay recheck/Done when bridge results are queued (like self-recheck).
         const wantSelfRecheck =
           !!final.result &&
           !this.cancelled &&
           !hasQueued &&
+          !queuedBridgeResults &&
           this.cfg.selfRecheckEnabled &&
           !this.skipSelfRecheck &&
           !this.isSelfRecheckTurn;
@@ -922,6 +1079,13 @@ export class SessionRuntime {
           this.preRecheckFileOps = cloneFileOps(this.fileOps);
           this.setLiveStep("Deciding if self-recheck is needed\u2026");
           this.changed();
+          // Visible chat status so stream-complete is not mistaken for a silent exit.
+          if (pingDone) {
+            await this.notify(
+              "\u{1F50D} Checking if a quality pass is needed\u2026",
+              { loud: true, replyTo: this.turnReplyTo },
+            );
+          }
           const recheck = await this.maybePlanSelfRecheck();
           this.setLiveStep(undefined);
           // User may cancel during the quiet decision call — first turn still
@@ -931,9 +1095,13 @@ export class SessionRuntime {
             this.preRecheckAssistantText = "";
           } else if (recheck) {
             queuedRecheck = true;
+            this.turnExpectDone = false; // final Done comes after the recheck turn
             // Front of queue; mark skip so the recheck turn never re-arms itself.
             this.queue.unshift(
-              textPrompt(recheck, this.turnReplyTo, undefined, { skipSelfRecheck: true }),
+              textPrompt(recheck, this.turnReplyTo, undefined, {
+                skipSelfRecheck: true,
+                promptId: this.turnPromptId,
+              }),
             );
             this.changed();
             if (pingDone) {
@@ -952,123 +1120,176 @@ export class SessionRuntime {
           }
         }
 
-        if (!queuedRecheck) {
-          // Post-turn suggestions on successful, non-cancelled Done with idle queue —
-          // both foreground and background (so switch-to-session can re-show them).
-          let doneMarkup = switchKb;
-          // After a recheck pass, rebuild Done with split first-turn / recheck files.
+        if (!queuedRecheck && !queuedBridgeResults) {
+          // Build Done text *now* (after quiet decision) so a cancel during the
+          // recheck-decision wait shows ⏹ Stopped, not a stale ✅ Done head.
           let doneText = this.isSelfRecheckTurn
             ? this.completionMessageSplit(final.result?.stopReason, startedAt, streamedOutput)
-            : liveMsg;
-          if (final.result && !this.cancelled && !hasQueued) {
-            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
-              // Only auto-queue high-need follow-ups when the user is watching;
-              // background sessions store buttons for the Done ping / switch replay.
-              autoQueue: this.foreground,
+            : this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
+          // 1) Always send Done FIRST — never block the completion ping on the
+          // quiet suggestions prompt (which can hang and look like "no Done").
+          let doneMsgId: number | undefined;
+          if (pingDone) {
+            doneMsgId = await this.notify(doneText, {
+              loud: true,
+              replyTo: this.turnReplyTo,
+              replyMarkup: switchKb,
             });
-            doneText = sug.text;
-            doneMarkup = sug.markup;
+            if (doneMsgId !== undefined) this.turnDonePinged = true;
           }
-          if (pingDone) await this.notify(doneText, { loud: true, replyTo: this.turnReplyTo, replyMarkup: doneMarkup });
+          // 2) Suggestions after Done: edit the Done message (or send a follow-up).
+          if (final.result && !this.cancelled && !hasQueued) {
+            try {
+              const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+                // Only auto-queue high-need follow-ups when the user is watching;
+                // background sessions store buttons for the Done ping / switch replay.
+                autoQueue: this.foreground,
+              });
+              // Only enhance when suggestions actually changed the Done body.
+              if (pingDone && sug.text !== doneText) {
+                await this.enhanceDoneMessage(doneMsgId, sug.text, sug.markup ?? switchKb);
+              }
+            } catch (e) {
+              log.debug(`suggestions after Done failed: ${(e as Error).message}`);
+            }
+          }
           // Clear frozen first-turn ops after final Done (recheck path done).
           if (this.isSelfRecheckTurn) this.preRecheckFileOps = new Map();
         }
+        // queuedBridgeResults: stay quiet in chat — agent gets results via queue.
       } else if (final.error) {
         // If the self-recheck pass itself failed, still surface Done for the
         // original work (split files + suggestions) so the user is not stuck.
         if (this.isSelfRecheckTurn && !hasQueued) {
           const switchKb = this.switchKeyboard();
           const pingDone = canPing && (this.foreground || !hasQueued);
+          this.turnExpectDone = pingDone;
           let doneText =
             this.completionMessageSplit(undefined, startedAt, streamedOutput) +
             `\n\n\u26A0\uFE0F Self-recheck failed: ${final.error.message}`;
-          if (!this.cancelled) {
-            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
-              autoQueue: this.foreground,
+          let doneMsgId: number | undefined;
+          if (pingDone) {
+            doneMsgId = await this.notify(doneText, {
+              loud: true,
+              replyTo: this.turnReplyTo,
+              replyMarkup: switchKb,
             });
-            doneText = sug.text;
-            if (pingDone) {
-              await this.notify(doneText, {
-                loud: true,
-                replyTo: this.turnReplyTo,
-                replyMarkup: sug.markup,
+            if (doneMsgId !== undefined) this.turnDonePinged = true;
+          }
+          if (!this.cancelled) {
+            try {
+              const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+                autoQueue: this.foreground,
               });
+              if (pingDone && sug.text !== doneText) {
+                await this.enhanceDoneMessage(doneMsgId, sug.text, sug.markup ?? switchKb);
+              }
+            } catch (e) {
+              log.debug(`suggestions after recheck-fail Done failed: ${(e as Error).message}`);
             }
-          } else if (pingDone) {
-            await this.notify(doneText, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
           }
           this.preRecheckFileOps = new Map();
         } else {
           const transient = isTransientError(final.error);
           const liveMsg = this.errorMessage(final.error, startedAt, final.attempts, transient);
-          if (canPing) await this.notify(liveMsg, { loud: true, replyTo: this.turnReplyTo, replyMarkup: switchKb });
+          this.turnExpectDone = canPing;
+          if (canPing) {
+            const id = await this.notify(liveMsg, {
+              loud: true,
+              replyTo: this.turnReplyTo,
+              replyMarkup: switchKb,
+            });
+            if (id !== undefined) this.turnDonePinged = true;
+          }
         }
       }
     } catch (err) {
       // Unexpected failure outside the prompt path (e.g. while finalizing).
       await this.streamer?.finalize().catch(() => {});
       const errMsg = (err as Error).message;
-      this.setSessionComment(
-        buildLastTurnSummary({
-          userText: this.turnUserText,
-          assistantText: this.turnAssistantText,
-          fileOps: this.fileOps,
-          error: errMsg,
-        }),
-      );
+      this.persistCardUserPrompt();
+      this.cardThinking = "";
       this.setLiveStep(undefined);
       // If the self-recheck pass itself blew up, still surface Done for the
       // original work (split files + suggestions) so the user is not stuck.
       if (this.isSelfRecheckTurn && this.queue.length === 0) {
         const switchKb = this.switchKeyboard();
         const canPing = this.foreground || this.cfg.notifyOtherSessions;
+        this.turnExpectDone = canPing;
         let doneText =
           this.completionMessageSplit(undefined, startedAt, this.streamer?.hasOutput ?? false) +
           `\n\n\u26A0\uFE0F Self-recheck failed: ${errMsg}`;
         try {
-          if (!this.cancelled) {
-            const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
-              autoQueue: this.foreground,
-            });
-            doneText = sug.text;
-            if (canPing) {
-              await this.notify(doneText, {
-                loud: true,
-                replyTo: this.turnReplyTo,
-                replyMarkup: sug.markup,
-              });
-            }
-          } else if (canPing) {
-            await this.notify(doneText, {
+          let doneMsgId: number | undefined;
+          if (canPing) {
+            doneMsgId = await this.notify(doneText, {
               loud: true,
               replyTo: this.turnReplyTo,
               replyMarkup: switchKb,
             });
+            if (doneMsgId !== undefined) this.turnDonePinged = true;
+          }
+          if (!this.cancelled) {
+            try {
+              const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
+                autoQueue: this.foreground,
+              });
+              if (canPing && sug.text !== doneText) {
+                await this.enhanceDoneMessage(doneMsgId, sug.text, sug.markup ?? switchKb);
+              }
+            } catch (e2) {
+              log.debug(`suggestions after recheck catch failed: ${(e2 as Error).message}`);
+            }
           }
         } catch (e2) {
           log.debug(`recheck catch recovery failed: ${(e2 as Error).message}`);
-          if (canPing) {
-            await this.notify(doneText, {
+          if (canPing && !this.turnDonePinged) {
+            const id = await this.notify(doneText, {
               loud: true,
               replyTo: this.turnReplyTo,
               replyMarkup: switchKb,
-            }).catch(() => {});
+            });
+            if (id !== undefined) this.turnDonePinged = true;
           }
         }
         this.preRecheckFileOps = new Map();
       } else {
         const msg = `\u274C Error after ${fmtDuration(Date.now() - startedAt)}: ${errMsg}`;
         this.lastCompletion = msg;
-        if (this.foreground || this.cfg.notifyOtherSessions) {
+        const canPing = this.foreground || this.cfg.notifyOtherSessions;
+        this.turnExpectDone = canPing;
+        if (canPing) {
           const from = this.foreground ? "" : `\u{1F4E8} From other session ${this.sessionTag()}\n`;
-          await this.notify(`${from}${msg}`, {
+          const id = await this.notify(`${from}${msg}`, {
             loud: true,
             replyTo: this.turnReplyTo,
             replyMarkup: this.switchKeyboard(),
           });
+          if (id !== undefined) this.turnDonePinged = true;
         }
       }
     } finally {
+      // Safety net: turn completed with an expected Done ping that never landed
+      // (notify failed, hung path, etc.). Never block queue flush on this.
+      if (this.turnExpectDone && !this.turnDonePinged) {
+        const fallback =
+          this.lastCompletion?.trim() ||
+          `\u2705 Done \u00B7 ${fmtDuration(Date.now() - startedAt)}`;
+        const short =
+          fallback.length > 3500 ? fallback.slice(0, 3499) + "\u2026" : fallback;
+        try {
+          const id = await this.notify(short, {
+            loud: true,
+            replyTo: this.turnReplyTo,
+            replyMarkup: this.switchKeyboard(),
+          });
+          if (id !== undefined) this.turnDonePinged = true;
+          else log.warn(`chat ${this.chatId}: Done safety-net notify failed`);
+        } catch (e) {
+          log.warn(`chat ${this.chatId}: Done safety-net error: ${(e as Error).message}`);
+        }
+      }
+      this.turnExpectDone = false;
       this.typing.stop();
       this.streamer = undefined;
       this.capturingQuiet = false;
@@ -1082,7 +1303,8 @@ export class SessionRuntime {
       // messages. The finished streamed bubble keeps its own (frozen) bar.
       this.progress = undefined;
       this.planEntries = undefined;
-      // Prefer stored summary on cards once idle (clear live step if still set).
+      // Idle cards show last user prompt only (clear live step / thinking).
+      this.cardThinking = "";
       if (!this.liveStep || this.sessionComment) this.liveStep = undefined;
       this.changed();
     }
@@ -1096,6 +1318,95 @@ export class SessionRuntime {
     } catch {
       /* non-fatal */
     }
+  }
+
+  /**
+   * Parse telegram JSON actions from the assistant reply, execute them, notify
+   * the user, and queue a results follow-up for the agent when useful.
+   * Returns true when a results prompt was queued (delay Done/recheck).
+   */
+  private async processTelegramBridgeActions(): Promise<boolean> {
+    const { actions, cleaned } = extractTelegramActions(this.turnAssistantText);
+    if (cleaned !== this.turnAssistantText) {
+      this.turnAssistantText = cleaned;
+    }
+    if (actions.length === 0) return false;
+    if (!this.bridge) {
+      log.warn(`chat ${this.chatId}: telegram actions present but bridge not wired`);
+      return false;
+    }
+
+    const botCmds = actions.filter((a) => a.action === "bot_command");
+    // bot_command means Grok ended its turn early to wait on a sibling bot —
+    // this is NOT a Done. Keep busy; status panel live-step only (no chat spam).
+    if (botCmds.length > 0) {
+      const labels = botCmds
+        .map((a) =>
+          a.action === "bot_command" ? `@${a.bot} /${a.command}` : "",
+        )
+        .filter(Boolean)
+        .join(", ");
+      this.setLiveStep(`Waiting for sibling bot: ${labels}`);
+    } else {
+      this.setLiveStep("Running Telegram bridge actions\u2026");
+    }
+    this.changed();
+    log.info(`chat ${this.chatId}: executing ${actions.length} telegram bridge action(s)`);
+
+    const results = await executeTelegramActions(actions, {
+      api: this.api,
+      cfg: this.cfg,
+      chatId: this.chatId,
+      messageThreadId: this.messageThreadId,
+      forum: this.bridge.forum,
+      store: this.bridge.store,
+      bots: this.bridge.bots,
+      submitTopicPrompt: this.bridge.submitTopicPrompt,
+    });
+
+    // Only announce durable side-effects in chat (topic create/bind/cross-prompt).
+    // search_memory / list_bots / bot wait status stay silent — results go to the agent.
+    const durableActions = new Set(["create_topic", "set_path", "send_prompt"]);
+    const notes = results
+      .filter((r) => durableActions.has(r.action) && r.userNote?.trim())
+      .map((r) => r.userNote!)
+      .filter(Boolean);
+    if (notes.length > 0 && this.foreground) {
+      await this.notify(notes.join("\n"), {
+        loud: true,
+        replyTo: this.turnReplyTo,
+      });
+    }
+
+    // Cap chained result turns so a model that re-emits list_bots forever cannot
+    // block Done. Side-effects already ran; user notes were sent above.
+    // Still queue once when we have bot_command errors so the agent can recover.
+    if (this.bridgeResultDepth >= SessionRuntime.BRIDGE_CHAIN_MAX) {
+      log.warn(
+        `chat ${this.chatId}: telegram bridge chain depth ${this.bridgeResultDepth} — not re-queuing results`,
+      );
+      return false;
+    }
+
+    // Feed results back so the agent can use search hits / bot replies / errors.
+    const prompt = buildTelegramBridgeResultsPrompt(
+      results.map((r) => ({
+        action: r.action,
+        ok: r.ok,
+        data: r.data,
+        error: r.error,
+      })),
+    );
+    this.bridgeResultDepth++;
+    this.queue.unshift(
+      textPrompt(prompt, this.turnReplyTo, undefined, {
+        skipSelfRecheck: true,
+        promptId: this.turnPromptId,
+      }),
+    );
+    this.setLiveStep("Feeding sibling-bot / bridge results to the agent\u2026");
+    this.changed();
+    return true;
   }
 
   /**
@@ -1142,7 +1453,12 @@ export class SessionRuntime {
       banner = `\u{1F4A1} Suggestions (auto-running ${auto.length} as one prompt):\n${lines.join("\n")}`;
       // Single queue entry — agent executes 1) 2) 3) in one turn.
       // skipSelfRecheck: auto-follow-ups must not arm another recheck cycle.
-      this.queue.push(textPrompt(batched, this.turnReplyTo, undefined, { skipSelfRecheck: true }));
+      this.queue.push(
+        textPrompt(batched, this.turnReplyTo, undefined, {
+          skipSelfRecheck: true,
+          promptId: this.turnPromptId,
+        }),
+      );
       this.changed();
     } else {
       text += "\n\n\u{1F4A1} Suggestions \u2014 tap one to continue:";
@@ -1211,14 +1527,12 @@ export class SessionRuntime {
   ): Promise<ReturnType<typeof parseSelfRecheckDecision>> {
     if (!this.sessionId) return { needed: false, reason: "no session" };
     const prompt = buildSelfRecheckDecisionPrompt(user, did, filesSummary);
-    this.capturingQuiet = true;
-    this.quietCaptureBuf = "";
     try {
-      await this.acp.prompt(this.sessionId, [{ type: "text", text: prompt }]);
-      return parseSelfRecheckDecision(this.quietCaptureBuf);
-    } finally {
-      this.capturingQuiet = false;
-      this.quietCaptureBuf = "";
+      const raw = await this.runQuietPrompt(prompt);
+      return parseSelfRecheckDecision(raw);
+    } catch (e) {
+      log.debug(`self-recheck decision quiet prompt failed: ${(e as Error).message}`);
+      return { needed: false, reason: "decision prompt failed" };
     }
   }
 
@@ -1233,15 +1547,60 @@ export class SessionRuntime {
     const didParts = [this.preRecheckAssistantText, this.turnAssistantText].filter((s) => s?.trim());
     const did = didParts.join("\n") || this.turnAssistantText;
     const prompt = buildSuggestionsPrompt(user, did);
+    try {
+      const raw = await this.runQuietPrompt(prompt);
+      return parseSuggestions(raw);
+    } catch (e) {
+      log.debug(`suggestions quiet prompt failed: ${(e as Error).message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Run a quiet meta ACP prompt (JSON only) with a hard timeout.
+   * On timeout: session/cancel so the shared agent is not stuck holding the
+   * session (which would block Done forever). Does NOT set this.cancelled
+   * (user /stop is separate). Timed-out / partial capture is discarded.
+   */
+  private async runQuietPrompt(text: string): Promise<string> {
+    if (!this.sessionId) return "";
+    const ms = Math.max(5_000, this.cfg.quietPromptTimeoutMs || 90_000);
     this.capturingQuiet = true;
     this.quietCaptureBuf = "";
+    let timedOut = false;
+    let settled = false;
+    const timer = setTimeout(() => {
+      // Ignore timer if the prompt already settled (avoids discarding a good JSON
+      // reply that finished in the same tick as the timeout).
+      if (settled) return;
+      timedOut = true;
+      log.warn(
+        `chat ${this.chatId}: quiet meta prompt timed out after ${ms}ms — cancelling session prompt`,
+      );
+      // Session-scoped cancel only — never kill the shared agent process.
+      void this.acp.cancel(this.sessionId!);
+    }, ms);
+    let buf = "";
     try {
-      await this.acp.prompt(this.sessionId, [{ type: "text", text: prompt }]);
-      return parseSuggestions(this.quietCaptureBuf);
+      await this.acp.prompt(this.sessionId, [{ type: "text", text }]);
+      settled = true;
+      clearTimeout(timer);
+      buf = this.quietCaptureBuf;
+    } catch (e) {
+      settled = true;
+      clearTimeout(timer);
+      buf = this.quietCaptureBuf;
+      if (!timedOut) throw e;
+      log.debug(`quiet prompt ended after timeout: ${(e as Error).message}`);
     } finally {
+      clearTimeout(timer);
       this.capturingQuiet = false;
       this.quietCaptureBuf = "";
     }
+    // Timed-out meta replies are often half-JSON — skip rather than act on garbage.
+    // If we settled successfully before the timer fired, timedOut stays false.
+    if (timedOut) return "";
+    return buf;
   }
 
   /** Resolve a tapped suggestion button; returns the prompt text or undefined. */
@@ -1548,6 +1907,11 @@ export class SessionRuntime {
       try {
         const updatesBeforePrompt = this.sessionUpdateCount;
         const result = await this.acp.prompt(this.sessionId!, content);
+        // User /stop force-complete or agent honouring session/cancel often
+        // returns cancelled with zero session/update chunks — that is success.
+        if (this.cancelled || result?.stopReason === "cancelled") {
+          return { result: result ?? { stopReason: "cancelled" }, attempts: attempt };
+        }
         // A healthy ACP turn emits at least one session/update (text, thought,
         // or tool event) before resolving session/prompt. Grok can otherwise
         // report a successful end-turn after an upstream model failure; never
@@ -1763,12 +2127,13 @@ export class SessionRuntime {
   }
 
   /** Searchable Telegram hashtags so you can pull up every message of a session
-   *  or project by tapping the tag. */
+   *  or project (and this turn's prompt) by tapping the tag. */
   private hashtags(): string {
     return sessionHashtags({
       projectName: this.projectName,
       cwd: this.cwd,
       sessionId: this.sessionId,
+      promptId: this.turnPromptId,
     });
   }
 
@@ -1780,11 +2145,17 @@ export class SessionRuntime {
     const head = this.queue[0]!;
     const isMeta =
       !!head.skipSelfRecheck ||
-      isSelfRecheckPrompt(head.text);
+      isSelfRecheckPrompt(head.text) ||
+      isTelegramBridgeResultsPrompt(head.text);
     const batch = isMeta
       ? this.queue.shift()!
       : mergeInputs(this.queue.splice(0, this.queue.length));
-    if (this.foreground) await this.notify("\u25B6\uFE0F Processing queued message\u2026");
+    // Real user follow-ups only — never spam chat for bridge/recheck meta turns.
+    if (this.foreground && !isMeta) {
+      await this.notify("\u25B6\uFE0F Processing queued message\u2026", {
+        replyTo: batch.replyTo,
+      });
+    }
     void this.runTurn(batch);
   }
 
@@ -1831,7 +2202,10 @@ export class SessionRuntime {
       }
     } else if (kind === "agent_thought_chunk") {
       const text = contentText(update.content);
-      if (text?.trim()) this.setLiveStep(stepFromThought(text));
+      if (text?.trim()) {
+        this.appendCardThinking(text);
+        this.setLiveStep(stepFromThought(text));
+      }
     } else if (kind === "plan") {
       // Always track plan entries (background too) so switch-to-live restores the board.
       const entries = parsePlanUpdate(update);
@@ -1929,21 +2303,61 @@ export class SessionRuntime {
     }
   }
 
+  /**
+   * Send a chat message. Returns Telegram message_id on success.
+   * On failure, retries once truncated (~3500) without reply_markup so a long
+   * Done / markup error cannot silently drop the completion ping.
+   */
   private async notify(
     text: string,
     opts?: { loud?: boolean; replyTo?: number; replyMarkup?: InlineKeyboard },
-  ): Promise<void> {
-    try {
-      const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
-      if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
-      if (opts?.replyTo !== undefined) {
-        extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
+  ): Promise<number | undefined> {
+    const send = async (body: string, withMarkup: boolean): Promise<number | undefined> => {
+      try {
+        const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
+        if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
+        if (opts?.replyTo !== undefined) {
+          extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
+        }
+        if (withMarkup && opts?.replyMarkup) extra.reply_markup = opts.replyMarkup;
+        const msg = await this.api.sendMessage(this.chatId, body, extra);
+        return msg.message_id;
+      } catch (e) {
+        log.debug("notify failed:", (e as Error).message);
+        return undefined;
       }
-      if (opts?.replyMarkup) extra.reply_markup = opts.replyMarkup;
-      await this.api.sendMessage(this.chatId, text, extra);
-    } catch (e) {
-      log.debug("notify failed:", (e as Error).message);
+    };
+    const id = await send(text, true);
+    if (id !== undefined) return id;
+    const short = text.length > 3500 ? text.slice(0, 3499) + "\u2026" : text;
+    return send(short, false);
+  }
+
+  /**
+   * After Done was already sent, attach suggestion text + buttons by editing
+   * that message (or sending a follow-up if edit fails / no message id).
+   */
+  private async enhanceDoneMessage(
+    messageId: number | undefined,
+    text: string,
+    markup: InlineKeyboard | undefined,
+  ): Promise<void> {
+    if (messageId !== undefined) {
+      try {
+        const extra: Record<string, unknown> = {};
+        if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
+        if (markup) extra.reply_markup = markup;
+        await this.api.editMessageText(this.chatId, messageId, text, extra);
+        return;
+      } catch (e) {
+        log.debug("enhanceDoneMessage edit failed:", (e as Error).message);
+      }
     }
+    await this.notify(text, {
+      loud: false,
+      replyTo: this.turnReplyTo,
+      replyMarkup: markup,
+    });
   }
 
   private async onWatchEntries(entries: HistoryEntry[]): Promise<void> {

@@ -1,7 +1,7 @@
 /**
  * Split a MarkdownV2 string into Telegram-sized chunks (<= 4096 chars) without
- * breaking code fences. If a split happens inside a ``` block, the block is
- * closed before the boundary and reopened in the next chunk.
+ * breaking code fences. If a split happens inside a fenced block, the block is
+ * closed before the boundary and reopened in the next chunk (same tick length).
  */
 const LIMIT = 4000; // headroom under Telegram's 4096 hard limit
 
@@ -12,18 +12,19 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
   const chunks: string[] = [];
   let current: string[] = [];
   let size = 0;
-  let fenceLang: string | null = null; // non-null => currently inside a fence
+  /** Open fence: tick count + optional lang; null when outside a fence. */
+  let openFence: { ticks: number; lang: string } | null = null;
 
   const flush = (): void => {
     if (current.length === 0) return;
     let body = current.join("\n");
-    if (fenceLang !== null) body += "\n```"; // close dangling fence
+    if (openFence) body += "\n" + "`".repeat(openFence.ticks); // close dangling fence
     chunks.push(body);
     current = [];
     size = 0;
-    if (fenceLang !== null) {
-      // Reopen the fence at the top of the next chunk.
-      const reopen = "```" + fenceLang;
+    if (openFence) {
+      // Reopen the fence at the top of the next chunk (preserve tick length).
+      const reopen = "`".repeat(openFence.ticks) + openFence.lang;
       current.push(reopen);
       size = reopen.length + 1;
     }
@@ -31,9 +32,9 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
 
   for (const rawLine of lines) {
     const line = rawLine;
-    const fenceMatch = /^```(.*)$/.exec(line);
+    const fenceMatch = /^(```+)(.*)$/.exec(line);
 
-    // Hard-split a single oversized line.
+    // Hard-split a single oversized line (never mid-fence marker line).
     if (line.length + 1 > limit && fenceMatch === null) {
       flush();
       for (let i = 0; i < line.length; i += limit) {
@@ -48,7 +49,13 @@ export function chunkMarkdown(text: string, limit = LIMIT): string[] {
     size += line.length + 1;
 
     if (fenceMatch) {
-      fenceLang = fenceLang === null ? (fenceMatch[1] ?? "").trim() : null;
+      const ticks = fenceMatch[1]!.length;
+      const lang = (fenceMatch[2] ?? "").trim();
+      if (!openFence) {
+        openFence = { ticks, lang };
+      } else if (ticks >= openFence.ticks) {
+        openFence = null;
+      }
     }
   }
 

@@ -1,7 +1,7 @@
 /**
  * Session "comment" shown on Running / Sessions cards:
- *   • while busy  — current step (tool / thinking / working on …)
- *   • when idle   — what the last turn solved (assistant result + files)
+ *   • always     — last user prompt (≤ COMMENT_MAX)
+ *   • while busy — also last AI agent thinking (≤ COMMENT_MAX), second line
  *
  * Built only from data already in the turn — no extra agent prompt (those
  * leaked into chat/history). Display-only; never truncates agent context.
@@ -18,8 +18,8 @@ import {
 } from "./tool-call-detail.js";
 import type { FileOp } from "./file-summary.js";
 
-/** Max length of a card comment line (room for a real one-sentence outcome). */
-export const COMMENT_MAX = 200;
+/** Max length of each card comment line (user prompt or thinking). */
+export const COMMENT_MAX = 250;
 
 /**
  * Legacy marker for the removed silent AI card-summary prompt. Kept only so
@@ -55,13 +55,24 @@ export function stripDirectiveWrappers(raw: string): string {
   const marker = "User's new message:";
   const i = t.lastIndexOf(marker);
   if (i !== -1) t = t.slice(i + marker.length);
-  t = t.replace(/^TASK COMPLEXITY:[\s\S]*?User task:\s*/i, "");
-  t = t.replace(/^COMPLEXITY \(decide yourself[\s\S]*?User task:\s*/i, "");
+  // Continued marker first — it contains the substring "User task:".
+  const cont = "User task (continued):";
+  const ci = t.lastIndexOf(cont);
+  if (ci !== -1) {
+    t = t.slice(ci + cont.length);
+  } else {
+    t = t.replace(/^TASK COMPLEXITY:[\s\S]*?User task:\s*/i, "");
+    t = t.replace(/^COMPLEXITY \(decide yourself[\s\S]*?User task:\s*/i, "");
+    if (/TELEGRAM BRIDGE \(how to work/i.test(t)) {
+      t = t.replace(/TELEGRAM BRIDGE \(how to work[\s\S]*?(?=\n\n[A-Za-z]|$)/i, "");
+    }
+  }
+  if (/^TELEGRAM BRIDGE RESULTS \(system/i.test(t.trim())) t = "";
   return t.trim();
 }
 
 /** Strip bot directives so a user prompt is card-friendly. */
-export function cleanUserPreview(raw: string, max = 80): string {
+export function cleanUserPreview(raw: string, max = COMMENT_MAX): string {
   let t = stripDirectiveWrappers(raw);
   // Import confirm prompts are noise on cards.
   if (/session import complete/i.test(t)) return "";
@@ -69,7 +80,53 @@ export function cleanUserPreview(raw: string, max = 80): string {
   if (/^SELF-RECHECK \(automatic quality pass/i.test(t)) return "Self-recheck";
   if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t)) return "";
   if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t)) return "";
+  if (/^TELEGRAM BRIDGE RESULTS \(system/i.test(t)) return "Telegram bridge";
   return cleanCommentLine(t, max);
+}
+
+/**
+ * Format the session-card comment body:
+ *   idle  → last user prompt (≤ max)
+ *   busy  → user prompt + last agent thinking on the next line (each ≤ max)
+ *
+ * Returns "" when neither line has content. Caller adds icons per line.
+ */
+export function buildSessionCardComment(opts: {
+  userPrompt?: string;
+  thinking?: string;
+  busy?: boolean;
+  max?: number;
+}): string {
+  const max = opts.max ?? COMMENT_MAX;
+  const user = opts.userPrompt?.trim()
+    ? cleanUserPreview(opts.userPrompt, max)
+    : "";
+  const thinkRaw = opts.busy && opts.thinking?.trim() ? opts.thinking.trim() : "";
+  const thinking = thinkRaw ? clampThinking(thinkRaw, max) : "";
+
+  if (user && thinking) return `${user}\n${thinking}`;
+  if (user) return user;
+  if (thinking) return thinking;
+  return "";
+}
+
+/**
+ * Prefer the latest portion of accumulated thought text (streaming chunks
+ * append; conclusions land at the end). Collapse whitespace and clamp.
+ */
+export function clampThinking(raw: string, max = COMMENT_MAX): string {
+  let t = extractProgress(raw).cleaned;
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  if (t.length <= max) return t;
+  // Prefer the ending (most recent thinking).
+  if (t.length > max + 40) {
+    const tail = t.slice(-(max - 1));
+    const sp = tail.indexOf(" ");
+    return "\u2026" + (sp > 0 && sp < 40 ? tail.slice(sp + 1) : tail);
+  }
+  return t.slice(0, max - 1) + "\u2026";
 }
 
 /**

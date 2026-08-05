@@ -7,7 +7,7 @@ import { type Bot, type Context, InlineKeyboard } from "grammy";
 import type { RunningSession, SwitchResult } from "../chat-controller.js";
 import type { BotDeps } from "../deps.js";
 import type { HistoryEntry } from "../../sessions/types.js";
-import { jsonlMtimeMs, readFirstPrompt, readLastCardSummary } from "../../sessions/history.js";
+import { jsonlMtimeMs, readFirstPrompt, readLastUserPrompt } from "../../sessions/history.js";
 import { progressBar } from "../../render/progress.js";
 import { refreshMenu } from "../menu/refresh.js";
 import { sendMarkdownDoc } from "../telegram-io.js";
@@ -51,47 +51,49 @@ function cleanPrompt(raw: string): string {
 /** Build a rich card (plain text, no MarkdownV2) + buttons for one controlled
  *  session: Switch / History / Close.
  *
- *  The comment line always answers "what is happening / what was solved":
- *    busy  → live current step (tool / thinking / working on …)
- *    idle  → last-turn outcome (assistant result + files), never bare import noise
+ *  Comment:
+ *    always — last user prompt (≤250)
+ *    busy   — plus last AI agent thinking on the next line (≤250)
  */
 function buildRunningCard(s: RunningSession, deps: BotDeps, now: number): { text: string; kb: InlineKeyboard } {
   const dot = s.foreground ? "\u25B6\uFE0F" : s.busy ? "\u{1F7E0}" : "\u26AA";
   const state = s.foreground ? "foreground" : s.busy ? "working" : "idle";
 
   let when = "new";
-  let historySummary = "";
+  let lastUser = "";
   let firstPrompt = "";
   if (s.sessionId) {
     const path = deps.store.jsonlPath(s.sessionId);
     const mtime = jsonlMtimeMs(path);
     if (mtime) when = timeAgo(now - mtime);
-    // Last assistant outcome beats first-prompt import-confirm noise.
-    historySummary = readLastCardSummary(path);
+    lastUser = readLastUserPrompt(path, 40, 250);
     firstPrompt = cleanPrompt(readFirstPrompt(path));
     if (/session import complete/i.test(firstPrompt)) firstPrompt = "";
   }
 
   const diskComment = s.sessionId ? deps.store.get(s.sessionId)?.comment?.trim() : undefined;
-  // Order: live runtime comment → persisted last-turn summary → history tail → first prompt.
+  // Order: live runtime (user + thinking) → last user from history → disk → first prompt.
   const comment =
     (s.comment && s.comment.trim()) ||
+    lastUser ||
     diskComment ||
-    historySummary ||
     firstPrompt;
 
   const meta = [when, state];
   if (s.busy) meta.push("\u23F3");
   if (s.unread > 0) meta.push(`${s.unread} \u{1F4EC} unread`);
 
-  const commentLabel = s.busy ? "\u23F3" : "\u{1F4AC}";
-  const lines = [
-    `${dot} ${s.projectName}`,
-    comment
-      ? `${commentLabel} ${trunc(comment, 200)}`
-      : "\u{1F4AC} (no messages yet)",
-    `\u{1F552} ${meta.join(" \u00B7 ")}`,
-  ];
+  const lines = [`${dot} ${s.projectName}`];
+  if (comment) {
+    const parts = comment.split("\n").map((l) => l.trim()).filter(Boolean);
+    parts.forEach((part, i) => {
+      const icon = i === 0 ? (s.busy ? "\u23F3" : "\u{1F4AC}") : "\u{1F9E0}";
+      lines.push(`${icon} ${trunc(part, 250)}`);
+    });
+  } else {
+    lines.push("\u{1F4AC} (no messages yet)");
+  }
+  lines.push(`\u{1F552} ${meta.join(" \u00B7 ")}`);
   if (s.progress !== undefined) lines.push(`\u{1F4C8} ${progressBar(s.progress)}`);
   if (s.sessionId) lines.push(`\u{1F194} ${s.sessionId.slice(0, 8)}`);
 

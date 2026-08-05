@@ -225,7 +225,13 @@ interface Pending {
   reject: (e: Error) => void;
   cleanup: () => void;
   method: string;
+  /** Set for in-flight `session/prompt` so cancel can target one session only. */
+  sessionId?: string;
 }
+
+/** How long we wait for the agent to honour `session/cancel` before force-completing
+ *  that session's prompt locally (other sessions are never touched). */
+export const CANCEL_FORCE_MS = 2_000;
 
 export declare interface GrokClient {
   on(e: "session-update", l: (sessionId: string, update: SessionUpdate) => void): this;
@@ -258,6 +264,10 @@ export class GrokClient extends EventEmitter {
   private readonly cwd = new Map<string, string>();
   /** Sessions with an in-flight prompt (drives "active"). */
   private readonly running = new Set<string>();
+  /** In-flight prompt request id per session (at most one prompt per session). */
+  private readonly promptReqBySession = new Map<string, number | string>();
+  /** Timers that force-complete a cancelled prompt if the agent is slow. */
+  private readonly cancelForceTimers = new Map<string, NodeJS.Timeout>();
   /** Accumulated assistant text per in-flight turn (flushed to the log on end). */
   private readonly assistantBuf = new Map<string, string>();
   private authMethodId?: string;
@@ -272,6 +282,12 @@ export class GrokClient extends EventEmitter {
   private subagents: SubagentInfo[] = [];
   private pendingStages: PendingStage[] = [];
   permissionHandler?: (params: RequestPermissionParams) => Promise<PermissionOutcome>;
+  /**
+   * Optional hook when a session is user-cancelled (e.g. cancel pending
+   * interactive permission prompts for that session — ACP requires cancelled
+   * outcomes). Must never kill the agent process.
+   */
+  onSessionCancel?: (sessionId: string) => void;
 
   constructor(private readonly opts: GrokClientOptions) {
     super();
@@ -440,8 +456,26 @@ export class GrokClient extends EventEmitter {
     return new Promise<PromptResult>((resolve, reject) => {
       const id = this.nextId++;
       const start = Date.now();
+      // Single-settlement guard: force-cancel, agent response, idle/max timeout,
+      // and failAllPending must never double-resolve/reject this promise.
+      let settled = false;
+      const settleResolve = (v: unknown): void => {
+        if (settled) return;
+        settled = true;
+        this.pending.delete(id);
+        this.finishPrompt(sessionId, id);
+        resolve(v as PromptResult);
+      };
+      const settleReject = (e: Error): void => {
+        if (settled) return;
+        settled = true;
+        this.pending.delete(id);
+        this.finishPrompt(sessionId, id);
+        reject(e);
+      };
       this.lastActivity.set(sessionId, start);
       this.running.add(sessionId);
+      this.promptReqBySession.set(sessionId, id);
       if (this.proc?.pid) this.slog.lock(sessionId, this.proc.pid);
       const userText = this.cleanUserText(content);
       this.slog.logUser(sessionId, userText);
@@ -451,48 +485,47 @@ export class GrokClient extends EventEmitter {
         if (title) this.slog.update(sessionId, { title });
       }
       const watch = setInterval(() => {
+        if (settled) {
+          clearInterval(watch);
+          return;
+        }
         const last = Math.max(this.lastActivity.get(sessionId) ?? start, this.lastActivityAny);
         const idle = Date.now() - last;
         const total = Date.now() - start;
         if (total > this.promptMaxMs) {
-          this.pending.delete(id);
-          this.finishPrompt(sessionId, id);
           clearInterval(watch);
+          // Settle first so cancel()'s force-complete no-ops (prompt already
+          // gone). Still notify the agent — never kill the shared process.
+          settleReject(new Error(`Prompt exceeded the ${Math.round(this.promptMaxMs / 60_000)}min cap`));
           void this.cancel(sessionId);
-          reject(new Error(`Prompt exceeded the ${Math.round(this.promptMaxMs / 60_000)}min cap`));
         } else if (idle > this.promptIdleMs) {
-          this.pending.delete(id);
-          this.finishPrompt(sessionId, id);
           clearInterval(watch);
+          settleReject(new Error(`No agent activity for ${Math.round(idle / 1000)}s — giving up`));
           void this.cancel(sessionId);
-          reject(new Error(`No agent activity for ${Math.round(idle / 1000)}s — giving up`));
         }
       }, 15_000);
       this.pending.set(id, {
-        resolve: (v) => {
-          this.finishPrompt(sessionId, id);
-          resolve(v as PromptResult);
-        },
-        reject: (e) => {
-          this.finishPrompt(sessionId, id);
-          reject(e);
-        },
+        resolve: settleResolve,
+        reject: settleReject,
         cleanup: () => clearInterval(watch),
         method: "session/prompt",
+        sessionId,
       });
       try {
         this.transport!.send({ jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId, prompt: content } });
       } catch (e) {
         clearInterval(watch);
-        this.pending.delete(id);
-        this.finishPrompt(sessionId, id);
-        reject(e as Error);
+        settleReject(e as Error);
       }
     });
   }
 
   /** Clear the running/lock state for a finished turn and flush its transcript. */
-  private finishPrompt(sessionId: string, _id: number): void {
+  private finishPrompt(sessionId: string, id: number | string): void {
+    this.clearCancelForce(sessionId);
+    if (this.promptReqBySession.get(sessionId) === id) {
+      this.promptReqBySession.delete(sessionId);
+    }
     this.running.delete(sessionId);
     this.slog.unlock(sessionId);
     const buf = this.assistantBuf.get(sessionId);
@@ -500,12 +533,68 @@ export class GrokClient extends EventEmitter {
     this.assistantBuf.delete(sessionId);
   }
 
+  /**
+   * Cancel one session's in-flight turn only.
+   *
+   * - Sends ACP `session/cancel` (agent should respond with stopReason cancelled).
+   * - Notifies permission layer so pending interactive prompts get `cancelled`.
+   * - If the agent is slow/hung, force-completes **that session's** pending
+   *   prompt after {@link CANCEL_FORCE_MS} with `stopReason: "cancelled"`.
+   * - Never kills the shared agent process (that would stop every multiplexed
+   *   chat and look like "the bot died").
+   */
   async cancel(sessionId: string): Promise<void> {
+    try {
+      this.onSessionCancel?.(sessionId);
+    } catch (e) {
+      log.debug("onSessionCancel failed:", (e as Error).message);
+    }
     try {
       this.transport?.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
     } catch (e) {
-      log.debug("cancel failed:", (e as Error).message);
+      log.debug("cancel notify failed:", (e as Error).message);
     }
+    // Soft cancel only — do not killCurrent/stop. Schedule a session-scoped
+    // force-complete so a stuck agent cannot leave this chat busy forever.
+    this.scheduleCancelForce(sessionId);
+  }
+
+  private clearCancelForce(sessionId: string): void {
+    const t = this.cancelForceTimers.get(sessionId);
+    if (t) {
+      clearTimeout(t);
+      this.cancelForceTimers.delete(sessionId);
+    }
+  }
+
+  private scheduleCancelForce(sessionId: string): void {
+    this.clearCancelForce(sessionId);
+    if (!this.promptReqBySession.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.cancelForceTimers.delete(sessionId);
+      this.forceCompleteCancelledPrompt(sessionId);
+    }, CANCEL_FORCE_MS);
+    // Don't keep the process alive solely for cancel force timers.
+    timer.unref?.();
+    this.cancelForceTimers.set(sessionId, timer);
+  }
+
+  /**
+   * Resolve a still-pending prompt for `sessionId` as cancelled. Other sessions'
+   * pending requests are left alone. Safe to call when nothing is pending.
+   * Idempotent: if the prompt already settled (agent responded, idle timeout,
+   * failAllPending), returns false without double-settling.
+   */
+  forceCompleteCancelledPrompt(sessionId: string): boolean {
+    const id = this.promptReqBySession.get(sessionId);
+    if (id === undefined) return false;
+    const p = this.pending.get(id);
+    if (!p || p.method !== "session/prompt" || p.sessionId !== sessionId) return false;
+    log.info(`force-completing cancelled prompt for session ${sessionId.slice(0, 8)} (agent slow or ignored cancel)`);
+    p.cleanup();
+    // settleResolve deletes pending + finishPrompt (single-settlement).
+    p.resolve({ stopReason: "cancelled" } satisfies PromptResult);
+    return true;
   }
 
   async setModel(sessionId: string, modelId: string): Promise<void> {
@@ -644,6 +733,8 @@ export class GrokClient extends EventEmitter {
     if (msg.id !== undefined && msg.id !== null && this.pending.has(msg.id) && msg.method === undefined) {
       const p = this.pending.get(msg.id)!;
       p.cleanup();
+      // Prompt settleResolve/settleReject also delete pending; generic request
+      // pending still needs delete here. Double-delete is a no-op on Map.
       this.pending.delete(msg.id);
       if (msg.error) p.reject(this.toGrokError(msg.error, p.method));
       else p.resolve(msg.result);
@@ -781,12 +872,17 @@ export class GrokClient extends EventEmitter {
   }
 
   private failAllPending(err: Error): void {
-    for (const [, p] of this.pending) {
+    for (const t of this.cancelForceTimers.values()) clearTimeout(t);
+    this.cancelForceTimers.clear();
+    // Snapshot first: prompt settleReject deletes from pending while iterating.
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of pending) {
       p.cleanup();
       p.reject(err);
     }
-    this.pending.clear();
     this.running.clear();
+    this.promptReqBySession.clear();
   }
 
   private visibleText(content: ContentBlock[]): string {
@@ -810,20 +906,26 @@ export class GrokClient extends EventEmitter {
     const marker = "User's new message:\n";
     const mi = t.lastIndexOf(marker);
     if (mi !== -1) t = t.slice(mi + marker.length);
-    // Strip auto-complexity steering (and legacy forced-complex wrapper).
-    const taskMarker = "User task:";
-    const ti = t.lastIndexOf(taskMarker);
-    if (
-      ti !== -1 &&
-      (/^COMPLEXITY \(decide yourself/i.test(t) || /^TASK COMPLEXITY:/i.test(t))
+    // Prefer "User task (continued):" before plain "User task:" (continued
+    // contains that substring — lastIndexOf would leave "(continued):…").
+    const cont = "User task (continued):";
+    const ci = t.lastIndexOf(cont);
+    if (ci !== -1) {
+      t = t.slice(ci + cont.length);
+    } else if (
+      /^COMPLEXITY \(decide yourself/i.test(t) ||
+      /^TASK COMPLEXITY:/i.test(t)
     ) {
-      t = t.slice(ti + taskMarker.length);
+      const taskMarker = "User task:";
+      const ti = t.indexOf(taskMarker);
+      if (ti !== -1) t = t.slice(ti + taskMarker.length);
     }
     // Never persist quiet meta-prompts as a user message title.
     if (/^Session status update \(meta only\)/i.test(t.trim())) t = "";
     if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t.trim())) t = "";
     if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t.trim())) t = "";
     if (/^SELF-RECHECK \(automatic quality pass/i.test(t.trim())) t = "";
+    if (/^TELEGRAM BRIDGE RESULTS \(system/i.test(t.trim())) t = "";
     t = t.replace(/^\([^\n)]*\)\s*\n+/, "");
     return t.trim();
   }

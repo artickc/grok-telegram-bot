@@ -7,7 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The latest section is published verbatim as the GitHub Release notes by
 `.github/workflows/release.yml` when a `vX.Y.Z` tag is pushed.
 
-## [Unreleased]
+## [2.5.0] - 2026-08-05
+
+Forum project topics, cross-topic Telegram bridge, prompt anchors, and a more
+reliable Done / stop path for multi-topic groups.
 
 ### Added
 
@@ -16,6 +19,112 @@ The latest section is published verbatim as the GitHub Release notes by
   topic per catalog project (`TOPIC_AUTO_CREATE`), favicon/MSIX logo discovery
   pinned in the topic, and path-binding when users create new topics. Messages
   in a topic run sessions in that project path.
+- **Telegram bridge actions (agent JSON).** On the first prompt of a session the
+  bot injects how-to-work memory: the agent may emit a fenced `json` block with
+  `"telegram": [ actions ]` to create forum topics, search session/topic memory,
+  list allowlisted sibling bots, and call them via `/cmd@bot` (MCP-like). Results
+  are fed back as a quiet follow-up turn (not a Done). Configure bots with
+  `ALLOWED_TELEGRAM_BOTS`, optional `TELEGRAM_BOT_COMMANDS` catalogs, reply
+  timeout / settle (`TELEGRAM_BOT_REPLY_TIMEOUT_MS`, `TELEGRAM_BOT_SETTLE_MS`).
+  Sibling-bot waits only accept content from the triggered bot (prefer reply-to
+  our trigger), collect edits until idle, and timeouts continue the session.
+  Bridge plumbing stays out of the chat (no “continuing session” / queue spam);
+  only durable side-effects like topic creation are announced.
+- **Cross-topic bridge actions.** From General / AI Chat (`GROK_WORKSPACE`), the
+  agent can orchestrate other forum topics via telegram JSON:
+  - `create_topic` with optional path
+  - **`set_path`** — bind/rebind a topic to an absolute path or exact catalog name
+  - **`send_prompt`** — inject a prompt into another topic’s session (`ran`/`queued`;
+    does not wait for that turn). Optional `new_session`.
+  Multiple actions run in order (cap **9**; up to **5** `send_prompt` per turn).
+  **New project paths:** agent `create_topic` / `set_path` with an absolute path
+  that does not exist yet **creates the folder** on disk, then binds the topic.
+- **New session on the persistent bar + `/new`.** Private chat: bar is
+  ☰ Menu · 🆕 New session / 🧭 Running · ⏹ Stop (not the inline Menu message).
+  Slash command `/new` (Telegram command list) starts a fresh session. Forum
+  topics keep New on the topic inline menu because reply keyboards are unreliable.
+- **Instant command feedback.** Slash commands and bar taps are deleted
+  immediately; handlers post bot status messages (e.g. `/new` →
+  “Creating new session…”) so the chat feels alive while the CLI/ACP starts.
+- **Prompt anchors + `#prompt_<id>`.** User prompts (text, photos, docs, voice,
+  `/btw`, suggestion taps) are re-posted as bot messages with a searchable
+  `#prompt_` tag; the originals are best-effort deleted. Photos, documents, and
+  voice/audio are re-attached on the anchor via Telegram `file_id` so media is
+  not lost when the user message is removed. All AI stream bubbles, Done/error
+  notices, and queue acks for that turn reply to the anchor and carry the same
+  tag (alongside `#proj_` / `#sess_`).
+
+### Changed
+
+- **Session card comments.** Cards (`/running`, `/sessions`, `/active`, status
+  panel) now show the **last user prompt** (max 250 chars). While a session is
+  running, a second line shows the **last AI agent thinking** (max 250). Idle
+  cards no longer use last-turn assistant outcome summaries as the comment.
+- **Stronger self-recheck prompts.** Decision + default recheck briefs now push
+  production-related completeness for the same feature (e.g. water→waves,
+  auth→rate limits), **finish-all** (no “still need…” / incomplete honest
+  leftovers that force critical follow-up buttons), and a required **per-bug
+  recheck checklist** at the end of the pass. Compose always injects those
+  rules when an AI brief looks complete (headers only) but omitted them.
+  `/new`, bar **New**, and inline **New** share the same success copy.
+
+### Fixed
+
+- **Missing `✅ Done` after a turn.** Done no longer waits on suggestion JSON
+  (send Done first, then attach buttons). Quiet meta prompts (recheck decision
+  + suggestions) use `QUIET_PROMPT_TIMEOUT_MS` (default 90s) and cancel the
+  session prompt on timeout so a hung meta call cannot block Done forever
+  (does not set user-cancelled / does not kill the agent). Chat shows
+  “Checking if a quality pass is needed…” while deciding recheck. Done text is
+  rebuilt after that wait so `/stop` mid-decision shows ⏹ Stopped. `notify`
+  retries truncated/plain text if the first send fails; a finally safety net
+  forces a short Done when one was expected but never delivered.
+- **`/stop` / `/cancel` must not kill the bot or other sessions.** Stop is
+  session-scoped only: soft ACP `session/cancel`, cancel pending permissions
+  for that session, and force-complete that session’s in-flight prompt after a
+  short grace if the agent is slow — **never** kill the shared `grok agent`
+  process (which multiplexes every chat/topic). `killPid` also refuses to
+  target the bot’s own Node process.
+- **`grok-tg install|start|restart` hang on Windows.** The service VBS is a
+  forever-restart loop (`Run …, True` waits for the bot). Launching it with
+  `execFileSync` made the CLI wait forever. Startup launches now use detached
+  `spawn` so the CLI returns immediately.
+- **No silent process death.** Exit paths always log reason + code to stderr/file;
+  instance-lock conflict uses exit 1; polling classifies 429/409/401/network with
+  backoff; interactive runs recover in-process (no detach re-exec that blanks the
+  terminal); ref'd keepalive every 5m; `beforeExit` keeps the process up if the
+  event loop empties unexpectedly. Updater re-exec inherits TTY stdio.
+- **Markdown / tool path rendering.** File paths in tool cards (Edit/Read/…) are
+  no longer wrapped in bold (Windows `C:\…` paths broke MarkdownV2 and fell
+  back to plain text that clients soft-render as `**Edit C:**`). Paths use
+  inline code; plain fallback demotes `**`/fences so soft-render cannot mangle
+  them. Chunked fences preserve tick length when reopening.
+- **Group / topic stop controls.** Forum topic menu leads with **Stop** + Running;
+  `/cancel` and `/stop` work in topics; group slash-command menu is a short,
+  sorted list with cancel first (private keeps the full sorted catalog). Stop
+  confirms in-thread (not only a toast).
+- **Forum topic bind: exact name only.** New user topics auto-bind when the
+  topic title exactly matches a catalog project (case-insensitive). Path prompts
+  and first messages no longer use fuzzy/partial project search (which could
+  bind the wrong folder). Unmatched topics still accept an absolute path or an
+  exact catalog name.
+- **Forum bulk topic create.** Startup/`/forum_setup` walks the **full** project
+  catalog (not a 200-item cap), paces creates, and retries on Telegram 429
+  (`retry_after`) and transient network errors so large catalogs (1000+) can
+  finish reliably across restarts.
+- **Forum group readiness.** Setup probes the configured group: if the bot is
+  not admin (or lacks Manage Topics), the group is **ignored** for topic
+  features. If Topics are off, the bot best-effort tries to enable them (no
+  official Bot API method today), otherwise ignores the group with a clear
+  status. Re-probes on promotion via `my_chat_member`; `/forum_setup` reports
+  ready vs disabled reason.
+
+### Docs
+
+- **README** updated for forum topics, bridge, prompt anchors, suggestions,
+  self-recheck, and related config.
+- **[docs/GROUP.md](./docs/GROUP.md)** — how to set up and use a forum project
+  group (binding, bridge actions, access control, troubleshooting).
 
 ## [2.4.0] - 2026-08-01
 
@@ -822,6 +931,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.5.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.5.0
 [2.4.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.4.0
 [2.3.1]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.1
 [2.3.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.3.0

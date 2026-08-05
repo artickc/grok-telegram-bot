@@ -3,8 +3,11 @@ import { test } from "node:test";
 import {
   buildLastTurnSummary,
   buildLocalTurnComment,
+  buildSessionCardComment,
   cleanCommentLine,
   cleanUserPreview,
+  clampThinking,
+  COMMENT_MAX,
   extractResultSnippet,
   formatFilesPhrase,
   stepFromThought,
@@ -109,4 +112,53 @@ test("stepFromThought prefixes Thinking", () => {
 test("buildLocalTurnComment alias still works", () => {
   assert.equal(buildLocalTurnComment({ fileOps: new Map(), cancelled: true }), "Stopped by user");
   assert.ok(buildLocalTurnComment({ fileOps: new Map(), error: "boom" }).includes("boom"));
+});
+
+test("COMMENT_MAX is 250", () => {
+  assert.equal(COMMENT_MAX, 250);
+});
+
+test("buildSessionCardComment idle is user prompt only", () => {
+  const s = buildSessionCardComment({
+    userPrompt: "make session cards show last user prompt",
+    thinking: "I will read session-card.ts",
+    busy: false,
+  });
+  assert.equal(s, "make session cards show last user prompt");
+  assert.ok(!s.includes("session-card"));
+});
+
+test("buildSessionCardComment busy adds thinking on second line", () => {
+  const s = buildSessionCardComment({
+    userPrompt: "fix the cards",
+    thinking: "Investigating session-runtime cardComment getter",
+    busy: true,
+  });
+  const lines = s.split("\n");
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0]!.includes("fix the cards"));
+  assert.ok(lines[1]!.toLowerCase().includes("investigating") || lines[1]!.includes("cardComment"));
+});
+
+test("buildSessionCardComment clamps each line to 250", () => {
+  const longUser = "u".repeat(400);
+  const longThink = "t".repeat(400);
+  const s = buildSessionCardComment({ userPrompt: longUser, thinking: longThink, busy: true });
+  const lines = s.split("\n");
+  assert.ok(lines[0]!.length <= 250);
+  assert.ok(lines[1]!.length <= 250);
+});
+
+test("clampThinking prefers the ending", () => {
+  const raw = "start noise ".repeat(30) + "final conclusion about the bug fix";
+  const t = clampThinking(raw, 40);
+  assert.ok(t.length <= 40);
+  assert.ok(t.includes("bug") || t.includes("fix") || t.includes("conclusion") || t.startsWith("\u2026"));
+});
+
+test("buildSessionCardComment strips complexity wrappers from user line", () => {
+  const raw =
+    "COMPLEXITY (decide yourself — never ask the user):\n...\nUser task:\nadd password reset";
+  const s = buildSessionCardComment({ userPrompt: raw, busy: false });
+  assert.equal(s, "add password reset");
 });
