@@ -46,7 +46,9 @@ import { StatusPanel } from "./menu/status-panel.js";
 import { sendMarkdownDoc } from "./telegram-io.js";
 import { Ephemeral } from "./menu/ephemeral.js";
 import { BAR_LABELS } from "./menu/keyboard.js";
+import { AskUserService } from "./ask-user-service.js";
 import { PermissionService } from "./permission-service.js";
+import { PlanExitService } from "./plan-exit-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
 
@@ -134,29 +136,14 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
   acp.permissionHandler = (p) => permissions.handle(p);
-  // exit_plan_mode reverse-request: auto-approve by default (same policy as tools).
-  // Without this, Grok reports "client disconnected" and stays stuck in plan mode.
-  acp.planExitHandler = async ({ params }) => {
-    const sessionId =
-      (typeof params.sessionId === "string" && params.sessionId) ||
-      (typeof params.session_id === "string" && params.session_id) ||
-      "";
-    const planText =
-      (typeof params.plan_content === "string" && params.plan_content) ||
-      (typeof params.planContent === "string" && params.planContent) ||
-      (typeof params.content === "string" && params.content) ||
-      "";
-    const preview = planText.replace(/\s+/g, " ").trim().slice(0, 280);
-    const desc = sessionId ? registry.describeSession(sessionId) : { chatId: undefined as number | undefined };
-    const chatId = desc.chatId;
-    if (chatId !== undefined) {
-      const body = preview
-        ? `\u{1F4CB} Plan approved (exit plan mode).\n\n${preview}${planText.length > 280 ? "\u2026" : ""}`
-        : "\u{1F4CB} Plan approved \u2014 leaving plan mode and implementing.";
-      void bot.api.sendMessage(chatId, body, { disable_notification: true }).catch(() => {});
-    }
-    return { outcome: "approved" as const, feedback: "" };
-  };
+
+  const planExit = new PlanExitService(bot.api, registry, cfg.autoApprovePlan, (chatId) =>
+    statusPanel.ensurePinned(chatId),
+  );
+  acp.planExitHandler = ({ params }) => planExit.handle(params);
+
+  const askUser = new AskUserService(bot.api, registry, cfg.autoApprovePlan && cfg.autoApprovePermissions);
+  acp.askUserHandler = ({ params }) => askUser.handle(params);
 
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
@@ -196,8 +183,24 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     if (sid) await switchAndShow(ctx, deps, sid);
   });
 
+  bot.callbackQuery(/^planx:(\d+):(ok|chg|no)$/, async (ctx) => {
+    const toast = planExit.resolveChoice(ctx.match![1]!, ctx.match![2]!);
+    await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
+  });
+
+  bot.callbackQuery(/^asku:(\d+):(opt|next|prev|skip)(?::(.*))?$/, async (ctx) => {
+    const toast = askUser.tap(ctx.match![1]!, ctx.match![2]!, ctx.match![3]);
+    await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
+  });
+
   registerMenu(bot, deps); // persistent-keyboard buttons (hears)
   registerWizardInput(bot, deps); // wizard text input (before commands)
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message?.text ?? "";
+    if (!text || text.startsWith("/")) return next();
+    if (planExit.takeFeedback(ctx.chat.id, text)) return;
+    await next();
+  });
   registerControl(bot, deps);
   registerProjects(bot, deps);
   registerSessions(bot, deps);

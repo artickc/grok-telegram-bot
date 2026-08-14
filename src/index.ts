@@ -42,7 +42,14 @@ async function main(): Promise<void> {
     model: cfg.grokModel,
     autoRestart: cfg.grokAutoRestart,
     promptIdleTimeoutMs: cfg.promptIdleMs,
+    sandboxProfile: cfg.sandboxProfile,
+    experimentalMemory: cfg.experimentalMemory,
+    agentProfile: cfg.agentProfile,
+    pluginDirs: cfg.pluginDirs,
   });
+  log.info(
+    `agent opts: sandbox=${cfg.sandboxProfile || "(config.toml)"} memory=${cfg.experimentalMemory} profile=${cfg.agentProfile || "-"}`,
+  );
 
   await grok.start();
   const { bot, registry, scheduler, updater } = await createBot(cfg, grok);

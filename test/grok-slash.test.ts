@@ -36,6 +36,7 @@ describe("grok slash forward", () => {
       "sessions",
       "history",
       "mcp",
+      "sandbox",
     ]) {
       assert.equal(shouldForwardSlashToGrok(`/${name}`), false, name);
       assert.ok(BOT_RESERVED_COMMANDS.has(name), `reserved:${name}`);

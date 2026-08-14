@@ -45,4 +45,26 @@ describe("ext-methods plan exit", () => {
     );
     assert.deepEqual(result, {});
   });
+
+  it("routes ask_user_question through the optional handler", async () => {
+    const result = await handleAgentReverseRequest(
+      "ext_method",
+      { method: "x.ai/ask_user_question", params: { questions: [] } },
+      () => ({ outcome: "approved" }),
+      () => ({ type: "SubmitAnswers", answers: [{ questionId: "q0", selected: ["a"] }] }),
+    );
+    assert.deepEqual(result, {
+      type: "SubmitAnswers",
+      answers: [{ questionId: "q0", selected: ["a"] }],
+    });
+  });
+
+  it("skips ask_user_question when no handler is installed", async () => {
+    const result = await handleAgentReverseRequest(
+      "x.ai/ask_user_question",
+      { questions: [] },
+      () => ({ outcome: "approved" }),
+    );
+    assert.deepEqual(result, { type: "SkipInterview" });
+  });
 });

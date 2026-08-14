@@ -96,9 +96,21 @@ export interface AppConfig {
   grokMaxTokens?: number;
   /** Cap on tool-execution rounds per headless turn (grok --max-tool-rounds). */
   maxToolRounds: number;
-  /** Custom sub-agent name to hint in prompts (informational; Grok has no
-   *  --agent flag headlessly). */
+  /** Custom sub-agent name to hint in prompts. */
   agent?: string;
+  /** GROK_SANDBOX / `--sandbox` profile the agent process should inherit. */
+  sandboxProfile?: string;
+  /** Export GROK_MEMORY=1 so Grok 1.x memory tools load in this agent. */
+  experimentalMemory: boolean;
+  /** Path for `grok agent --agent-profile`. */
+  agentProfile?: string;
+  /** Extra `grok agent --plugin-dir` entries. */
+  pluginDirs: string[];
+  /**
+   * Auto-approve plan-mode exit. Defaults **false** so /plan is a real review
+   * gate. Unattended sessions still auto-approve. Independent of tool yolo.
+   */
+  autoApprovePlan: boolean;
   trustAllTools: boolean;
   /**
    * Auto-approve ACP `session/request_permission` prompts (prefer "allow for
@@ -193,6 +205,11 @@ export function loadConfig(): AppConfig {
     grokMaxTokens: process.env.GROK_MAX_TOKENS ? num(process.env.GROK_MAX_TOKENS, 0) || undefined : undefined,
     maxToolRounds: num(process.env.GROK_MAX_TOOL_ROUNDS, 400),
     agent: process.env.GROK_AGENT?.trim() || undefined,
+    sandboxProfile: process.env.GROK_SANDBOX?.trim() || undefined,
+    experimentalMemory: bool(process.env.GROK_MEMORY, false),
+    agentProfile: process.env.GROK_AGENT_PROFILE?.trim() || undefined,
+    pluginDirs: list(process.env.GROK_PLUGIN_DIR),
+    autoApprovePlan: bool(process.env.AUTO_APPROVE_PLAN, false),
     trustAllTools: bool(process.env.GROK_TRUST_ALL_TOOLS, true),
     // Default true: auto-approve with session-scope when the agent still asks.
     autoApprovePermissions: bool(process.env.AUTO_APPROVE_PERMISSIONS, true),

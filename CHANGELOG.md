@@ -9,6 +9,16 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Added
+
+- **Grok 1.x agent surface on Telegram** — spawn forwards `GROK_SANDBOX`,
+  `GROK_MEMORY`, `--agent-profile`, and `--plugin-dir`; `session/new` sets
+  `_meta.yoloMode` when tools are trusted. `/sandbox` shows/sets the profile
+  (write `GROK_SANDBOX` then `/restart`). Plan-mode exit is a real review
+  (Approve / Request changes / Abandon) unless `AUTO_APPROVE_PLAN=true`.
+  `ask_user_question` is answered with Telegram buttons instead of always
+  skipping (still skipped for unattended/scheduled turns).
+
 ### Fixed
 
 - **Plan mode exit over ACP** — answer Grok's `exit_plan_mode` reverse request

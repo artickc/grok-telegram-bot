@@ -32,7 +32,7 @@ import type {
   SubagentInfo,
   SubagentListUpdate,
 } from "./types.js";
-import { handleAgentReverseRequest, type PlanExitDecision } from "./ext-methods.js";
+import { handleAgentReverseRequest, type AskUserDecision, type PlanExitDecision } from "./ext-methods.js";
 
 const log = createLogger("grok:client");
 
@@ -212,6 +212,18 @@ export interface GrokClientOptions {
   autoRestart?: boolean;
   promptIdleTimeoutMs?: number;
   promptMaxMs?: number;
+  /**
+   * Sandbox profile forwarded as GROK_SANDBOX (`workspace`, `strict`,
+   * `workspace-safe`, …). `grok agent` has no `--sandbox` flag; the env +
+   * ~/.grok/config.toml `[sandbox] profile` are what the 1.0.x agent reads.
+   */
+  sandboxProfile?: string;
+  /** When true, export GROK_MEMORY=1 so cross-session memory tools load. */
+  experimentalMemory?: boolean;
+  /** `--agent-profile <path>` (the flag `grok agent` actually accepts). */
+  agentProfile?: string;
+  /** Extra `--plugin-dir` entries (repeatable, always-trusted for this process). */
+  pluginDirs?: string[];
 }
 
 interface Pending {
@@ -274,6 +286,10 @@ export class GrokClient extends EventEmitter {
     method: string;
     params: Record<string, unknown>;
   }) => Promise<PlanExitDecision>;
+  askUserHandler?: (ctx: {
+    method: string;
+    params: Record<string, unknown>;
+  }) => Promise<AskUserDecision>;
 
   constructor(private readonly opts: GrokClientOptions) {
     super();
@@ -292,6 +308,11 @@ export class GrokClient extends EventEmitter {
     if (notifyRestarted) this.emit("restarted");
   }
 
+  /** Update spawn-time agent options (applied on the next connect/restart). */
+  setAgentOptions(patch: Partial<Pick<GrokClientOptions, "sandboxProfile" | "experimentalMemory" | "agentProfile">>): void {
+    Object.assign(this.opts, patch);
+  }
+
   private async connect(): Promise<void> {
     // `--always-approve` is a `grok agent` option (not `grok agent stdio`),
     // so it must come before the `stdio` subcommand. `--no-leader` keeps auth
@@ -299,11 +320,18 @@ export class GrokClient extends EventEmitter {
     // the new token. `--no-auto-update` was removed in grok 0.2.x (exit 2).
     const args = ["agent", "--no-leader"];
     if (this.opts.trustAllTools) args.push("--always-approve");
+    if (this.opts.agentProfile) args.push("--agent-profile", this.opts.agentProfile);
+    for (const dir of this.opts.pluginDirs ?? []) {
+      if (dir.trim()) args.push("--plugin-dir", dir.trim());
+    }
     args.push("stdio");
 
     log.info(`spawning: ${this.opts.grokCliPath} ${args.join(" ")}`);
     const env = { ...process.env };
     if (this.opts.apiKey) env.XAI_API_KEY = this.opts.apiKey;
+    if (this.opts.sandboxProfile) env.GROK_SANDBOX = this.opts.sandboxProfile;
+    if (this.opts.experimentalMemory) env.GROK_MEMORY = "1";
+    else if (this.opts.experimentalMemory === false) env.GROK_MEMORY = "0";
     const proc = spawn(this.opts.grokCliPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.opts.workspace,
@@ -405,7 +433,11 @@ export class GrokClient extends EventEmitter {
   }
 
   async newSession(cwd: string): Promise<string> {
-    const res = (await this.request("session/new", { cwd, mcpServers: [] })) as { sessionId: string };
+    const res = (await this.request("session/new", {
+      cwd,
+      mcpServers: [],
+      _meta: this.opts.trustAllTools ? { yoloMode: true } : {},
+    })) as { sessionId: string };
     this.parseSessionExtras(res);
     this.cwd.set(res.sessionId, cwd);
     this.slog.create(res.sessionId, cwd);
@@ -669,7 +701,7 @@ export class GrokClient extends EventEmitter {
         const decide =
           this.planExitHandler ??
           (async (): Promise<PlanExitDecision> => ({ outcome: "approved", feedback: "" }));
-        const handled = await handleAgentReverseRequest(method, params, decide);
+        const handled = await handleAgentReverseRequest(method, params, decide, this.askUserHandler);
         if (handled !== undefined) {
           result = handled;
         } else {

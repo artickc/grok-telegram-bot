@@ -47,6 +47,7 @@ export const BOT_RESERVED_COMMANDS = new Set(
     "unwatch",
     "model",
     "restart",
+    "sandbox",
     "reauth",
     "accounts",
   ].map((c) => c.toLowerCase()),

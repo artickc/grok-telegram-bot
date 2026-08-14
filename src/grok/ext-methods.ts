@@ -23,6 +23,12 @@ export interface PlanExitDecision {
   feedback?: string;
 }
 
+/** Result of an ask_user_question reverse request. */
+export interface AskUserDecision {
+  type: "SkipInterview" | "SubmitAnswers";
+  answers?: Array<{ questionId: string; selected: string[] }>;
+}
+
 /**
  * Build the JSON-RPC result for exit_plan_mode reverse requests.
  * Shape reverse-engineered from Grok 0.2.x (ExitPlanModeExtResponse: 2 fields).
@@ -77,6 +83,10 @@ export function handleAgentReverseRequest(
     method: string;
     params: Record<string, unknown>;
   }) => PlanExitDecision | Promise<PlanExitDecision>,
+  decideAskUser?: (ctx: {
+    method: string;
+    params: Record<string, unknown>;
+  }) => AskUserDecision | Promise<AskUserDecision>,
 ): Promise<unknown | undefined> | unknown | undefined {
   // Direct method names
   if (isExitPlanMethod(method) && method !== "ext_method") {
@@ -90,6 +100,13 @@ export function handleAgentReverseRequest(
     log.info(`ext_method nested=${nested || "(empty)"} keys=${Object.keys(params).join(",")}`);
     if (isExitPlanMethod(method, nested) && nested) {
       return Promise.resolve(decidePlanExit({ method: nested, params: inner })).then(planExitResult);
+    }
+    if (nested.toLowerCase().includes("ask_user_question")) {
+      if (decideAskUser) {
+        log.info(`ask_user_question via ext_method ${nested}`);
+        return Promise.resolve(decideAskUser({ method: nested, params: inner }));
+      }
+      return { type: "SkipInterview" };
     }
     // Unknown x.ai/* extensions: acknowledge empty so the agent does not treat
     // Method-not-found as a client disconnect mid-turn.
@@ -105,8 +122,11 @@ export function handleAgentReverseRequest(
     if (isExitPlanMethod(method)) {
       return Promise.resolve(decidePlanExit({ method, params })).then(planExitResult);
     }
-    // ask_user_question — auto-skip so turns do not hang headless
     if (method.toLowerCase().includes("ask_user_question")) {
+      if (decideAskUser) {
+        log.info(`ask_user_question via ${method}`);
+        return Promise.resolve(decideAskUser({ method, params }));
+      }
       log.info(`auto-skip ask_user_question via ${method}`);
       return { type: "SkipInterview" };
     }
