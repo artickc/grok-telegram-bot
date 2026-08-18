@@ -64,7 +64,7 @@ export class PlanExitService {
     const body = [
       "\u{1F4CB} Plan ready \u2014 approve before Grok implements.",
       snippet ? `\n${snippet}${planText.length > 400 ? "\u2026" : ""}` : "\n(No plan text in the request.)",
-      "\nApprove to build, request changes (then send notes), or abandon.",
+      "\nApprove / Changes / Abandon \u2014 or just send a message to request changes.",
     ].join("\n");
 
     const kb = new InlineKeyboard()
@@ -102,6 +102,7 @@ export class PlanExitService {
         resolve({ outcome: "abandoned", feedback: "timed out waiting for review" });
       }, TIMEOUT_MS);
       this.pending.set(reqId, { resolve, chatId, messageId, timer, pinned, waitingFeedback: false });
+      this.feedbackFor.set(chatId, reqId);
     });
   }
 
@@ -130,8 +131,13 @@ export class PlanExitService {
     return outcome === "approved" ? "Approved" : "Abandoned";
   }
 
+  /**
+   * Any plain follow-up in this chat while a plan is waiting counts as
+   * "request changes" (the message is the revision note). Also used after
+   * the Changes button.
+   */
   takeFeedback(chatId: number, text: string): boolean {
-    const reqId = this.feedbackFor.get(chatId);
+    const reqId = this.feedbackFor.get(chatId) ?? this.reqIdForChat(chatId);
     if (!reqId) return false;
     const p = this.pending.get(reqId);
     this.feedbackFor.delete(chatId);
@@ -142,6 +148,13 @@ export class PlanExitService {
     void this.finish(p, `\u270F\uFE0F Requested changes:\n${notes.slice(0, 400)}`);
     p.resolve({ outcome: "request_changes", feedback: notes || "Please revise the plan." });
     return true;
+  }
+
+  private reqIdForChat(chatId: number): string | undefined {
+    for (const [id, p] of this.pending) {
+      if (p.chatId === chatId) return id;
+    }
+    return undefined;
   }
 
   private async finish(p: Pending, text: string): Promise<void> {

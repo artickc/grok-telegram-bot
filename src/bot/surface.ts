@@ -170,7 +170,7 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
   registerWizardInput(bot, deps);
   bot.on("message:text", async (ctx, next) => {
     const text = ctx.message?.text ?? "";
-    if (!text || text.startsWith("/")) return next();
+    if (!text || text.startsWith("/") || BAR_LABELS.includes(text)) return next();
     if (planExit.takeFeedback(ctx.chat.id, text)) return;
     await next();
   });

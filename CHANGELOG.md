@@ -14,7 +14,8 @@ The latest section is published verbatim as the GitHub Release notes by
 - **Plan mode no longer hangs the Telegram bots.** Grok's `exit_plan_mode`
   reverse request (`_x.ai/exit_plan_mode`) is answered instead of Method-not-found.
   The owning chat gets the plan text plus Approve / Request changes / Abandon.
-  Request changes waits for the next message as notes. No owning chat, a send
+  A plain follow-up message (no button) is treated as Request changes with
+  that text as the notes. The Changes button still works the same way. No owning chat, a send
   failure, or `AUTO_APPROVE_PLAN=true` auto-approves so the agent never waits
   on the TUI. `ask_user_question` is skipped so interviews do not block
   headless turns.
