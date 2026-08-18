@@ -9,6 +9,14 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plan mode no longer hangs the Telegram bots.** Grok's `exit_plan_mode`
+  reverse request (`_x.ai/exit_plan_mode`) is answered with auto-approve
+  instead of Method-not-found. Without this, the agent reports a client
+  disconnect and stays stuck waiting for a TUI plan approval. `ask_user_question`
+  is skipped so interviews do not block headless turns either.
+
 ### Added
 
 - **Several Telegram bots, one Grok process.** Extra tokens use descriptive
