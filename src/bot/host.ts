@@ -84,31 +84,18 @@ function wireAcp(host: BotHost): void {
     return fallback ? fallback.permissions.handle(p) : Promise.resolve(autoDecideSession(p));
   };
 
-  // Headless: auto-approve plan-mode exit so Grok does not sit in the TUI
-  // "approve plan" gate. Notify the owning Telegram chat (best-effort).
   host.acp.planExitHandler = async ({ params }) => {
     const sessionId =
       (typeof params.sessionId === "string" && params.sessionId) ||
       (typeof params.session_id === "string" && params.session_id) ||
       "";
-    const planText =
-      (typeof params.plan_content === "string" && params.plan_content) ||
-      (typeof params.planContent === "string" && params.planContent) ||
-      (typeof params.content === "string" && params.content) ||
-      "";
-    const preview = planText.replace(/\s+/g, " ").trim().slice(0, 280);
-    const body = preview
-      ? `\u{1F4CB} Plan approved (exit plan mode).\n\n${preview}${planText.length > 280 ? "\u2026" : ""}`
-      : "\u{1F4CB} Plan approved \u2014 leaving plan mode and implementing.";
-    if (sessionId) {
-      for (const surface of host.surfaces) {
-        const chatId = surface.registry.describeSession(sessionId).chatId;
-        if (chatId === undefined) continue;
-        void surface.bot.api.sendMessage(chatId, body, { disable_notification: true }).catch(() => {});
-        break;
-      }
-    }
-    return { outcome: "approved" as const, feedback: "" };
+    const owner = sessionId
+      ? host.surfaces.find((s) => s.registry.describeSession(sessionId).chatId !== undefined)
+      : undefined;
+    const chatId = owner && sessionId ? owner.registry.describeSession(sessionId).chatId : undefined;
+    const cwd = sessionId ? host.store.get(sessionId)?.cwd : undefined;
+    if (!owner || chatId === undefined) return { outcome: "approved", feedback: "" };
+    return owner.planExit.handle(params, { chatId, cwd });
   };
 
   host.acp.on("subagents", (subagents, pending) => {

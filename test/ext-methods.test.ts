@@ -46,6 +46,13 @@ describe("ext-methods plan exit", () => {
     assert.deepEqual(result, { type: "SkipInterview" });
   });
 
+  it("extracts inline plan text from several keys", async () => {
+    const { extractPlanText } = await import("../src/bot/plan-exit-service.js");
+    assert.equal(extractPlanText({ plan_content: "alpha" }), "alpha");
+    assert.equal(extractPlanText({ planContent: "beta" }), "beta");
+    assert.equal(extractPlanText({}), "");
+  });
+
   it("acks unknown x.ai extensions with empty object", async () => {
     const result = await handleAgentReverseRequest(
       "ext_method",
