@@ -17,6 +17,7 @@ import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
 import type { BotDeps } from "../deps.js";
 import { extractReplyContext } from "../reply-context.js";
+import { shouldForwardSlashToGrok, toGrokSlashLine } from "./grok-slash.js";
 
 const log = createLogger("message");
 
@@ -71,7 +72,40 @@ async function flush(deps: BotDeps, batches: Map<number, TextBatch>, chatId: num
   // user instead of forwarding it to the agent. Split content never trips
   // this: it arrives as multiple parts, and multi-line text is never a command.
   if (batch.parts.length === 1 && !combined.includes("\n") && combined.startsWith("/")) {
-    await send(deps, chatId, "Unknown command. Type /help to see what I can do.");
+    if (shouldForwardSlashToGrok(combined)) {
+      const rt = deps.registry.get(chatId);
+      const grokLine = toGrokSlashLine(combined);
+      try {
+        if (rt.sessionId) {
+          try {
+            await deps.acp.executeCommand(rt.sessionId, grokLine);
+            await send(deps, chatId, `\u25B6\uFE0F Sent to Grok: ${grokLine}`);
+            return;
+          } catch {
+            /* older agents lack _grok.dev/commands/execute */
+          }
+        }
+        const outcome = await rt.submit(textPrompt(grokLine, batch.ids[0], batch.quoted));
+        if (outcome === "queued") {
+          await send(
+            deps,
+            chatId,
+            `\u{1F4E5} Queued (position ${rt.queueLength}): ${grokLine} \u2014 runs after the current turn.`,
+          );
+        } else {
+          await send(deps, chatId, `\u25B6\uFE0F Running ${grokLine}\u2026`);
+        }
+      } catch (err) {
+        log.warn(`grok slash submit failed for chat ${chatId}: ${(err as Error).message}`);
+        await send(deps, chatId, `\u274C Couldn't run ${grokLine}: ${(err as Error).message}`);
+      }
+      return;
+    }
+    await send(
+      deps,
+      chatId,
+      "Unknown command. Type /help for bot commands, or try a Grok slash like /goal status.",
+    );
     return;
   }
 

@@ -11,6 +11,11 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ### Fixed
 
+- **`/goal` and other Grok slashes work again.** The multi-bot branch dropped
+  slash forwarding, so `/goal`, `/plan`, `/compact`, `/workflow`, … were
+  treated as unknown bot commands. They are forwarded into the active ACP
+  session again (command RPC, then prompt fallback).
+
 - **Plan mode no longer hangs the Telegram bots.** Grok's `exit_plan_mode`
   reverse request (`_x.ai/exit_plan_mode`) is answered instead of Method-not-found.
   The owning chat gets the plan text plus Approve / Request changes / Abandon.

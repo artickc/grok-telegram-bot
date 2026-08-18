@@ -14,6 +14,7 @@ import { registerAccounts } from "./handlers/accounts.js";
 import { registerReauth } from "./handlers/auth.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
+import { registerGrokSlash } from "./handlers/grok-slash.js";
 import { registerHistory } from "./handlers/history.js";
 import { registerKill } from "./handlers/kill.js";
 import { registerMcp } from "./handlers/mcp.js";
@@ -190,6 +191,7 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
   registerPhotos(bot, deps);
   registerDocuments(bot, deps);
   registerVoice(bot, deps);
+  registerGrokSlash(bot, deps);
   registerMessages(bot, deps);
 
   bot.catch((err) => {
