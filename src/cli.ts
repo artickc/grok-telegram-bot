@@ -105,8 +105,8 @@ function preflight(): void {
     return;
   }
   const env = readFileSync(envPath, "utf-8");
-  if (!/^TELEGRAM_BOT_TOKEN=.+/m.test(env)) {
-    console.warn("⚠ TELEGRAM_BOT_TOKEN is not set in .env — the service will fail to start.");
+  if (!/^TELEGRAM_BOT_TOKEN(?:_[A-Z][A-Z0-9_]*)?=.+/m.test(env)) {
+    console.warn("⚠ No TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_<LABEL> in .env — the service will fail to start.");
   }
 }
 

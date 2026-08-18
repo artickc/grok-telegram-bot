@@ -65,14 +65,14 @@ export function registerPhotos(bot: Bot, deps: BotDeps): void {
   bot.on("message:photo", async (ctx) => {
     const photos = ctx.message.photo;
     const largest = photos[photos.length - 1];
-    const image = largest ? await download(ctx, largest.file_id, "image/jpeg", deps.cfg.token) : undefined;
+    const image = largest ? await download(ctx, largest.file_id, "image/jpeg", deps.token) : undefined;
     await onMedia(ctx, image, ctx.message.caption ?? "");
   });
 
   bot.on("message:document", async (ctx, next) => {
     const doc = ctx.message.document;
     if (!doc.mime_type?.startsWith("image/")) return next(); // let document-handler logic pass
-    const image = await download(ctx, doc.file_id, doc.mime_type, deps.cfg.token);
+    const image = await download(ctx, doc.file_id, doc.mime_type, deps.token);
     await onMedia(ctx, image, ctx.message.caption ?? "");
   });
 }

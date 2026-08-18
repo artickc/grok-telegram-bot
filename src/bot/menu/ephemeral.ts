@@ -26,8 +26,13 @@ export class Ephemeral {
   constructor(
     private readonly api: Api,
     dataDir: string,
+    private readonly namespace?: string,
   ) {
     this.store = new JsonStore<TrackMap>(join(dataDir, "ephemeral.json"), {});
+  }
+
+  private key(chatId: number): string {
+    return this.namespace ? `${this.namespace}:${chatId}` : String(chatId);
   }
 
   /** Run `fn` after any in-flight ephemeral op for this chat completes. */
@@ -42,7 +47,7 @@ export class Ephemeral {
   remember(chatId: number, messageId: number | undefined): void {
     if (!messageId) return;
     this.store.update((m) => {
-      const k = String(chatId);
+      const k = this.key(chatId);
       (m[k] ??= []).push(messageId);
     });
   }
@@ -54,7 +59,7 @@ export class Ephemeral {
   }
 
   private async doClear(chatId: number): Promise<void> {
-    const k = String(chatId);
+    const k = this.key(chatId);
     const ids = (this.store.get()[k] ?? []).slice();
     if (ids.length === 0) return;
     // A Telegram rejection (message gone / too old / not found) is final, so we
@@ -79,8 +84,21 @@ export class Ephemeral {
   /** On startup, delete any surface left over from before a restart. */
   async cleanupAll(): Promise<void> {
     for (const k of Object.keys(this.store.get())) {
-      await this.clear(Number(k));
+      const chatId = this.chatIdFromKey(k);
+      if (chatId !== undefined) await this.clear(chatId);
     }
+  }
+
+  private chatIdFromKey(key: string): number | undefined {
+    if (this.namespace) {
+      const prefix = `${this.namespace}:`;
+      if (!key.startsWith(prefix)) return undefined;
+      const n = Number(key.slice(prefix.length));
+      return Number.isFinite(n) ? n : undefined;
+    }
+    if (key.includes(":")) return undefined;
+    const n = Number(key);
+    return Number.isFinite(n) ? n : undefined;
   }
 
   /**

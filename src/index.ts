@@ -1,10 +1,10 @@
 /**
  * Grok Telegram Bot — entry point.
- * Starts the Grok ACP bridge (`grok agent stdio`), the Telegram bot, and wires
- * graceful shutdown between them.
+ * Starts the Grok ACP bridge (`grok agent stdio`), one or more Telegram bots,
+ * and wires graceful shutdown between them.
  */
 import { GrokClient } from "./grok/client.js";
-import { createBot } from "./bot/bot.js";
+import { createBots } from "./bot/bot.js";
 import { CANONICAL_DIR, loadConfig } from "./config.js";
 import { InstanceLock } from "./app/instance-lock.js";
 import { join } from "node:path";
@@ -18,13 +18,20 @@ async function main(): Promise<void> {
   enableFileLogging(cfg.logFile);
   const log = createLogger("main");
 
-  // Single-instance guard: kill any ghost/duplicate already polling this token.
-  const lock = new InstanceLock(cfg.token, join(CANONICAL_DIR, "locks"), process.env.GROK_TG_SUPERVISED === "1");
-  if (cfg.singleInstance && !(await lock.acquire())) {
-    process.stdout.write(
-      "\u26D4 Another Grok Telegram Bot is already running for this token (a background service). Use `grok-tg restart`, or `grok-tg stop` first.\n",
-    );
-    process.exit(0);
+  const supervised = process.env.GROK_TG_SUPERVISED === "1";
+  const locks: InstanceLock[] = [];
+  if (cfg.singleInstance) {
+    for (const spec of cfg.bots) {
+      const lock = new InstanceLock(spec.token, join(CANONICAL_DIR, "locks"), supervised);
+      if (!(await lock.acquire())) {
+        for (const held of locks) held.release();
+        process.stdout.write(
+          `\u26D4 Another Grok Telegram Bot is already polling ${spec.envKey} (a background service). Use \`grok-tg restart\`, or \`grok-tg stop\` first.\n`,
+        );
+        process.exit(0);
+      }
+      locks.push(lock);
+    }
   }
 
   log.info("starting Grok Telegram Bot");
@@ -32,6 +39,7 @@ async function main(): Promise<void> {
   log.info(`grok:      ${cfg.grokCliPath}`);
   log.info(`sessions:  ${cfg.sessionsDir}`);
   log.info(`log file:  ${cfg.logFile}`);
+  log.info(`bots:      ${cfg.bots.map((b) => b.envKey).join(", ")}`);
 
   const grok = new GrokClient({
     grokCliPath: cfg.grokCliPath,
@@ -45,7 +53,7 @@ async function main(): Promise<void> {
   });
 
   await grok.start();
-  const { bot, registry, scheduler, updater } = await createBot(cfg, grok);
+  const { surfaces, scheduler, updater } = await createBots(cfg, grok);
   scheduler.start();
   await updater.start();
 
@@ -56,10 +64,10 @@ async function main(): Promise<void> {
     log.info("shutting down…");
     scheduler.stop();
     updater.stop();
-    registry.disposeAll();
-    void bot.stop().catch(() => {});
+    for (const surface of surfaces) surface.registry.disposeAll();
+    for (const surface of surfaces) void surface.bot.stop().catch(() => {});
     grok.stop();
-    lock.release();
+    for (const lock of locks) lock.release();
     setTimeout(() => process.exit(code), 500);
   };
 
@@ -70,12 +78,16 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (err) => log.error("uncaughtException:", err));
   process.on("unhandledRejection", (err) => log.error("unhandledRejection:", err));
 
-  await bot.start({
-    onStart: (info) => {
-      log.info(`bot online as @${info.username}`);
-      process.stdout.write(`\u2705 Online as @${info.username}. Send it a message on Telegram.\n`);
-    },
-  });
+  await Promise.all(
+    surfaces.map((surface) =>
+      surface.bot.start({
+        onStart: (info) => {
+          log.info(`bot online as @${info.username} (${surface.spec.envKey})`);
+          process.stdout.write(`\u2705 Online as @${info.username} [${surface.spec.label}]. Send it a message on Telegram.\n`);
+        },
+      }),
+    ),
+  );
 }
 
 main().catch((err) => {

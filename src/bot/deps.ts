@@ -21,6 +21,14 @@ import type { TaskWizard } from "./wizard/task-wizard.js";
 
 export interface BotDeps {
   api: Api;
+  /** This surface's bot token (file downloads must use it, not cfg.token). */
+  token: string;
+  /** Telegram getMe().id. Undefined on the primary bot (unprefixed stores). */
+  botId?: number;
+  /** Human label from the env key (`app`) or `"default"`. */
+  botLabel: string;
+  /** Which bot currently owns a Grok session, if known. */
+  sessionHome: (sessionId: string) => "this" | "other" | undefined;
   cfg: AppConfig;
   acp: GrokClient;
   registry: RuntimeRegistry;

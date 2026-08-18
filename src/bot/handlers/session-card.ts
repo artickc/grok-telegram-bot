@@ -22,6 +22,8 @@ export interface SessionCardExtras {
   selfPid?: number;
   /** Latest task-completion % (0–100) for this session, if this chat runs it. */
   progress?: number;
+  /** Which of our Telegram bots currently owns this session. */
+  owner?: "this" | "other";
 }
 
 export interface SessionCard {
@@ -41,6 +43,8 @@ export function buildSessionCard(m: SessionMeta, extra: SessionCardExtras = {}):
   const ctx = typeof extra.contextPct === "number" ? ` \u00B7 \u{1F9E0} ctx ${Math.round(extra.contextPct)}%` : "";
   lines.push(`\u{1F4CA} ${state} \u00B7 \u{1F4DC} history ${humanSize(m.historyBytes)}${ctx}`);
   if (typeof extra.progress === "number") lines.push(`\u{1F4C8} ${progressBar(extra.progress)}`);
+  if (extra.owner === "this") lines.push("this bot");
+  else if (extra.owner === "other") lines.push("other bot");
   lines.push(`\u{1F194} ${m.sessionId.slice(0, 8)}`);
 
   const connect = m.active ? "\u{1F374} Continue (fork)" : "\u{1F517} Resume";

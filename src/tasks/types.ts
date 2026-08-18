@@ -19,6 +19,8 @@ export interface Schedule {
 export interface Task {
   id: string;
   chatId: number;
+  /** Telegram bot id that created the task. Omitted for the primary bot. */
+  botId?: number;
   name: string;
   prompt: string;
   projectPath: string;

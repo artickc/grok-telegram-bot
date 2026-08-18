@@ -109,8 +109,8 @@ writeFileSync(envPath, env, "utf-8");
 console.log(`\n\u2713 .env written to ${envPath}`);
 console.log("  (loaded from here no matter which folder you start the bot in)");
 
-if (!/^TELEGRAM_BOT_TOKEN=.+/m.test(env)) {
-  console.log("\nNext: open .env, paste your bot token from @BotFather, then sign in with `grok login` (or /reauth). Then run `grok-tg run`.");
+if (!/^TELEGRAM_BOT_TOKEN(?:_[A-Z][A-Z0-9_]*)?=.+/m.test(env)) {
+  console.log("\nNext: open .env, paste your bot token from @BotFather (TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_APP), then sign in with `grok login` (or /reauth). Then run `grok-tg run`.");
 } else {
   console.log("\nReady! Sign in with `grok login` if you haven't, then run `grok-tg run` (or `npm start`).");
 }

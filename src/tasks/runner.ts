@@ -14,10 +14,22 @@ import type { Task } from "./types.js";
 const log = createLogger("task-runner");
 
 export class TaskRunner {
-  constructor(
-    private readonly api: Api,
-    private readonly acp: GrokClient,
-  ) {}
+  private readonly apis = new Map<number | "default", Api>();
+
+  constructor(private readonly acp: GrokClient) {}
+
+  /** Register the Telegram API for a bot. Omit `botId` for the primary bot. */
+  registerApi(api: Api, botId?: number): void {
+    this.apis.set(botId === undefined ? "default" : botId, api);
+  }
+
+  private apiFor(task: Task): Api | undefined {
+    if (task.botId !== undefined) {
+      const named = this.apis.get(task.botId);
+      if (named) return named;
+    }
+    return this.apis.get("default");
+  }
 
   /** Run a task; resolves true on success, false on error. */
   async run(task: Task): Promise<boolean> {
@@ -67,12 +79,19 @@ export class TaskRunner {
     const body = text.trim() || "_(no text output)_";
     const footer = tools > 0 ? `\n\n\u{1F527} ${tools} tool call(s)` : "";
     const header = `\u23F0 **Task: ${task.name}** \u00B7 ${project}`;
-    await sendMarkdownDoc(this.api, task.chatId, `${header}\n\n${body}${footer}`, { loud: true });
+    const api = this.apiFor(task);
+    if (!api) {
+      log.warn(`no Telegram API registered for task "${task.name}" (botId=${task.botId ?? "default"})`);
+      return;
+    }
+    await sendMarkdownDoc(api, task.chatId, `${header}\n\n${body}${footer}`, { loud: true });
   }
 
   private async deliverError(task: Task, message: string): Promise<void> {
+    const api = this.apiFor(task);
+    if (!api) return;
     try {
-      await this.api.sendMessage(task.chatId, `\u274C Task "${task.name}" failed: ${message}`, {
+      await api.sendMessage(task.chatId, `\u274C Task "${task.name}" failed: ${message}`, {
         disable_notification: false,
       });
     } catch {

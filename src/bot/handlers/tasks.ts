@@ -173,7 +173,7 @@ export function registerTasks(bot: Bot, deps: BotDeps): void {
 // ── views ────────────────────────────────────────────────────────────────
 
 function listView(deps: BotDeps, chatId: number): { text: string; kb: InlineKeyboard } {
-  const tasks = deps.tasks.forChat(chatId);
+  const tasks = deps.tasks.forChat(chatId, deps.botId);
   const kb = new InlineKeyboard();
   if (tasks.length === 0) {
     kb.text("\u2795 New task", "task:new");

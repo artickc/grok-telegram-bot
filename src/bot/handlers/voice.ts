@@ -29,7 +29,7 @@ export function registerVoice(bot: Bot, deps: BotDeps): void {
     }
     await ctx.replyWithChatAction("typing").catch(() => {});
     try {
-      const bytes = await download(ctx, fileId, deps.cfg.token);
+      const bytes = await download(ctx, fileId, deps.token);
       if (!bytes) throw new Error("could not download the audio");
       const text = await deps.stt.transcribe(bytes, mime, name);
       if (!text) {

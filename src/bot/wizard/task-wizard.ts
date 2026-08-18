@@ -39,7 +39,10 @@ const CREATE_STEPS: WizStep[] = ["name", "prompt", "project", "scheduleType", "d
 export class TaskWizard {
   private readonly states = new Map<number, WizardState>();
 
-  constructor(private readonly store: TaskStore) {}
+  constructor(
+    private readonly store: TaskStore,
+    private readonly botId?: number,
+  ) {}
 
   isActive(chatId: number): boolean {
     return this.states.has(chatId);
@@ -139,6 +142,7 @@ export class TaskWizard {
     if (s.mode === "create") {
       const task = this.store.create({
         chatId,
+        botId: this.botId,
         name: d.name ?? "Task",
         prompt: d.prompt ?? "",
         projectPath: d.projectPath ?? "",
