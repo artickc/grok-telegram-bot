@@ -9,6 +9,14 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Added
+
+- **Several Telegram bots, one Grok process.** Extra tokens use descriptive
+  keys (`TELEGRAM_BOT_TOKEN_APP`, `TELEGRAM_BOT_TOKEN_CONTENT`, …). Each bot
+  is its own private chat with an isolated Grok session; they share one
+  `grok agent stdio` and the host login. Existing `TELEGRAM_BOT_TOKEN` stays
+  the primary bot and keeps its `settings.json` keys.
+
 ## [2.3.1] - 2026-07-19
 
 ### Fixed

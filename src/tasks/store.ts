@@ -18,9 +18,9 @@ export class TaskStore {
     return this.store.get();
   }
 
-  forChat(chatId: number): Task[] {
+  forChat(chatId: number, botId?: number): Task[] {
     return this.all()
-      .filter((t) => t.chatId === chatId)
+      .filter((t) => t.chatId === chatId && sameBot(t.botId, botId))
       .sort((a, b) => (a.nextRun ?? Infinity) - (b.nextRun ?? Infinity));
   }
 
@@ -77,4 +77,9 @@ export class TaskStore {
   due(now = Date.now()): Task[] {
     return this.all().filter((t) => t.enabled && t.nextRun !== undefined && t.nextRun <= now);
   }
+}
+
+function sameBot(taskBotId: number | undefined, surfaceBotId: number | undefined): boolean {
+  if (surfaceBotId === undefined) return taskBotId === undefined;
+  return taskBotId === surfaceBotId;
 }

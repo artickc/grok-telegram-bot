@@ -35,7 +35,7 @@ src/
 ├── stream/      Incremental edit-streaming
 ├── service/     Cross-platform daemon (windows/linux/macos + selector)
 ├── tasks/       Scheduled tasks
-└── bot/         grammY bot, per-chat runtime, handlers
+└── bot/         grammY bot(s): host + per-token surfaces, handlers
 ```
 
 ## Conventions (must follow)

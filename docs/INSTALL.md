@@ -42,6 +42,21 @@ grok-tg run                     # run in the foreground (Ctrl-C to stop)
 > ⚠️ **Set `ALLOWED_USERS`** in `.env` to your Telegram user ID(s). Empty means
 > *anyone* who finds the bot can run commands on your machine.
 
+### Several Telegram bots, one Grok
+
+Want a dedicated Telegram chat per use case (without a second Grok process)?
+Create extra bots with [@BotFather](https://t.me/BotFather) and add descriptive
+keys to the **same** `.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN=…                 # existing bot
+TELEGRAM_BOT_TOKEN_APP=…             # e.g. app-code chat
+TELEGRAM_BOT_TOKEN_CONTENT=…         # e.g. learning-content chat
+```
+
+Then `grok-tg restart`. One service polls every token. Pick a project once in
+each new chat with `/projects`.
+
 ### Startup options (`grok-tg <command>`)
 
 | Command | What it does |

@@ -47,8 +47,18 @@ export class RuntimeRegistry {
     private readonly cfg: AppConfig,
     private readonly settings: SettingsStore,
     private readonly store: SessionStore,
+    opts?: { listenToAcp?: boolean },
   ) {
-    this.acp.on("subagents", (subagents, pending) => this.onSubagents(subagents, pending));
+    // Host-level ACP routing owns the process-global `subagents` event when
+    // several Telegram bots share one Grok process.
+    if (opts?.listenToAcp !== false) {
+      this.acp.on("subagents", (subagents, pending) => this.handleSubagents(subagents, pending, true));
+    }
+  }
+
+  /** True when this surface currently has a turn in flight. */
+  hasActiveTurn(): boolean {
+    return this.activeChats.length > 0;
   }
 
   setRefresher(fn: (chatId: number) => void): void {
@@ -151,8 +161,8 @@ export class RuntimeRegistry {
     return this.activeChats.at(-1);
   }
 
-  private onSubagents(subagents: SubagentInfo[], pending: PendingStage[]): void {
-    const owner = this.currentOwner();
+  handleSubagents(subagents: SubagentInfo[], pending: PendingStage[], attributeNew: boolean): void {
+    const owner = attributeNew ? this.currentOwner() : undefined;
     // Record parents for any subagent we haven't attributed yet.
     if (owner !== undefined) {
       for (const s of subagents) {

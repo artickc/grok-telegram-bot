@@ -45,7 +45,7 @@ export function registerDocuments(bot: Bot, deps: BotDeps): void {
 
     let buf: Buffer;
     try {
-      buf = await download(ctx, doc.file_id, deps.cfg.token);
+      buf = await download(ctx, doc.file_id, deps.token);
     } catch (e) {
       log.warn(`download failed for "${name}":`, (e as Error).message);
       await ctx.reply(

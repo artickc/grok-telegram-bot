@@ -10,6 +10,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type BotTokenSpec, parseBotTokens } from "./app/bot-tokens.js";
+
+export type { BotTokenSpec };
 
 /** Absolute path to the installed bot code (one level above src/). For a global
  *  npm install this lives inside node_modules — code lives here, never user data. */
@@ -80,7 +83,10 @@ function list(v: string | undefined): string[] {
 }
 
 export interface AppConfig {
+  /** Primary bot token (TELEGRAM_BOT_TOKEN, or the first labeled token). */
   token: string;
+  /** Every Telegram bot this process should poll. Primary is first. */
+  bots: BotTokenSpec[];
   allowedUsers: Set<string>;
   grokCliPath: string;
   workspace: string;
@@ -147,15 +153,11 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
-  // Telegram long polling permits one consumer per token. Prefer the token in
-  // this bot's own instance file over a globally inherited environment value,
-  // otherwise a Grok process can accidentally poll as a sibling bot.
-  const token = (instanceEnv.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "").trim();
-  if (!token) {
-    throw new Error(
-      "TELEGRAM_BOT_TOKEN is missing. Copy .env.example to .env and set it (run `npm run setup`).",
-    );
-  }
+  // Telegram long polling permits one consumer per token. Prefer values from
+  // this instance's .env over inherited process env so a sibling bot's token
+  // cannot override this Grok instance.
+  const bots = parseBotTokens({ ...process.env, ...instanceEnv });
+  const token = bots.find((b) => b.primary)?.token ?? bots[0]!.token;
 
   const workspaceRaw = process.env.GROK_WORKSPACE?.trim() || process.cwd();
   const workspace = resolve(expandHome(workspaceRaw));
@@ -184,6 +186,7 @@ export function loadConfig(): AppConfig {
 
   const cfg: AppConfig = {
     token,
+    bots,
     allowedUsers: new Set(list(process.env.ALLOWED_USERS)),
     grokCliPath: resolveGrokPath(process.env.GROK_CLI_PATH?.trim()),
     workspace,
