@@ -1,6 +1,7 @@
 /**
  * macOS service controller — installs a launchd LaunchAgent that runs at login
- * and is kept alive automatically.
+ * and is kept alive automatically. Named instances use
+ * `com.grok.telegrambot.<slug>` so they do not overwrite the default agent.
  */
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -8,49 +9,55 @@ import { join } from "node:path";
 import { runSafe } from "./platform.js";
 import type { LaunchSpec, ServiceController, ServiceResult } from "./types.js";
 
-const LABEL = "com.grok.telegrambot";
+function labelOf(spec: LaunchSpec): string {
+  return spec.macosLabel;
+}
 
-function plistPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+function plistPath(spec: LaunchSpec): string {
+  return join(homedir(), "Library", "LaunchAgents", `${labelOf(spec)}.plist`);
 }
 
 export const macosController: ServiceController = {
   platform: "macos",
 
   async install(spec) {
+    const label = labelOf(spec);
     mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
     mkdirSync(spec.logsDir, { recursive: true });
-    const path = plistPath();
+    const path = plistPath(spec);
     runSafe("launchctl", ["unload", "-w", path]); // ignore if not loaded
     writeFileSync(path, plist(spec), "utf-8");
     const r = runSafe("launchctl", ["load", "-w", path]);
-    return r.ok ? ok(`Installed and loaded LaunchAgent "${LABEL}".`) : fail(r.out);
+    return r.ok ? ok(`Installed and loaded LaunchAgent "${label}".`) : fail(r.out);
   },
 
-  async uninstall() {
-    runSafe("launchctl", ["unload", "-w", plistPath()]);
-    rmSync(plistPath(), { force: true });
-    return ok(`Removed LaunchAgent "${LABEL}".`);
+  async uninstall(spec) {
+    const label = labelOf(spec);
+    runSafe("launchctl", ["unload", "-w", plistPath(spec)]);
+    rmSync(plistPath(spec), { force: true });
+    return ok(`Removed LaunchAgent "${label}".`);
   },
 
-  async start() {
-    const r = runSafe("launchctl", ["start", LABEL]);
+  async start(spec) {
+    const r = runSafe("launchctl", ["start", labelOf(spec)]);
     return r.ok ? ok("Started.") : fail(r.out);
   },
 
-  async stop() {
-    const r = runSafe("launchctl", ["stop", LABEL]);
+  async stop(spec) {
+    const r = runSafe("launchctl", ["stop", labelOf(spec)]);
     return r.ok ? ok("Stopped.") : fail(r.out);
   },
 
-  async status() {
+  async status(spec) {
+    const label = labelOf(spec);
     const r = runSafe("launchctl", ["list"]);
-    const line = r.out.split("\n").find((l) => l.includes(LABEL));
+    const line = r.out.split("\n").find((l) => l.includes(label));
     return ok(line ? `Loaded: ${line.trim()}` : "Not loaded.");
   },
 };
 
 function plist(spec: LaunchSpec): string {
+  const label = labelOf(spec);
   const args = [spec.nodePath, ...spec.args].map((a) => `    <string>${esc(a)}</string>`).join("\n");
   const envEntries = Object.entries(spec.env ?? {});
   const envBlock = envEntries.length
@@ -67,7 +74,7 @@ function plist(spec: LaunchSpec): string {
     '<plist version="1.0">',
     "<dict>",
     "  <key>Label</key>",
-    `  <string>${LABEL}</string>`,
+    `  <string>${esc(label)}</string>`,
     "  <key>ProgramArguments</key>",
     "  <array>",
     args,

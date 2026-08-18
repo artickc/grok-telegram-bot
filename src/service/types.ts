@@ -3,10 +3,16 @@
  */
 
 export interface LaunchSpec {
-  /** Internal service id, e.g. "grok-telegram-bot". */
+  /** Internal service id, e.g. "grok-telegram-bot" or "grok-telegram-bot-work". */
   id: string;
   /** Human-readable name. */
   displayName: string;
+  /** Windows Scheduled Task / Startup launcher name. */
+  windowsTaskName: string;
+  /** launchd label, e.g. "com.grok.telegrambot" or "com.grok.telegrambot.work". */
+  macosLabel: string;
+  /** Present for named instances (`--name work`). */
+  slug?: string;
   /** Absolute path to the node binary that should run the bot. */
   nodePath: string;
   /** Arguments after the node binary (tsx loader + entry file). */

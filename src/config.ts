@@ -10,50 +10,38 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CANONICAL_DIR, expandHome, resolveInstanceDir } from "./app/instance.js";
+
+export { CANONICAL_DIR };
 
 /** Absolute path to the installed bot code (one level above src/). For a global
  *  npm install this lives inside node_modules — code lives here, never user data. */
 export const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** Canonical, path-independent home for this bot's `.env`, `logs/`, `data/` and
- *  the single-instance locks: `~/.grok/tg`. Used whenever the bot is started
- *  without an explicit instance dir and there's no `.env` in the current folder,
- *  so the SAME configuration is found no matter which directory you launch from. */
-export const CANONICAL_DIR = join(homedir(), ".grok", "tg");
-
 /**
  * Directory holding THIS instance's `.env`, `logs/` and `data/`. Resolution
  * (first match wins):
  *   1. `--instance <dir>` argv — set by the installed background service,
- *   2. `GROK_TG_DIR` env — an explicit override,
- *   3. `GROK_TG_CWD` env — the legacy launcher variable,
- *   4. the current folder, IF it already contains a `.env`,
+ *   2. `--name <slug>` / `GROK_TG_NAME` — `~/.grok/tg/instances/<slug>`,
+ *   3. `GROK_TG_DIR` env — an explicit override,
+ *   4. `GROK_TG_CWD` or the current folder, IF that folder already contains a `.env`,
  *   5. the canonical `~/.grok/tg` home — the path-independent default.
  */
-export const INSTANCE_DIR = resolveInstanceDir();
+export const INSTANCE_DIR = resolveInstanceDir({
+  argv: process.argv,
+  envDir: process.env.GROK_TG_DIR,
+  nameEnv: process.env.GROK_TG_NAME,
+  cwdHint: process.env.GROK_TG_CWD,
+  cwd: process.cwd(),
+});
 
 /** Absolute path to the `.env` this instance loads (and that `setup` writes). */
 export const ENV_PATH = join(INSTANCE_DIR, ".env");
-
-function resolveInstanceDir(): string {
-  const flag = process.argv.indexOf("--instance");
-  if (flag !== -1 && process.argv[flag + 1]) return resolve(process.argv[flag + 1]!);
-  const envDir = process.env.GROK_TG_DIR?.trim() || process.env.GROK_TG_CWD?.trim();
-  if (envDir) return resolve(expandHome(envDir));
-  if (existsSync(join(process.cwd(), ".env"))) return process.cwd();
-  return CANONICAL_DIR;
-}
 
 // Load .env from the resolved instance directory. Keep the parsed values as
 // well: a machine-wide TELEGRAM_BOT_TOKEN may belong to a sibling bot (Codex,
 // Kiro, etc.) and must never override this Grok instance's identity.
 const instanceEnv = loadDotenv({ path: ENV_PATH }).parsed ?? {};
-
-function expandHome(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2));
-  return p;
-}
 
 function bool(v: string | undefined, def: boolean): boolean {
   if (v === undefined || v === "") return def;

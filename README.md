@@ -109,10 +109,12 @@ ghost/duplicate that was still polling Telegram (the usual cause of a stale
 "⛔ Not authorized"), so the fresh process with your current `.env` wins. A
 plain `grok-tg run` yields to an already-running background service instead.
 
-Startup options: `grok-tg setup [--path] | run | install | status | logs [n] |
-stop | restart | uninstall`. Or try it without installing: `npx
-grok-telegram-bot setup`. See **[docs/INSTALL.md](./docs/INSTALL.md)** for the
-full guide.
+Startup options: `grok-tg [--name <slug>] setup [--path] | run | install |
+status | logs [n] | stop | restart | uninstall | instances`. Or try it without
+installing: `npx grok-telegram-bot setup`. See
+**[docs/INSTALL.md](./docs/INSTALL.md)** for the full guide. Want a second
+Telegram bot so each project keeps its own chat? See
+[Several Telegram bots on one host](#-several-telegram-bots-on-one-host).
 
 **Already installed?** See **[docs/UPGRADE.md](./docs/UPGRADE.md)** to update to
 the newest version — global npm installs auto-update when idle, or run
@@ -383,6 +385,45 @@ reply, and come back to A to read what it did. Close a session with ✖ (it isn'
 killed) — or tap **🛑 Kill · pid N** on its `/sessions` · `/active` card to stop
 its process (and `/killall` to stop them all).
 
+If switching inside one chat is hard to follow, run **one Telegram bot per
+project** instead — each bot is its own private chat. See
+[Several Telegram bots on one host](#-several-telegram-bots-on-one-host).
+
+## 🤖 Several Telegram bots on one host
+
+Telegram only gives you **one private chat per bot**. Session switching in that
+chat stays in one thread, which gets hard to read. The fix is a second
+(or third) bot from [@BotFather](https://t.me/BotFather), each with its own
+token, own chat, and own Grok session.
+
+Each named instance has its own `.env` / `logs` / `data` and a **unique
+background service**, so installing the second bot does not overwrite the first.
+
+```bash
+# 1. @BotFather → /newbot  (copy the new token)
+# 2. Create and start the extra instance (name = work, home, coding, …)
+grok-tg --name work setup <NEW_BOT_TOKEN> <YOUR_USER_ID>
+grok-tg --name work install
+
+# Later
+grok-tg instances                 # list default + named bots
+grok-tg --name work status
+grok-tg --name work logs
+grok-tg --name work restart
+```
+
+Files live in `~/.grok/tg/instances/<name>/`. The original bot stays at
+`~/.grok/tg/` and keeps the service name `grok-telegram-bot`. A named bot
+uses `grok-telegram-bot-<name>` (systemd), `com.grok.telegrambot.<name>`
+(launchd), or `GrokTelegramBot-<name>` (Windows).
+
+All instances share the host `grok login` (`~/.grok/auth.json`). Pick a project
+once in each chat with `/projects` — you then stay in that conversation. Avoid
+`/accounts` on two bots at the same time; they would both rewrite the same
+login file.
+
+`GROK_TG_NAME=<slug>` is the env equivalent of `--name`.
+
 ## 🔗 Connecting to live sessions
 
 While a turn is running, the bot marks that session busy (a `.lock` with the live
@@ -408,7 +449,8 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | `GROK_WORKSPACE` | no | cwd | Default working directory. |
 | `XAI_API_KEY` | no | — | xAI API key, only for headless hosts with no browser. Normally you sign in with `grok login` (or `/reauth`) — no key needed. Exported to the agent when set. |
 | `GROK_MODEL` | no | `grok-4.5` | Default model for new sessions. |
-| `GROK_TG_DIR` | no | `~/.grok/tg` | Folder holding this instance's `.env`, `logs/`, `data/`. Resolution: `--instance` → `GROK_TG_DIR` → a `.env` in the current folder → `~/.grok/tg`. So a `.env` created once is loaded from any startup path. |
+| `GROK_TG_DIR` | no | `~/.grok/tg` | Folder holding this instance's `.env`, `logs/`, `data/`. Resolution: `--instance` → `--name` / `GROK_TG_NAME` → `GROK_TG_DIR` → a `.env` in the current folder → `~/.grok/tg`. |
+| `GROK_TG_NAME` | no | — | Named instance slug (`work`, `home`, …). Same as `--name`. Stores config in `~/.grok/tg/instances/<slug>/` and uses a unique background service. |
 | `GROK_AGENT` | no | — | Custom sub-agent name (informational; Grok delegates via its own `task`/`delegate` tools). |
 | `GROK_TRUST_ALL_TOOLS` | no | `true` | Pass `--always-approve` so tools run without prompts. |
 | `AUTO_APPROVE_PERMISSIONS` | no | `true` | Auto-approve ACP `session/request_permission` (prefer “allow for this session”). Set `false` **and** `GROK_TRUST_ALL_TOOLS=false` for interactive Approve/Deny buttons (those prompts are **pinned** until you act or they time out). |
@@ -492,6 +534,11 @@ boot and auto-restarts on crash.
 
 **How do I control Grok from my phone?** Set up the bot, message it on Telegram,
 and pick a project with `/projects`. Every message becomes a Grok prompt.
+
+**Can I run two or more Telegram bots against the same Grok login?** Yes —
+create extra bots with @BotFather and `grok-tg --name <slug> setup …` /
+`install`. Each bot is its own private chat (no session switching). See
+[Several Telegram bots on one host](#-several-telegram-bots-on-one-host).
 
 **Can multiple people use one bot?** Add their IDs to `ALLOWED_USERS`. Each chat
 gets its own session.

@@ -4,6 +4,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { parseInstanceFlags, serviceIdentity } from "../app/instance.js";
 import { PROJECT_ROOT, INSTANCE_DIR } from "../config.js";
 
 export type Platform = "windows" | "linux" | "macos" | "unknown";
@@ -24,16 +25,22 @@ export function detectPlatform(): Platform {
 import type { LaunchSpec } from "./types.js";
 
 /** Build the launch spec that runs the bot via the current node + tsx loader. */
-export function buildLaunchSpec(): LaunchSpec {
-  const logsDir = join(INSTANCE_DIR, "logs");
+export function buildLaunchSpec(opts?: { instanceDir?: string; name?: string }): LaunchSpec {
+  const instanceDir = opts?.instanceDir ?? INSTANCE_DIR;
+  const name = opts?.name ?? parseInstanceFlags(process.argv).name;
+  const ident = serviceIdentity(instanceDir, name);
+  const logsDir = join(instanceDir, "logs");
   const args = ["--import", "tsx", join(PROJECT_ROOT, "src", "index.ts")];
   // Run the code from the package dir (cwd below) so `tsx` resolves, but tell
   // the bot where its .env/logs/data live. Only appended for a global install
   // (instance dir differs) so in-place checkouts keep identical launch args.
-  if (INSTANCE_DIR !== PROJECT_ROOT) args.push("--instance", INSTANCE_DIR);
+  if (instanceDir !== PROJECT_ROOT) args.push("--instance", instanceDir);
   return {
-    id: "grok-telegram-bot",
-    displayName: "Grok Telegram Bot",
+    id: ident.id,
+    displayName: ident.displayName,
+    windowsTaskName: ident.windowsTaskName,
+    macosLabel: ident.macosLabel,
+    slug: ident.slug,
     nodePath: process.execPath,
     args,
     cwd: PROJECT_ROOT,

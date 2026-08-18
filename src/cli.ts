@@ -1,25 +1,24 @@
 /**
  * Command-line interface for the Grok Telegram Bot.
  *
- *   grok-tg run         Run in the foreground (same as `npm start`)
- *   grok-tg install     Install as a background service that starts on boot
- *   grok-tg uninstall   Remove the background service
- *   grok-tg start|stop|restart|status
- *   grok-tg logs [n]    Show the last n log lines (default 100)
+ *   grok-tg [--name <slug>] run|install|status|…
+ *   grok-tg --name work setup <token> <userId>
+ *   grok-tg instances
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { listKnownInstances, stripInstanceFlags } from "./app/instance.js";
 import { ENV_PATH, INSTANCE_DIR, PROJECT_ROOT } from "./config.js";
 import { buildLaunchSpec, getController } from "./service/index.js";
 
 const HELP = `Grok Telegram Bot — CLI
 
-Usage: grok-tg <command>
+Usage: grok-tg [--name <slug>] [--instance <dir>] <command>
 
   run                 Run in the foreground
-  setup [--path]      Create/update .env (default ~/.grok/tg/.env, loaded from
-                      any folder); --path just prints the resolved .env location
+  setup [--path]      Create/update .env (default ~/.grok/tg/.env);
+                      --name <slug> writes ~/.grok/tg/instances/<slug>/.env
   install             Install + start a background service (autostart on boot)
   uninstall           Stop + remove the background service
   start               Start the service
@@ -27,12 +26,20 @@ Usage: grok-tg <command>
   restart             Restart the service
   status              Show install + running status
   logs [n]            Show the last n log lines (default 100)
+  instances           List named bot instances on this host
   help                Show this help
+
+Several Telegram bots on one host (one chat per project, no session switching):
+
+  grok-tg --name work setup <BOT_TOKEN> <YOUR_USER_ID>
+  grok-tg --name work install
+  grok-tg --name work status
 `;
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const [cmd, arg] = args;
+  const rest = stripInstanceFlags(args);
+  const [cmd, arg] = rest;
 
   switch (cmd) {
     case "run":
@@ -42,12 +49,11 @@ async function main(): Promise<void> {
 
     case "setup":
     case "config": {
-      // Run the plain-node setup script, targeting this folder (.env lives in
-      // the instance dir). Pass through optional <token> [userId] args.
+      // Run the plain-node setup script against the resolved instance dir.
       const script = join(PROJECT_ROOT, "scripts", "setup.mjs");
-      const r = spawnSync(process.execPath, [script, ...args.slice(1)], {
+      const r = spawnSync(process.execPath, [script, "--instance", INSTANCE_DIR, ...rest.slice(1)], {
         stdio: "inherit",
-        env: { ...process.env, GROK_TG_CWD: INSTANCE_DIR },
+        env: { ...process.env, GROK_TG_DIR: INSTANCE_DIR, GROK_TG_CWD: INSTANCE_DIR },
       });
       process.exit(r.status ?? 0);
       break;
@@ -55,9 +61,13 @@ async function main(): Promise<void> {
 
     case "install": {
       preflight();
-      const r = await getController().install(buildLaunchSpec());
+      const spec = buildLaunchSpec();
+      const r = await getController().install(spec);
       console.log(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`);
-      if (r.ok) console.log("\nManage it with: grok-tg status | stop | restart | logs");
+      if (r.ok) {
+        const flag = spec.slug ? `--name ${spec.slug} ` : "";
+        console.log(`\nManage it with: grok-tg ${flag}status | stop | restart | logs`);
+      }
       process.exit(r.ok ? 0 : 1);
       break;
     }
@@ -83,6 +93,10 @@ async function main(): Promise<void> {
 
     case "logs":
       printLogs(arg ? Number(arg) || 100 : 100);
+      break;
+
+    case "instances":
+      printInstances();
       break;
 
     case "help":
@@ -118,6 +132,24 @@ function printLogs(n: number): void {
   }
   const lines = readFileSync(file, "utf-8").split("\n");
   console.log(lines.slice(-n).join("\n"));
+}
+
+function printInstances(): void {
+  const items = listKnownInstances();
+  if (items.length === 0) {
+    console.log("No instances found.");
+    console.log("  grok-tg setup                         # default bot (~/.grok/tg)");
+    console.log("  grok-tg --name work setup <token> <userId>   # second bot");
+    return;
+  }
+  console.log("Instances:\n");
+  for (const it of items) {
+    const manage = it.slug ? `grok-tg --name ${it.slug}` : "grok-tg";
+    console.log(`  ${it.name}`);
+    console.log(`    dir:     ${it.dir}`);
+    console.log(`    service: ${it.identity.id}`);
+    console.log(`    manage:  ${manage} status | restart | logs\n`);
+  }
 }
 
 main().catch((err) => {

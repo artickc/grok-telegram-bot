@@ -9,6 +9,15 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Added
+
+- **Several Telegram bots on one host.** `grok-tg --name <slug>` gives each
+  BotFather token its own directory (`~/.grok/tg/instances/<slug>/`) and a
+  unique background service (`grok-telegram-bot-<slug>`), so you can keep one
+  private chat per project instead of switching sessions in a single chat.
+  `grok-tg instances` lists them. The default bot and service name are
+  unchanged.
+
 ## [2.3.1] - 2026-07-19
 
 ### Fixed

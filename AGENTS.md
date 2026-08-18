@@ -24,7 +24,7 @@ manages account sign-ins, and can run 24/7 as a background service.
 ```
 src/
 ├── index.ts     Entry point, logging, shutdown
-├── cli.ts       run / install / start / stop / status / logs
+├── cli.ts       run / install / start / stop / status / logs / instances
 ├── config.ts    .env loading, paths, daemon options
 ├── logger.ts    Leveled file logger
 ├── grok/        Grok ACP bridge: client, transport, JSONL types, models, session log
@@ -33,7 +33,7 @@ src/
 ├── mcp/         MCP config (list/toggle) + live health probe
 ├── render/      Markdown → MarkdownV2, diffs, tool formatting, chunking
 ├── stream/      Incremental edit-streaming
-├── service/     Cross-platform daemon (windows/linux/macos + selector)
+├── service/     Cross-platform daemon; named instances (`--name`) get unique units
 ├── tasks/       Scheduled tasks
 └── bot/         grammY bot, per-chat runtime, handlers
 ```

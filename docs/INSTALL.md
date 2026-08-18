@@ -53,6 +53,8 @@ grok-tg run                     # run in the foreground (Ctrl-C to stop)
 | `grok-tg logs [n]` | Tail the last `n` log lines (default 100). |
 | `grok-tg stop` / `restart` / `start` | Control the running service. |
 | `grok-tg uninstall` | Stop + remove the background service. |
+| `grok-tg --name <slug> …` | Same commands for a **second Telegram bot** (own token, own chat, own service). |
+| `grok-tg instances` | List the default bot and every named instance. |
 | `grok-tg help` | Show all commands. |
 
 The background service is **user-level** and auto-detected per platform — a
@@ -60,6 +62,22 @@ hidden Scheduled Task on Windows, a `systemd` **user** service on Linux (with
 linger for boot-without-login), and a launchd **LaunchAgent** on macOS. It runs
 the bot bound to the folder you installed it from, so its `.env`/`logs`/`data`
 stay in that folder.
+
+### Several Telegram bots on one host
+
+Want a dedicated Telegram chat per project instead of switching sessions in
+one bot? Create another bot with [@BotFather](https://t.me/BotFather) (`/newbot`)
+and give it a short name:
+
+```bash
+grok-tg --name work setup <NEW_BOT_TOKEN> <YOUR_USER_ID>
+grok-tg --name work install
+```
+
+That writes `~/.grok/tg/instances/work/.env` and installs
+`grok-telegram-bot-work` next to the default `grok-telegram-bot` service. The
+first bot is not replaced. Manage the extra one with
+`grok-tg --name work status|logs|restart`. `grok-tg instances` lists them all.
 
 Update later with `npm install -g grok-telegram-bot@latest` (global npm installs
 also auto-update when idle). Full upgrade steps for every install type are in

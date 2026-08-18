@@ -3,11 +3,13 @@
  * Easy setup: creates/updates the bot's .env, auto-detects the `grok` binary
  * and sensible PROJECT_ROOTS, and optionally writes the bot token / user id:
  *
- *   node scripts/setup.mjs [--path] [--instance <dir>] [<TELEGRAM_BOT_TOKEN> [ALLOWED_USER_ID]]
+ *   node scripts/setup.mjs [--path] [--instance <dir>] [--name <slug>]
+ *                          [<TELEGRAM_BOT_TOKEN> [ALLOWED_USER_ID]]
  *
  * By default the .env lives in the canonical, path-independent home
  * `~/.grok/tg/.env`, so the bot loads the SAME config no matter where it's
- * started from. `--path` just prints the resolved .env path and exits.
+ * started from. `--name work` writes `~/.grok/tg/instances/work/.env`.
+ * `--path` just prints the resolved .env path and exits.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -24,13 +26,24 @@ function expandHome(p) {
   return p;
 }
 
-/** Mirror of config.ts resolveInstanceDir() so setup writes EXACTLY where the
- *  bot will read from. Keep the two in sync. */
+/** Mirror of src/app/instance.ts resolveInstanceDir() so setup writes EXACTLY
+ *  where the bot will read from. Keep the two in sync. */
 function resolveInstanceDir() {
   const flag = process.argv.indexOf("--instance");
   if (flag !== -1 && process.argv[flag + 1]) return resolve(process.argv[flag + 1]);
-  const envDir = (process.env.GROK_TG_DIR || process.env.GROK_TG_CWD || "").trim();
+  const nameEq = process.argv.find((a) => a.startsWith("--name="));
+  const nameFlag = process.argv.indexOf("--name");
+  const name = nameEq ? nameEq.slice("--name=".length) : nameFlag !== -1 ? process.argv[nameFlag + 1] : process.env.GROK_TG_NAME;
+  if (name && String(name).trim()) {
+    return join(CANONICAL_DIR, "instances", String(name).trim().toLowerCase());
+  }
+  const envDir = (process.env.GROK_TG_DIR || "").trim();
   if (envDir) return resolve(expandHome(envDir));
+  const cwdHint = (process.env.GROK_TG_CWD || "").trim();
+  if (cwdHint) {
+    const hint = resolve(expandHome(cwdHint));
+    if (existsSync(join(hint, ".env"))) return hint;
+  }
   if (existsSync(join(process.cwd(), ".env"))) return process.cwd();
   return CANONICAL_DIR;
 }
@@ -41,7 +54,8 @@ const positionals = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--path") pathOnly = true;
-  else if (a === "--instance") i++;
+  else if (a === "--instance" || a === "--name") i++;
+  else if (a.startsWith("--instance=") || a.startsWith("--name=")) continue;
   else positionals.push(a);
 }
 const [tokenArg, userArg] = positionals;
