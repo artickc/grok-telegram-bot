@@ -96,8 +96,8 @@ export interface AppConfig {
   grokApiKey?: string;
   /** Optional Grok API base URL (default https://api.x.ai/v1). */
   grokBaseUrl?: string;
-  /** Default model for new sessions (e.g. grok-4-1-fast). */
-  grokModel: string;
+  /** Default model for new sessions. Unset = newest model grok currently offers. */
+  grokModel?: string;
   /** Optional max output tokens (exported as GROK_MAX_TOKENS). */
   grokMaxTokens?: number;
   /** Cap on tool-execution rounds per headless turn (grok --max-tool-rounds). */
@@ -192,7 +192,7 @@ export function loadConfig(): AppConfig {
     workspace,
     grokApiKey: process.env.XAI_API_KEY?.trim() || process.env.GROK_API_KEY?.trim() || undefined,
     grokBaseUrl: process.env.GROK_BASE_URL?.trim() || undefined,
-    grokModel: process.env.GROK_MODEL?.trim() || "grok-4.5",
+    grokModel: process.env.GROK_MODEL?.trim() || undefined,
     grokMaxTokens: process.env.GROK_MAX_TOKENS ? num(process.env.GROK_MAX_TOKENS, 0) || undefined : undefined,
     maxToolRounds: num(process.env.GROK_MAX_TOOL_ROUNDS, 400),
     agent: process.env.GROK_AGENT?.trim() || undefined,

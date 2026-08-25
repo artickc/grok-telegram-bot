@@ -438,7 +438,7 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 | `GROK_CLI_PATH` | no | auto / `grok` | Path to the `grok` binary. |
 | `GROK_WORKSPACE` | no | cwd | Default working directory. |
 | `XAI_API_KEY` | no | — | xAI API key, only for headless hosts with no browser. Normally you sign in with `grok login` (or `/reauth`) — no key needed. Exported to the agent when set. |
-| `GROK_MODEL` | no | `grok-4.5` | Default model for new sessions. |
+| `GROK_MODEL` | no | newest available | Default model for new sessions. Unset = newest model `grok models` / ACP reports. |
 | `GROK_TG_DIR` | no | `~/.grok/tg` | Folder holding this instance's `.env`, `logs/`, `data/`. Resolution: `--instance` → `GROK_TG_DIR` → a `.env` in the current folder → `~/.grok/tg`. So a `.env` created once is loaded from any startup path. |
 | `GROK_AGENT` | no | — | Custom sub-agent name (informational; Grok delegates via its own `task`/`delegate` tools). |
 | `GROK_TRUST_ALL_TOOLS` | no | `true` | Pass `--always-approve` so tools run without prompts. |

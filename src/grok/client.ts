@@ -14,7 +14,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createLogger } from "../logger.js";
 import { hasLogin } from "../app/grok-credentials.js";
-import { contextWindowFor, DEFAULT_MODEL, KNOWN_MODELS } from "./models.js";
+import { contextWindowFor, DEFAULT_MODEL, KNOWN_MODELS, newestModelId, queryGrokCliModels } from "./models.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { SessionLog } from "./session-log.js";
@@ -206,6 +206,7 @@ export interface GrokClientOptions {
   trustAllTools: boolean;
   /** Optional XAI_API_KEY to export for the agent (else it uses `grok login`). */
   apiKey?: string;
+  /** Pin a model. When unset, new sessions use the newest model grok offers. */
   model?: string;
   requestTimeoutMs?: number;
   autoRestart?: boolean;
@@ -261,6 +262,8 @@ export class GrokClient extends EventEmitter {
   currentModeId?: string;
   availableModels: Array<{ modelId: string; name: string; description?: string }> = [];
   currentModelId?: string;
+  /** Env-pinned model. Empty means "always newest available". */
+  private readonly pinnedModel?: string;
   private readonly metadata = new Map<string, SessionMetadata>();
   private subagents: SubagentInfo[] = [];
   private pendingStages: PendingStage[] = [];
@@ -273,7 +276,8 @@ export class GrokClient extends EventEmitter {
     this.timeout = opts.requestTimeoutMs ?? 120_000;
     this.promptIdleMs = opts.promptIdleTimeoutMs ?? 900_000;
     this.promptMaxMs = opts.promptMaxMs ?? 6 * 60 * 60_000;
-    this.currentModelId = opts.model || DEFAULT_MODEL;
+    this.pinnedModel = opts.model?.trim() || undefined;
+    this.currentModelId = this.pinnedModel || DEFAULT_MODEL;
     this.availableModels = KNOWN_MODELS.map((m) => ({ modelId: m.modelId, name: m.name, description: m.description }));
   }
 
@@ -355,7 +359,20 @@ export class GrokClient extends EventEmitter {
         }
       }
     }
+    await this.refreshCliModels();
     log.info(`connected: ${this.agentInfo?.name ?? "grok"} ${this.agentInfo?.version ?? ""}`.trim());
+  }
+
+  private async refreshCliModels(): Promise<void> {
+    const ids = await queryGrokCliModels(this.opts.grokCliPath);
+    if (!ids.length) return;
+    const known = new Map(this.availableModels.map((m) => [m.modelId, m]));
+    this.availableModels = ids.map((modelId) => known.get(modelId) ?? { modelId, name: modelId });
+    if (!this.pinnedModel) {
+      const newest = newestModelId(ids);
+      if (newest) this.currentModelId = newest;
+    }
+    log.info(`models: ${ids.join(", ")} (using ${this.currentModelId}${this.pinnedModel ? ", pinned" : ", newest"})`);
   }
 
   private maybeRestart(): void {
@@ -400,6 +417,7 @@ export class GrokClient extends EventEmitter {
     this.parseSessionExtras(res);
     this.cwd.set(res.sessionId, cwd);
     this.slog.create(res.sessionId, cwd);
+    await this.applyPreferredModel(res.sessionId, { upgradeToNewest: !this.pinnedModel });
     return res.sessionId;
   }
 
@@ -408,6 +426,22 @@ export class GrokClient extends EventEmitter {
     this.parseSessionExtras(res);
     this.cwd.set(sessionId, cwd);
     this.slog.create(sessionId, cwd, "resumed");
+    // Resume keeps the session's model unless GROK_MODEL pins one.
+    if (this.pinnedModel) await this.applyPreferredModel(sessionId, { upgradeToNewest: false });
+  }
+
+  private async applyPreferredModel(sessionId: string, opts: { upgradeToNewest: boolean }): Promise<void> {
+    let preferred: string | undefined;
+    if (this.pinnedModel) preferred = this.pinnedModel;
+    else if (opts.upgradeToNewest) {
+      preferred = newestModelId(this.availableModels.map((m) => m.modelId)) ?? this.currentModelId;
+    }
+    if (!preferred || preferred === this.currentModelId) return;
+    try {
+      await this.setModel(sessionId, preferred);
+    } catch (e) {
+      log.warn(`set_model(${preferred}) failed: ${(e as Error).message}`);
+    }
   }
 
   hasMode(id: string): boolean {

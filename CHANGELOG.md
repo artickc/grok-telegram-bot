@@ -9,6 +9,12 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ## [Unreleased]
 
+### Changed
+
+- **Default model follows grok.** If `GROK_MODEL` is unset, new sessions use
+  the newest model currently offered (`grok models` / ACP), not a pinned
+  `grok-4.5`. Set `GROK_MODEL` to pin one.
+
 ### Added
 
 - **Several Telegram bots, one Grok process.** Tokens are `BOT_TOKEN_1`,
