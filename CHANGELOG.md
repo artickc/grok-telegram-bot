@@ -15,6 +15,22 @@ The latest section is published verbatim as the GitHub Release notes by
   the newest model currently offered (`grok models` / ACP), not a pinned
   `grok-4.5`. Set `GROK_MODEL` to pin one.
 
+### Fixed
+
+- **`/goal` and other Grok slashes work again.** The multi-bot branch dropped
+  slash forwarding, so `/goal`, `/plan`, `/compact`, `/workflow`, … were
+  treated as unknown bot commands. They are forwarded into the active ACP
+  session again (command RPC, then prompt fallback).
+
+- **Plan mode no longer hangs the Telegram bots.** Grok's `exit_plan_mode`
+  reverse request (`_x.ai/exit_plan_mode`) is answered instead of Method-not-found.
+  The owning chat gets the plan text plus Approve / Request changes / Abandon.
+  A plain follow-up message (no button) is treated as Request changes with
+  that text as the notes. The Changes button still works the same way. No owning chat, a send
+  failure, or `AUTO_APPROVE_PLAN=true` auto-approves so the agent never waits
+  on the TUI. `ask_user_question` is skipped so interviews do not block
+  headless turns.
+
 ### Added
 
 - **Several Telegram bots, one Grok process.** Tokens are `BOT_TOKEN_1`,
@@ -22,7 +38,7 @@ The latest section is published verbatim as the GitHub Release notes by
   private chat with an isolated Grok session; they share one `grok agent
   stdio` and the host login. `BOT_TOKEN_1` is primary and keeps unprefixed
   `settings.json` keys. `TELEGRAM_BOT_TOKEN` is still accepted as an alias
-  for `BOT_TOKEN_1`.
+  for `BOT_TOKEN_1`; extra bots may also use `TELEGRAM_BOT_TOKEN_<LABEL>`.
 
 ## [2.3.1] - 2026-07-19
 

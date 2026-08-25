@@ -83,7 +83,7 @@ function list(v: string | undefined): string[] {
 }
 
 export interface AppConfig {
-  /** Primary bot token (BOT_TOKEN_1, or the lowest numbered token). */
+  /** Primary bot token (BOT_TOKEN_1, TELEGRAM_BOT_TOKEN, or the first listed token). */
   token: string;
   /** Every Telegram bot this process should poll. Primary is first. */
   bots: BotTokenSpec[];
@@ -113,6 +113,12 @@ export interface AppConfig {
    * Approve/Deny buttons.
    */
   autoApprovePermissions: boolean;
+  /**
+   * Auto-approve plan-mode exit without Telegram buttons.
+   * Defaults false — show the plan and Approve / Changes / Abandon.
+   * Unattended sessions still auto-approve when no chat owns the session.
+   */
+  autoApprovePlan: boolean;
   projectRoots: string[];
   streamThrottleMs: number;
   messageBatchMs: number;
@@ -199,6 +205,7 @@ export function loadConfig(): AppConfig {
     trustAllTools: bool(process.env.GROK_TRUST_ALL_TOOLS, true),
     // Default true: auto-approve with session-scope when the agent still asks.
     autoApprovePermissions: bool(process.env.AUTO_APPROVE_PERMISSIONS, true),
+    autoApprovePlan: bool(process.env.AUTO_APPROVE_PLAN, false),
     projectRoots: [...new Set(roots)],
     streamThrottleMs: num(process.env.STREAM_THROTTLE_MS, 1500),
     messageBatchMs: nonNegNum(process.env.MESSAGE_BATCH_MS, 800),

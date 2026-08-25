@@ -14,6 +14,7 @@ import { registerAccounts } from "./handlers/accounts.js";
 import { registerReauth } from "./handlers/auth.js";
 import { registerControl } from "./handlers/control.js";
 import { registerDocuments } from "./handlers/document.js";
+import { registerGrokSlash } from "./handlers/grok-slash.js";
 import { registerHistory } from "./handlers/history.js";
 import { registerKill } from "./handlers/kill.js";
 import { registerMcp } from "./handlers/mcp.js";
@@ -33,6 +34,7 @@ import { Ephemeral } from "./menu/ephemeral.js";
 import { BAR_LABELS } from "./menu/keyboard.js";
 import { StatusPanel } from "./menu/status-panel.js";
 import { PermissionService } from "./permission-service.js";
+import { PlanExitService } from "./plan-exit-service.js";
 import { RuntimeRegistry } from "./registry.js";
 import { TaskWizard } from "./wizard/task-wizard.js";
 
@@ -59,6 +61,7 @@ export interface BotSurface {
   registry: RuntimeRegistry;
   settings: SettingsStore;
   permissions: PermissionService;
+  planExit: PlanExitService;
   ephemeral: Ephemeral;
 }
 
@@ -92,6 +95,9 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
   const permissions = new PermissionService(bot.api, registry, autoApprovePerms, {
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
+  const planExit = new PlanExitService(bot.api, cfg.autoApprovePlan, (chatId) =>
+    statusPanel.ensurePinned(chatId),
+  );
 
   const surface: BotSurface = {
     spec,
@@ -101,6 +107,7 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
     registry,
     settings,
     permissions,
+    planExit,
     ephemeral: new Ephemeral(bot.api, cfg.dataDir, namespace),
   };
 
@@ -155,8 +162,19 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
     if (sid) await switchAndShow(ctx, deps, sid);
   });
 
+  bot.callbackQuery(/^planx:(\d+):(ok|chg|no)$/, async (ctx) => {
+    const toast = planExit.resolveChoice(ctx.match![1]!, ctx.match![2]!);
+    await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
+  });
+
   registerMenu(bot, deps);
   registerWizardInput(bot, deps);
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message?.text ?? "";
+    if (!text || text.startsWith("/") || BAR_LABELS.includes(text)) return next();
+    if (planExit.takeFeedback(ctx.chat.id, text)) return;
+    await next();
+  });
   registerControl(bot, deps);
   registerProjects(bot, deps);
   registerSessions(bot, deps);
@@ -173,6 +191,7 @@ export async function createSurface(host: BotHost, spec: BotTokenSpec): Promise<
   registerPhotos(bot, deps);
   registerDocuments(bot, deps);
   registerVoice(bot, deps);
+  registerGrokSlash(bot, deps);
   registerMessages(bot, deps);
 
   bot.catch((err) => {

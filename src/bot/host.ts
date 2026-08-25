@@ -84,6 +84,21 @@ function wireAcp(host: BotHost): void {
     return fallback ? fallback.permissions.handle(p) : Promise.resolve(autoDecideSession(p));
   };
 
+  host.acp.planExitHandler = async ({ params }) => {
+    const sessionId =
+      (typeof params.sessionId === "string" && params.sessionId) ||
+      (typeof params.session_id === "string" && params.session_id) ||
+      "";
+    const owner = sessionId
+      ? host.surfaces.find((s) => s.registry.describeSession(sessionId).chatId !== undefined)
+      : undefined;
+    const chatId = owner && sessionId ? owner.registry.describeSession(sessionId).chatId : undefined;
+    const cwd = sessionId ? host.store.get(sessionId)?.cwd : undefined;
+    if (!owner || chatId === undefined) return { outcome: "approved", feedback: "" };
+    return owner.planExit.handle(params, { chatId, cwd });
+  };
+
+
   host.acp.on("subagents", (subagents, pending) => {
     const busy = host.surfaces.filter((s) => s.registry.hasActiveTurn());
     const attributer = busy.length === 1 ? busy[0] : undefined;

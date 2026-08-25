@@ -25,7 +25,7 @@ export interface BotDeps {
   token: string;
   /** Telegram getMe().id. Undefined on the primary bot (unprefixed stores). */
   botId?: number;
-  /** Slot from the env key (`1` for BOT_TOKEN_1, `2` for BOT_TOKEN_2, …). */
+  /** Slot (`1`) or labeled suffix (`app`) from the env key. */
   botLabel: string;
   /** Which bot currently owns a Grok session, if known. */
   sessionHome: (sessionId: string) => "this" | "other" | undefined;

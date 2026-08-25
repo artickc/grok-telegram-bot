@@ -412,7 +412,8 @@ once with `/projects`. Messages in bot 2 never share context with bot 3.
 
 Add more with `BOT_TOKEN_4`, `BOT_TOKEN_5`, … Empty keys are ignored. If
 `BOT_TOKEN_1` is unset, the lowest numbered token is the primary bot.
-`TELEGRAM_BOT_TOKEN` is still accepted as an alias for `BOT_TOKEN_1`.
+`TELEGRAM_BOT_TOKEN` is still accepted as an alias for `BOT_TOKEN_1`; extra
+bots may also use `TELEGRAM_BOT_TOKEN_<LABEL>`.
 
 ## 🔗 Connecting to live sessions
 
@@ -435,6 +436,7 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 |---|---|---|---|
 | `BOT_TOKEN_1` | one required | — | Primary bot token from @BotFather. `TELEGRAM_BOT_TOKEN` is an alias. |
 | `BOT_TOKEN_2` / `BOT_TOKEN_3` / … | no | — | Extra bots on the same Grok process. Each is its own chat and session. |
+| `TELEGRAM_BOT_TOKEN_<LABEL>` | no | — | Alternate extra-bot keys, e.g. `TELEGRAM_BOT_TOKEN_APP`. |
 | `ALLOWED_USERS` | recommended | *(all)* | Comma-separated Telegram user IDs. Empty = anyone (unsafe). |
 | `GROK_CLI_PATH` | no | auto / `grok` | Path to the `grok` binary. |
 | `GROK_WORKSPACE` | no | cwd | Default working directory. |

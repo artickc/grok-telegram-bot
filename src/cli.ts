@@ -105,8 +105,12 @@ function preflight(): void {
     return;
   }
   const env = readFileSync(envPath, "utf-8");
-  if (!/^(?:BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN)=.+/m.test(env)) {
-    console.warn("⚠ No BOT_TOKEN_1 (or BOT_TOKEN_2 / BOT_TOKEN_3) in .env — the service will fail to start.");
+  if (
+    !/^(?:BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN(?:_[A-Z][A-Z0-9_]*)?)=.+/m.test(env)
+  ) {
+    console.warn(
+      "⚠ No BOT_TOKEN_1 (or TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN_<LABEL>) in .env — the service will fail to start.",
+    );
   }
 }
 

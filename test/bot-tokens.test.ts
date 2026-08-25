@@ -79,6 +79,34 @@ test("parseBotTokens prefers BOT_TOKEN_1 over TELEGRAM_BOT_TOKEN", () => {
   assert.equal(bots[0]?.token, "111:aaa");
 });
 
+test("parseBotTokens keeps TELEGRAM_BOT_TOKEN as primary with labeled extras", () => {
+  const bots = parseBotTokens({
+    TELEGRAM_BOT_TOKEN: "111:aaa",
+    TELEGRAM_BOT_TOKEN_APP: "222:bbb",
+    TELEGRAM_BOT_TOKEN_CONTENT: "333:ccc",
+  });
+  assert.equal(bots.length, 3);
+  assert.deepEqual(
+    bots.map((b) => ({ label: b.label, primary: b.primary, envKey: b.envKey })),
+    [
+      { label: "1", primary: true, envKey: "TELEGRAM_BOT_TOKEN" },
+      { label: "app", primary: false, envKey: "TELEGRAM_BOT_TOKEN_APP" },
+      { label: "content", primary: false, envKey: "TELEGRAM_BOT_TOKEN_CONTENT" },
+    ],
+  );
+});
+
+test("parseBotTokens uses labeled keys when numbered tokens are absent", () => {
+  const bots = parseBotTokens({
+    TELEGRAM_BOT_TOKEN_CONTENT: "333:ccc",
+    TELEGRAM_BOT_TOKEN_APP: "222:bbb",
+  });
+  assert.equal(bots[0]?.label, "app");
+  assert.equal(bots[0]?.primary, true);
+  assert.equal(bots[1]?.label, "content");
+  assert.equal(bots[1]?.primary, false);
+});
+
 test("parseBotTokens throws when nothing is set", () => {
   assert.throws(() => parseBotTokens({}), /BOT_TOKEN_1/);
 });

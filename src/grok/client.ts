@@ -32,6 +32,7 @@ import type {
   SubagentInfo,
   SubagentListUpdate,
 } from "./types.js";
+import { handleAgentReverseRequest, type PlanExitDecision } from "./ext-methods.js";
 
 const log = createLogger("grok:client");
 
@@ -268,6 +269,14 @@ export class GrokClient extends EventEmitter {
   private subagents: SubagentInfo[] = [];
   private pendingStages: PendingStage[] = [];
   permissionHandler?: (params: RequestPermissionParams) => Promise<PermissionOutcome>;
+  /**
+   * Optional plan-exit decision (Telegram notice / buttons).
+   * When unset, exit_plan_mode reverse requests auto-approve.
+   */
+  planExitHandler?: (ctx: {
+    method: string;
+    params: Record<string, unknown>;
+  }) => Promise<PlanExitDecision>;
 
   constructor(private readonly opts: GrokClientOptions) {
     super();
@@ -689,8 +698,18 @@ export class GrokClient extends EventEmitter {
         const opts = (params.options as Array<{ optionId: string; name?: string; kind?: string }>) ?? [];
         result = pickAllowOption(opts);
       } else {
-        // We advertise no fs/terminal capabilities, so the agent shouldn't ask.
-        throw new GrokError(`unsupported client method: ${method}`, -32601);
+        // Plan exit / elicitation / x.ai extensions — must not Method-not-found
+        // or Grok stays stuck in plan mode ("client disconnected mid-approval").
+        const decide =
+          this.planExitHandler ??
+          (async (): Promise<PlanExitDecision> => ({ outcome: "approved", feedback: "" }));
+        const handled = await handleAgentReverseRequest(method, params, decide);
+        if (handled !== undefined) {
+          result = handled;
+        } else {
+          log.warn(`unsupported client method (acking empty): ${method}`);
+          result = {};
+        }
       }
       this.transport?.send({ jsonrpc: "2.0", id, result });
     } catch (err) {
