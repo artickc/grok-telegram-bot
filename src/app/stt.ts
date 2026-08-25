@@ -1,12 +1,12 @@
 /**
- * Speech-to-text via any OpenAI/Whisper-compatible endpoint.
+ * Speech-to-text: xAI Grok STT (`/v1/stt`) or any OpenAI/Whisper-compatible
+ * `/audio/transcriptions` gateway.
  *
  * Required for Telegram voice / audio / video notes: Grok Build CLI over ACP
  * does not accept audio content blocks, so without STT_API_URL the bot rejects
  * voice with a "not configured" message instead of attaching unusable audio.
  *
- * Language handling: when STT_LANGUAGE is unset, Whisper auto-detects the
- * spoken language (covers English, Russian, Romanian/Moldovan, and ~100 more).
+ * Leave STT_LANGUAGE blank to auto-detect.
  */
 import { createLogger } from "../logger.js";
 
@@ -29,11 +29,12 @@ export class SttService {
   /** Transcribe audio bytes; returns the recognized text (may be empty). */
   async transcribe(bytes: Buffer, mimeType: string, filename: string): Promise<string> {
     if (!this.cfg.apiUrl) throw new Error("STT is not configured (set STT_API_URL).");
-    const url = endpoint(this.cfg.apiUrl);
+    const url = resolveSttEndpoint(this.cfg.apiUrl);
 
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(bytes)], { type: mimeType }), filename);
-    form.append("model", this.cfg.model);
+    // Native xAI `/v1/stt` has no model field. Whisper-compatible APIs need one.
+    if (!/\/stt$/i.test(url)) form.append("model", this.cfg.model);
     if (this.cfg.language) form.append("language", this.cfg.language);
 
     const headers: Record<string, string> = {};
@@ -50,7 +51,10 @@ export class SttService {
   }
 }
 
-function endpoint(base: string): string {
+/** Resolve a base URL to the transcription POST path. */
+export function resolveSttEndpoint(base: string): string {
   const b = base.replace(/\/$/, "");
-  return b.endsWith("/audio/transcriptions") ? b : `${b}/audio/transcriptions`;
+  if (/\/audio\/transcriptions$/i.test(b) || /\/v1\/stt$/i.test(b)) return b;
+  if (/api\.x\.ai(?:\/v1)?$/i.test(b)) return `${b.replace(/\/v1$/i, "")}/v1/stt`;
+  return `${b}/audio/transcriptions`;
 }

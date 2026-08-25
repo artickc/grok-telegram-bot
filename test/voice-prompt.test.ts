@@ -5,8 +5,16 @@
  */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { resolveSttEndpoint } from "../src/app/stt.js";
 import { buildContentBlocks, mergeInputs } from "../src/bot/prompt-content.js";
 import { textPrompt, type PromptInput } from "../src/app/types.js";
+
+test("resolveSttEndpoint maps xAI bases to /v1/stt", () => {
+  assert.equal(resolveSttEndpoint("https://api.x.ai/v1"), "https://api.x.ai/v1/stt");
+  assert.equal(resolveSttEndpoint("https://api.x.ai/v1/"), "https://api.x.ai/v1/stt");
+  assert.equal(resolveSttEndpoint("https://api.x.ai/v1/stt"), "https://api.x.ai/v1/stt");
+  assert.equal(resolveSttEndpoint("https://api.openai.com/v1"), "https://api.openai.com/v1/audio/transcriptions");
+});
 
 test("buildContentBlocks emits resource_link blocks before text", () => {
   const input: PromptInput = {
