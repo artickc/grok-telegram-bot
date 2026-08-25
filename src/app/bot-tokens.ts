@@ -1,54 +1,66 @@
 /**
  * Parse Telegram bot tokens from the environment.
  *
- *   TELEGRAM_BOT_TOKEN              primary bot (unprefixed settings keys)
- *   TELEGRAM_BOT_TOKEN_<LABEL>      extra bots, e.g. TELEGRAM_BOT_TOKEN_APP
+ *   BOT_TOKEN_1                     primary bot (unprefixed settings keys)
+ *   BOT_TOKEN_2 / BOT_TOKEN_3 / …   extra bots on the same Grok process
  *
- * Labels come from the suffix (APP → "app"). The primary token keeps existing
- * `settings.json` keys so an upgrade does not drop the current session.
+ * `TELEGRAM_BOT_TOKEN` is accepted as an alias for `BOT_TOKEN_1` when that
+ * key is unset, so older .env files still start.
  */
 export interface BotTokenSpec {
   token: string;
-  /** Lowercased suffix (`app`) or `"default"` for TELEGRAM_BOT_TOKEN. */
+  /** Slot number as a string (`"1"`, `"2"`, …). */
   label: string;
-  /** First / legacy bot — settings and tasks stay unprefixed. */
+  /** First bot — settings and tasks stay unprefixed. */
   primary: boolean;
   envKey: string;
 }
 
-const LABELED_RE = /^TELEGRAM_BOT_TOKEN_([A-Z][A-Z0-9_]*)$/;
+const NUMBERED_RE = /^BOT_TOKEN_([1-9][0-9]*)$/;
 
 export function parseBotTokens(env: Record<string, string | undefined>): BotTokenSpec[] {
-  const primaryRaw = (env.TELEGRAM_BOT_TOKEN ?? "").trim();
-  const labeled: BotTokenSpec[] = [];
+  const numbered: { n: number; spec: BotTokenSpec }[] = [];
   for (const [key, raw] of Object.entries(env)) {
-    const m = LABELED_RE.exec(key);
+    const m = NUMBERED_RE.exec(key);
     if (!m) continue;
     const token = (raw ?? "").trim();
     if (!token) continue;
-    labeled.push({
-      token,
-      label: m[1]!.toLowerCase(),
-      primary: false,
-      envKey: key,
+    const n = Number(m[1]);
+    numbered.push({
+      n,
+      spec: {
+        token,
+        label: String(n),
+        primary: n === 1,
+        envKey: key,
+      },
     });
   }
-  labeled.sort((a, b) => a.label.localeCompare(b.label));
+  numbered.sort((a, b) => a.n - b.n);
+
+  const alias = (env.TELEGRAM_BOT_TOKEN ?? "").trim();
+  if (alias && !numbered.some((x) => x.n === 1)) {
+    numbered.unshift({
+      n: 1,
+      spec: {
+        token: alias,
+        label: "1",
+        primary: true,
+        envKey: "TELEGRAM_BOT_TOKEN",
+      },
+    });
+  }
 
   const out: BotTokenSpec[] = [];
   const seen = new Set<string>();
-  if (primaryRaw) {
-    out.push({ token: primaryRaw, label: "default", primary: true, envKey: "TELEGRAM_BOT_TOKEN" });
-    seen.add(primaryRaw);
-  }
-  for (const spec of labeled) {
+  for (const { spec } of numbered) {
     if (seen.has(spec.token)) continue;
     seen.add(spec.token);
     out.push(spec);
   }
   if (out.length === 0) {
     throw new Error(
-      "No Telegram bot token set. Set TELEGRAM_BOT_TOKEN and/or TELEGRAM_BOT_TOKEN_<LABEL> (e.g. TELEGRAM_BOT_TOKEN_APP).",
+      "No Telegram bot token set. Set BOT_TOKEN_1 (and optionally BOT_TOKEN_2, BOT_TOKEN_3, …).",
     );
   }
   if (!out.some((s) => s.primary)) out[0]!.primary = true;

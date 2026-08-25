@@ -101,12 +101,12 @@ async function main(): Promise<void> {
 function preflight(): void {
   const envPath = ENV_PATH;
   if (!existsSync(envPath)) {
-    console.warn(`⚠ No .env found at ${envPath}. Run \`grok-tg setup\` and set TELEGRAM_BOT_TOKEN first.`);
+    console.warn(`⚠ No .env found at ${envPath}. Run \`grok-tg setup\` and set BOT_TOKEN_1 first.`);
     return;
   }
   const env = readFileSync(envPath, "utf-8");
-  if (!/^TELEGRAM_BOT_TOKEN(?:_[A-Z][A-Z0-9_]*)?=.+/m.test(env)) {
-    console.warn("⚠ No TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_<LABEL> in .env — the service will fail to start.");
+  if (!/^(?:BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN)=.+/m.test(env)) {
+    console.warn("⚠ No BOT_TOKEN_1 (or BOT_TOKEN_2 / BOT_TOKEN_3) in .env — the service will fail to start.");
   }
 }
 

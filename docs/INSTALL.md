@@ -35,7 +35,7 @@ so keep one folder per bot instance:
 mkdir my-bot && cd my-bot       # a home for this bot's config + logs + data
 grok-tg setup                   # auto-detects grok, writes ./.env
 #   (or pass values directly:  grok-tg setup <BOT_TOKEN> <YOUR_USER_ID>)
-# edit .env: set TELEGRAM_BOT_TOKEN and ALLOWED_USERS
+# edit .env: set BOT_TOKEN_1 and ALLOWED_USERS
 grok-tg run                     # run in the foreground (Ctrl-C to stop)
 ```
 
@@ -49,9 +49,9 @@ Create extra bots with [@BotFather](https://t.me/BotFather) and add descriptive
 keys to the **same** `.env`:
 
 ```bash
-TELEGRAM_BOT_TOKEN=…                 # existing bot
-TELEGRAM_BOT_TOKEN_APP=…             # e.g. app-code chat
-TELEGRAM_BOT_TOKEN_CONTENT=…         # e.g. learning-content chat
+BOT_TOKEN_1=…                        # first bot
+BOT_TOKEN_2=…                        # second bot
+BOT_TOKEN_3=…                        # third bot
 ```
 
 Then `grok-tg restart`. One service polls every token. Pick a project once in
@@ -123,7 +123,7 @@ git clone https://github.com/artickc/grok-telegram-bot.git
 cd grok-telegram-bot
 npm install
 npm run setup            # auto-detects grok + project roots, writes .env
-# edit .env: set TELEGRAM_BOT_TOKEN and ALLOWED_USERS
+# edit .env: set BOT_TOKEN_1 and ALLOWED_USERS
 npm start                # or: npm run dev  (auto-reload)
 ```
 

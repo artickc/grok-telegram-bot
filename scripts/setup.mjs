@@ -3,7 +3,7 @@
  * Easy setup: creates/updates the bot's .env, auto-detects the `grok` binary
  * and sensible PROJECT_ROOTS, and optionally writes the bot token / user id:
  *
- *   node scripts/setup.mjs [--path] [--instance <dir>] [<TELEGRAM_BOT_TOKEN> [ALLOWED_USER_ID]]
+ *   node scripts/setup.mjs [--path] [--instance <dir>] [<BOT_TOKEN_1> [ALLOWED_USER_ID]]
  *
  * By default the .env lives in the canonical, path-independent home
  * `~/.grok/tg/.env`, so the bot loads the SAME config no matter where it's
@@ -97,8 +97,8 @@ if (roots.length) {
 }
 
 if (tokenArg) {
-  setVar("TELEGRAM_BOT_TOKEN", tokenArg);
-  console.log("\u2713 Wrote TELEGRAM_BOT_TOKEN");
+  setVar("BOT_TOKEN_1", tokenArg);
+  console.log("\u2713 Wrote BOT_TOKEN_1");
 }
 if (userArg) {
   setVar("ALLOWED_USERS", userArg);
@@ -109,8 +109,8 @@ writeFileSync(envPath, env, "utf-8");
 console.log(`\n\u2713 .env written to ${envPath}`);
 console.log("  (loaded from here no matter which folder you start the bot in)");
 
-if (!/^TELEGRAM_BOT_TOKEN(?:_[A-Z][A-Z0-9_]*)?=.+/m.test(env)) {
-  console.log("\nNext: open .env, paste your bot token from @BotFather (TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN_APP), then sign in with `grok login` (or /reauth). Then run `grok-tg run`.");
+if (!/^(?:BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN)=.+/m.test(env)) {
+  console.log("\nNext: open .env, paste your bot token from @BotFather (BOT_TOKEN_1, optionally BOT_TOKEN_2 / BOT_TOKEN_3), then sign in with `grok login` (or /reauth). Then run `grok-tg run`.");
 } else {
   console.log("\nReady! Sign in with `grok login` if you haven't, then run `grok-tg run` (or `npm start`).");
 }

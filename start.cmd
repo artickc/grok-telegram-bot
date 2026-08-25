@@ -8,7 +8,7 @@ if not exist node_modules (
 if not exist .env (
   echo No .env found - running setup...
   call npm run setup
-  echo Edit .env to add your TELEGRAM_BOT_TOKEN, then run start.cmd again.
+  echo Edit .env to add BOT_TOKEN_1, then run start.cmd again.
   pause
   exit /b 1
 )

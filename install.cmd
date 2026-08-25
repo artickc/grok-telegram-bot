@@ -26,7 +26,7 @@ echo [2/4] Detecting grok and writing .env...
 call node scripts\setup.mjs
 
 echo.
-node -e "process.exit(/^TELEGRAM_BOT_TOKEN=.+/m.test(require('fs').readFileSync('.env','utf8'))?0:1)" 2>nul
+node -e "process.exit(/^(?:BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN)=.+/m.test(require('fs').readFileSync('.env','utf8'))?0:1)" 2>nul
 if not errorlevel 1 goto :have_token
 
 echo [3/4] Telegram setup

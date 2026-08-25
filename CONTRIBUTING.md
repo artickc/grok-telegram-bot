@@ -8,7 +8,7 @@ Thanks for your interest in improving the Grok Telegram Bot!
 git clone https://github.com/artickc/grok-telegram-bot.git
 cd grok-telegram-bot
 npm install
-cp .env.example .env   # add your TELEGRAM_BOT_TOKEN and ALLOWED_USERS
+cp .env.example .env   # add BOT_TOKEN_1 and ALLOWED_USERS
 npm run dev            # auto-reload on changes
 ```
 

@@ -7,46 +7,80 @@ import { parseBotTokens } from "../src/app/bot-tokens.js";
 import { SettingsStore } from "../src/app/settings-store.js";
 import { TaskStore } from "../src/tasks/store.js";
 
-test("parseBotTokens keeps TELEGRAM_BOT_TOKEN as primary", () => {
+test("parseBotTokens keeps BOT_TOKEN_1 as primary", () => {
   const bots = parseBotTokens({
-    TELEGRAM_BOT_TOKEN: "111:aaa",
-    TELEGRAM_BOT_TOKEN_APP: "222:bbb",
-    TELEGRAM_BOT_TOKEN_CONTENT: "333:ccc",
+    BOT_TOKEN_1: "111:aaa",
+    BOT_TOKEN_2: "222:bbb",
+    BOT_TOKEN_3: "333:ccc",
   });
   assert.equal(bots.length, 3);
   assert.deepEqual(
     bots.map((b) => ({ label: b.label, primary: b.primary, envKey: b.envKey })),
     [
-      { label: "default", primary: true, envKey: "TELEGRAM_BOT_TOKEN" },
-      { label: "app", primary: false, envKey: "TELEGRAM_BOT_TOKEN_APP" },
-      { label: "content", primary: false, envKey: "TELEGRAM_BOT_TOKEN_CONTENT" },
+      { label: "1", primary: true, envKey: "BOT_TOKEN_1" },
+      { label: "2", primary: false, envKey: "BOT_TOKEN_2" },
+      { label: "3", primary: false, envKey: "BOT_TOKEN_3" },
     ],
   );
 });
 
-test("parseBotTokens uses labeled keys when TELEGRAM_BOT_TOKEN is absent", () => {
+test("parseBotTokens sorts numbered keys numerically", () => {
   const bots = parseBotTokens({
-    TELEGRAM_BOT_TOKEN_CONTENT: "333:ccc",
-    TELEGRAM_BOT_TOKEN_APP: "222:bbb",
+    BOT_TOKEN_10: "ccc",
+    BOT_TOKEN_2: "bbb",
+    BOT_TOKEN_1: "aaa",
   });
-  assert.equal(bots[0]?.label, "app");
+  assert.deepEqual(
+    bots.map((b) => b.label),
+    ["1", "2", "10"],
+  );
+});
+
+test("parseBotTokens uses the lowest number as primary when BOT_TOKEN_1 is absent", () => {
+  const bots = parseBotTokens({
+    BOT_TOKEN_3: "333:ccc",
+    BOT_TOKEN_2: "222:bbb",
+  });
+  assert.equal(bots[0]?.label, "2");
   assert.equal(bots[0]?.primary, true);
-  assert.equal(bots[1]?.label, "content");
+  assert.equal(bots[1]?.label, "3");
   assert.equal(bots[1]?.primary, false);
 });
 
 test("parseBotTokens ignores empty values and dedupes the same token", () => {
   const bots = parseBotTokens({
-    TELEGRAM_BOT_TOKEN: "111:aaa",
-    TELEGRAM_BOT_TOKEN_APP: "111:aaa",
-    TELEGRAM_BOT_TOKEN_CONTENT: "",
+    BOT_TOKEN_1: "111:aaa",
+    BOT_TOKEN_2: "111:aaa",
+    BOT_TOKEN_3: "",
   });
   assert.equal(bots.length, 1);
+  assert.equal(bots[0]?.envKey, "BOT_TOKEN_1");
+});
+
+test("parseBotTokens treats TELEGRAM_BOT_TOKEN as alias for BOT_TOKEN_1", () => {
+  const bots = parseBotTokens({
+    TELEGRAM_BOT_TOKEN: "111:aaa",
+    BOT_TOKEN_2: "222:bbb",
+  });
+  assert.equal(bots.length, 2);
   assert.equal(bots[0]?.envKey, "TELEGRAM_BOT_TOKEN");
+  assert.equal(bots[0]?.label, "1");
+  assert.equal(bots[0]?.primary, true);
+  assert.equal(bots[1]?.envKey, "BOT_TOKEN_2");
+});
+
+test("parseBotTokens prefers BOT_TOKEN_1 over TELEGRAM_BOT_TOKEN", () => {
+  const bots = parseBotTokens({
+    TELEGRAM_BOT_TOKEN: "old:token",
+    BOT_TOKEN_1: "111:aaa",
+  });
+  assert.equal(bots.length, 1);
+  assert.equal(bots[0]?.envKey, "BOT_TOKEN_1");
+  assert.equal(bots[0]?.token, "111:aaa");
 });
 
 test("parseBotTokens throws when nothing is set", () => {
-  assert.throws(() => parseBotTokens({}), /No Telegram bot token/);
+  assert.throws(() => parseBotTokens({}), /BOT_TOKEN_1/);
 });
 
 test("SettingsStore namespaces isolate the same chat id", () => {

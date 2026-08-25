@@ -11,11 +11,12 @@ The latest section is published verbatim as the GitHub Release notes by
 
 ### Added
 
-- **Several Telegram bots, one Grok process.** Extra tokens use descriptive
-  keys (`TELEGRAM_BOT_TOKEN_APP`, `TELEGRAM_BOT_TOKEN_CONTENT`, …). Each bot
-  is its own private chat with an isolated Grok session; they share one
-  `grok agent stdio` and the host login. Existing `TELEGRAM_BOT_TOKEN` stays
-  the primary bot and keeps its `settings.json` keys.
+- **Several Telegram bots, one Grok process.** Tokens are `BOT_TOKEN_1`,
+  `BOT_TOKEN_2`, `BOT_TOKEN_3` (and `BOT_TOKEN_n`). Each bot is its own
+  private chat with an isolated Grok session; they share one `grok agent
+  stdio` and the host login. `BOT_TOKEN_1` is primary and keeps unprefixed
+  `settings.json` keys. `TELEGRAM_BOT_TOKEN` is still accepted as an alias
+  for `BOT_TOKEN_1`.
 
 ## [2.3.1] - 2026-07-19
 

@@ -99,8 +99,8 @@ first, so existing per-folder checkouts keep working.)
 ```bash
 grok-tg setup            # auto-detects grok, writes ~/.grok/tg/.env
 grok-tg setup --path     # print the .env location
-# edit that .env: set TELEGRAM_BOT_TOKEN and ALLOWED_USERS
-# optional extra bots: TELEGRAM_BOT_TOKEN_APP=…  TELEGRAM_BOT_TOKEN_CONTENT=…
+# edit that .env: set BOT_TOKEN_1 and ALLOWED_USERS
+# optional extra bots: BOT_TOKEN_2=…  BOT_TOKEN_3=…
 grok-tg run              # foreground …
 grok-tg install          # … or install as a 24/7 background service
 ```
@@ -164,7 +164,7 @@ chmod +x install.sh && ./install.sh
 ```bash
 npm install
 npm run setup            # auto-detects grok + project roots, writes .env
-# edit .env: set TELEGRAM_BOT_TOKEN and ALLOWED_USERS
+# edit .env: set BOT_TOKEN_1 and ALLOWED_USERS
 npm start
 ```
 
@@ -398,20 +398,20 @@ drives a single `grok agent stdio` — same login, isolated sessions.
 
 ```bash
 # ~/.grok/tg/.env
-TELEGRAM_BOT_TOKEN=          # your existing bot (settings stay as they are)
-TELEGRAM_BOT_TOKEN_APP=      # extra bot for the app repo
-TELEGRAM_BOT_TOKEN_CONTENT=  # extra bot for learning content
+BOT_TOKEN_1=                 # first bot (settings stay unprefixed)
+BOT_TOKEN_2=                 # second bot
+BOT_TOKEN_3=                 # third bot
 ALLOWED_USERS=your-telegram-id
 ```
 
 Then `grok-tg restart` (still one service). In each new bot pick the project
-once with `/projects`. Messages in `@AppBot` never share context with
-`@ContentBot`. `/sessions` can still list every session on disk; cards mark
-**this bot** vs **other bot**. `/accounts` stays host-global.
+once with `/projects`. Messages in bot 2 never share context with bot 3.
+`/sessions` can still list every session on disk; cards mark **this bot** vs
+**other bot**. `/accounts` stays host-global.
 
-The suffix after `TELEGRAM_BOT_TOKEN_` is the label (`APP` → `app`). You can
-add as many as you need. If `TELEGRAM_BOT_TOKEN` is unset, the first labeled
-token (A–Z) is the primary bot.
+Add more with `BOT_TOKEN_4`, `BOT_TOKEN_5`, … Empty keys are ignored. If
+`BOT_TOKEN_1` is unset, the lowest numbered token is the primary bot.
+`TELEGRAM_BOT_TOKEN` is still accepted as an alias for `BOT_TOKEN_1`.
 
 ## 🔗 Connecting to live sessions
 
@@ -432,8 +432,8 @@ Resuming an **idle** session loads it directly so you continue the exact thread.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | one required | — | Primary bot token from @BotFather. Keep this as your existing bot. |
-| `TELEGRAM_BOT_TOKEN_<LABEL>` | no | — | Extra bots on the same Grok process, e.g. `TELEGRAM_BOT_TOKEN_APP`, `TELEGRAM_BOT_TOKEN_CONTENT`. Each is its own chat and session. |
+| `BOT_TOKEN_1` | one required | — | Primary bot token from @BotFather. `TELEGRAM_BOT_TOKEN` is an alias. |
+| `BOT_TOKEN_2` / `BOT_TOKEN_3` / … | no | — | Extra bots on the same Grok process. Each is its own chat and session. |
 | `ALLOWED_USERS` | recommended | *(all)* | Comma-separated Telegram user IDs. Empty = anyone (unsafe). |
 | `GROK_CLI_PATH` | no | auto / `grok` | Path to the `grok` binary. |
 | `GROK_WORKSPACE` | no | cwd | Default working directory. |
@@ -525,8 +525,8 @@ boot and auto-restarts on crash.
 and pick a project with `/projects`. Every message becomes a Grok prompt.
 
 **Can I run two or more Telegram bots against the same Grok login?** Yes —
-add `TELEGRAM_BOT_TOKEN_APP=…` (any `TELEGRAM_BOT_TOKEN_<LABEL>`) next to
-`TELEGRAM_BOT_TOKEN` and restart. One process, isolated chats. See
+set `BOT_TOKEN_1`, `BOT_TOKEN_2`, `BOT_TOKEN_3` and restart. One process,
+isolated chats. See
 [Several Telegram bots, one Grok](#-several-telegram-bots-one-grok).
 
 **Can multiple people use one bot?** Add their IDs to `ALLOWED_USERS`. Each chat

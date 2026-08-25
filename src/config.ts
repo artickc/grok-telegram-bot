@@ -83,7 +83,7 @@ function list(v: string | undefined): string[] {
 }
 
 export interface AppConfig {
-  /** Primary bot token (TELEGRAM_BOT_TOKEN, or the first labeled token). */
+  /** Primary bot token (BOT_TOKEN_1, or the lowest numbered token). */
   token: string;
   /** Every Telegram bot this process should poll. Primary is first. */
   bots: BotTokenSpec[];

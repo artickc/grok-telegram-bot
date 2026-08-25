@@ -23,7 +23,7 @@ echo "[2/4] Detecting grok and writing .env..."
 node scripts/setup.mjs
 
 echo
-if grep -Eq '^TELEGRAM_BOT_TOKEN=.+' .env; then
+if grep -Eq '^(BOT_TOKEN_[1-9][0-9]*|TELEGRAM_BOT_TOKEN)=.+' .env; then
   echo "[3/4] Token already configured."
 else
   echo "[3/4] Telegram setup"
