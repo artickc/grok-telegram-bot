@@ -289,8 +289,9 @@ the session media folder and reports absolute paths.
 Send a voice note, audio file, or video note and the bot runs it as a prompt
 **only when STT is configured**.
 
-Set any OpenAI/Whisper-compatible endpoint via `STT_API_URL` (and `STT_API_KEY`
-if needed). The bot transcribes, shows the quote, and submits plain text.
+Default is xAI Grok STT (`STT_API_URL=https://api.x.ai/v1`, `STT_MODEL=grok-stt`,
+plus `STT_API_KEY` or `XAI_API_KEY`). Whisper-compatible URLs still work. The
+bot transcribes, shows the quote, and submits plain text.
 Without `STT_API_URL`, voice is rejected with a short “not configured” message
 — Grok Build CLI rejects ACP `audio` content blocks, so raw audio cannot be
 heard by the agent. Leave `STT_LANGUAGE` blank for automatic detection
