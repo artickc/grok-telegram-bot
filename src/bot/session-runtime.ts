@@ -46,6 +46,7 @@ import {
   isActiveStatus,
   renderSubagentTransition,
   statusKey,
+  subagentLabel,
   subagentSummary,
 } from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
@@ -179,6 +180,12 @@ export class SessionRuntime {
   private progress: number | undefined;
   /** Subagent sessionId -> last status key shown this turn (dedupe). */
   private subagentShown = new Map<string, string>();
+  /** Child ACP sessions spawned for this busy turn — mirror their updates. */
+  private ownedSubagentIds = new Set<string>();
+  /** Throttle mirrored thought cards per subagent (ms epoch of last upsert). */
+  private subagentThinkPulse = new Map<string, number>();
+  /** Per-subagent tool snapshot cache (child session toolCallIds). */
+  private subagentToolCache = new Map<string, ToolSnapshot>();
   private turnStartedAt = 0;
   /** Count of completed (non-cancelled) turns this session вЂ” shown in /usage. */
   private turnCount = 0;
@@ -1096,6 +1103,9 @@ export class SessionRuntime {
     this.toolCallCache = new Map();
     this.fileOps = new Map();
     this.subagentShown = new Map();
+    this.ownedSubagentIds = new Set();
+    this.subagentThinkPulse = new Map();
+    this.subagentToolCache = new Map();
     this.progress = undefined; // a new turn = a new task; clear the old bar
     this.planEntries = undefined; // plan board is per-turn
     this.pendingSuggestions = undefined; // new work supersedes previous Done suggestions
@@ -2138,11 +2148,13 @@ export class SessionRuntime {
    */
   renderSubagents(subagents: SubagentInfo[], pending: PendingStage[]): void {
     if (!this.cfg.showSubagents) return;
-    if (!this.foreground || !this.busy || !this.streamer) return;
+    if (!this.busy) return;
     // Keep parent idle-watch warm while crew is active (even if no new cards).
     this.acp.touchActivity(this.sessionId);
+    for (const s of subagents) this.ownedSubagentIds.add(s.sessionId);
     const summary = subagentSummary(subagents, pending);
     if (summary) this.setLiveStep(summary);
+    if (!this.foreground || !this.streamer) return;
     for (const s of subagents) {
       const key = statusKey(s);
       const prev = this.subagentShown.get(s.sessionId);
@@ -2154,6 +2166,69 @@ export class SessionRuntime {
     }
     // Ensure pulse has a surface even if no status transition this tick.
     void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
+  }
+
+  /**
+   * Mirror a child subagent's ACP session/update into this parent turn's
+   * Telegram stream so long crew waits are not a blank "Still working".
+   */
+  private mirrorSubagentUpdate(childId: string, update: SessionUpdate): void {
+    this.acp.touchActivity(this.sessionId);
+    if (!this.foreground || !this.streamer || !this.cfg.showSubagents) return;
+
+    const info = this.acp.subagentById(childId);
+    const label = info ? subagentLabel(info) : childId.slice(0, 8);
+    const kind = update.sessionUpdate;
+
+    if (kind === "agent_thought_chunk") {
+      const text = contentText(update.content)?.replace(/\s+/g, " ").trim();
+      if (!text) return;
+      this.setLiveStep(`\u{1F916} ${label}: ${text.length > 110 ? text.slice(0, 109) + "\u2026" : text}`);
+      const now = Date.now();
+      const last = this.subagentThinkPulse.get(childId) ?? 0;
+      if (now - last < 1500) return;
+      this.subagentThinkPulse.set(childId, now);
+      const snippet = text.length > 500 ? `${text.slice(0, 499)}\u2026` : text;
+      this.streamer.upsertTool(
+        `sub:${childId}:think`,
+        `\u{1F916} **${label}** thinking\n> ${snippet.replace(/\n/g, "\n> ")}`,
+      );
+      return;
+    }
+
+    if (kind === "agent_message_chunk") {
+      const text = contentText(update.content)?.replace(/\s+/g, " ").trim();
+      if (!text) return;
+      this.setLiveStep(`\u{1F916} ${label}: ${text.length > 110 ? text.slice(0, 109) + "\u2026" : text}`);
+      return;
+    }
+
+    if (kind === "tool_call" || kind === "tool_call_update") {
+      if (!this.cfg.showToolCalls) return;
+      const tid = update.toolCallId || "";
+      const cacheKey = `${childId}:${tid || update.title || "tool"}`;
+      const merged = mergeToolSnapshot(this.subagentToolCache.get(cacheKey), update);
+      this.subagentToolCache.set(cacheKey, merged);
+      const status = (update.status || "").toLowerCase();
+      if (!snapshotHasDetail(merged) && status !== "completed" && status !== "failed") return;
+      if (kind === "tool_call_update" && (status === "pending" || status === "in_progress")) {
+        const hasNew =
+          (Array.isArray(update.content_blocks) && update.content_blocks.length > 0) ||
+          (Array.isArray(update.content) && (update.content as unknown[]).length > 0) ||
+          (!!update.rawInput && Object.keys(update.rawInput).length > 0) ||
+          update.rawOutput !== undefined;
+        if (!hasNew && this.shownToolIds.has(`sub:${cacheKey}`)) return;
+      }
+      const md = formatToolCall(merged, {
+        showDiffs: this.cfg.showEditDiffs,
+        diffMaxLines: Math.min(40, this.cfg.diffMaxLines),
+      });
+      if (!md) return;
+      this.shownToolIds.add(`sub:${cacheKey}`);
+      const step = stepFromToolUpdate(merged);
+      if (step) this.setLiveStep(`\u{1F916} ${label}: ${step}`);
+      this.streamer.upsertTool(`sub:${cacheKey}`, `\u{1F916} **${label}**\n${md}`);
+    }
   }
 
   /**
@@ -2777,7 +2852,18 @@ export class SessionRuntime {
   }
 
   private onUpdate(sessionId: string, update: SessionUpdate): void {
-    if (!this.busy || sessionId !== this.sessionId) return;
+    if (!this.busy) return;
+    // Child crew sessions: mirror tools/thoughts into the parent live bubble.
+    if (sessionId !== this.sessionId) {
+      // list_update may lag the first child session/update — adopt known crew ids.
+      if (!this.ownedSubagentIds.has(sessionId) && this.acp.subagentById(sessionId)) {
+        this.ownedSubagentIds.add(sessionId);
+      }
+      if (this.ownedSubagentIds.has(sessionId)) {
+        this.mirrorSubagentUpdate(sessionId, update);
+      }
+      return;
+    }
     this.sessionUpdateCount++;
     const kind = update.sessionUpdate;
 
