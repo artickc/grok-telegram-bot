@@ -48,6 +48,8 @@ test("PermissionService.cancelForSession only cancels matching session", async (
       projectName: sessionId,
     }),
     get: () => ({ sessionId: "sess-a" }),
+    runtimeForSession: () => undefined,
+    busyRuntimesForChat: () => [],
   } as unknown as RuntimeRegistry;
 
   const perms = new PermissionService(api, registry, false /* interactive */);

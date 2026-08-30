@@ -12,6 +12,7 @@
 import type { Api } from "grammy";
 import { InlineKeyboard } from "grammy";
 import type { PermissionOutcome, RequestPermissionParams } from "../grok/types.js";
+import { outboundThreadExtra } from "../forum/thread.js";
 import { createLogger } from "../logger.js";
 import type { RuntimeRegistry } from "./registry.js";
 
@@ -79,7 +80,9 @@ export class PermissionService {
     if (chatId === undefined) return autoDecideSession(params); // unattended (scheduled / orphan)
 
     const reqId = String(++this.seq);
-    const isForeground = !desc.subagent && this.registry.get(chatId).sessionId === params.sessionId;
+    const ownedRt = this.registry.runtimeForSession(params.sessionId);
+    const isForeground =
+      !desc.subagent && !!ownedRt?.isBusy && ownedRt.sessionId === params.sessionId;
     // A "Switch to it" button only makes sense for a real, controlled background
     // session — never for the foreground, and never for a subagent (which the
     // chat doesn't control directly).
@@ -93,15 +96,39 @@ export class PermissionService {
     kb.row();
     if (canSwitch) kb.text(`\u{1F500} Switch to ${label}`, `permsw:${reqId}`);
 
+    const threadExtra = outboundThreadExtra(desc.threadId);
+    const waitDetail = permissionWaitDetail(params);
+
+    // Surface wait on the busy parent/project bubble (esp. forum topics).
+    const noticeTargets = desc.subagent
+      ? this.registry.busyRuntimesForChat(chatId, desc.threadId)
+      : ownedRt
+        ? [ownedRt]
+        : this.registry.busyRuntimesForChat(chatId, desc.threadId);
+    for (const rt of noticeTargets) {
+      try {
+        rt.noticePermissionWait(waitDetail);
+      } catch {
+        /* non-fatal */
+      }
+    }
+
     let messageId: number | undefined;
     let pinned = false;
     try {
+      log.info(
+        `permission prompt chat=${chatId}` +
+          (desc.threadId !== undefined ? ` thread=${desc.threadId}` : " (General/private)") +
+          ` session=${params.sessionId.slice(0, 8)}` +
+          (desc.subagent ? " subagent" : ""),
+      );
       const msg = await this.api.sendMessage(
         chatId,
         describe(params, { label: isForeground ? undefined : label, subagent: desc.subagent, canSwitch }),
         {
           reply_markup: kb,
           disable_notification: false, // requires interaction → always with sound
+          ...threadExtra,
         },
       );
       messageId = msg.message_id;
@@ -124,6 +151,13 @@ export class PermissionService {
         if (!p) return;
         this.pending.delete(reqId);
         void this.finishPrompt(p, "\u231B Approval timed out \u2014 denied.");
+        for (const rt of noticeTargets) {
+          try {
+            rt.noticePermissionWait("Approval timed out \u2014 denied");
+          } catch {
+            /* non-fatal */
+          }
+        }
         resolve({ outcome: { outcome: "cancelled" } });
       }, TIMEOUT_MS);
       this.pending.set(reqId, {
@@ -204,6 +238,20 @@ export class PermissionService {
       }
     }
   }
+}
+
+/** Short line for the live stream while waiting on Approve/Deny. */
+export function permissionWaitDetail(params: RequestPermissionParams): string {
+  const tc = params.toolCall;
+  const title = (tc?.title || tc?.kind || "tool").toString();
+  const raw = (tc?.rawInput || {}) as Record<string, unknown>;
+  const cmd = typeof raw.command === "string" ? raw.command.trim() : "";
+  if (cmd) {
+    const short = cmd.length > 120 ? `${cmd.slice(0, 119)}\u2026` : cmd;
+    return `${title}: ${short}`;
+  }
+  const path = typeof raw.path === "string" ? raw.path : undefined;
+  return path ? `${title}: ${path}` : title;
 }
 
 function describe(

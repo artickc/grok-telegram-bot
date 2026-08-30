@@ -426,6 +426,12 @@ export class ChatController {
     return this.runtimes.some((r) => r.sessionId === sessionId);
   }
 
+  /** Controlled runtime for a session id, if this controller owns it. */
+  runtimeBySession(sessionId: string): SessionRuntime | undefined {
+    this.ensureRestored();
+    return this.runtimes.find((r) => r.sessionId === sessionId);
+  }
+
   dispose(): void {
     for (const rt of this.runtimes) rt.dispose();
     this.runtimes.length = 0;
