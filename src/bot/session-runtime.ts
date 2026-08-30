@@ -624,6 +624,20 @@ export class SessionRuntime {
     this.stopWatch();
   }
 
+  /**
+   * Surface an interactive permission wait on the live bubble (SSH / execute).
+   * Keeps the user from staring at a blank "typing" state for minutes.
+   */
+  noticePermissionWait(detail: string): void {
+    if (!this.busy) return;
+    this.acp.touchActivity(this.sessionId);
+    const line = detail.trim() || "tool";
+    this.setLiveStep(`\u{1F510} Waiting for approval: ${line}`);
+    if (this.foreground && this.streamer) {
+      this.streamer.addTool(`\u{1F510} **Waiting for approval**\n${line}`);
+    }
+  }
+
   /** Plan → build transition: show it and keep the idle watch warm. */
   private onPlanExit(sessionId: string | undefined, result: unknown): void {
     if (!this.busy) return;

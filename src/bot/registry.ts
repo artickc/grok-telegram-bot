@@ -200,6 +200,19 @@ export class RuntimeRegistry {
     return this.findChatBySession(sessionId) ?? this.subagentParents.get(sessionId);
   }
 
+  /** Runtime that currently controls a session id (any forum/private controller). */
+  runtimeForSession(sessionId: string): SessionRuntime | undefined {
+    for (const c of this.forumControllers.values()) {
+      const rt = c.runtimeBySession(sessionId);
+      if (rt) return rt;
+    }
+    for (const c of this.controllers.values()) {
+      const rt = c.runtimeBySession(sessionId);
+      if (rt) return rt;
+    }
+    return undefined;
+  }
+
   /** Describe a session so a permission prompt can label it correctly. */
   describeSession(sessionId: string): SessionDescription {
     const controlledChat = this.findChatBySession(sessionId);
@@ -219,8 +232,24 @@ export class RuntimeRegistry {
     const parent = this.subagentParents.get(sessionId);
     const info = this.acp.subagentById(sessionId);
     if (parent !== undefined || info) {
+      // Prefer the parent chat's active forum thread so SSH/exec prompts land
+      // in the project topic, not General.
+      const owner = this.currentOwner();
+      let threadId =
+        owner && owner.chatId === parent ? owner.threadId : undefined;
+      if (threadId === undefined && parent !== undefined) {
+        const prefix = `${parent}:`;
+        for (const [key, c] of this.forumControllers) {
+          if (!key.startsWith(prefix)) continue;
+          if (c.foreground().isBusy && c.messageThreadId !== undefined) {
+            threadId = c.messageThreadId;
+            break;
+          }
+        }
+      }
       return {
         chatId: parent,
+        threadId,
         controlled: false,
         subagent: true,
         subagentName: info?.sessionName || info?.agentName || sessionId.slice(0, 8),
