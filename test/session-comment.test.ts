@@ -99,10 +99,21 @@ test("stepFromToolUpdate formats execute and edit", () => {
   const edit = stepFromToolUpdate({
     sessionUpdate: "tool_call",
     kind: "edit",
-    status: "completed",
+    status: "in_progress",
     rawInput: { path: "H:/proj/src/bot.ts" },
   } as SessionUpdate);
   assert.ok(edit?.includes("bot.ts"));
+
+  // Completed must not sticky "… done" on the live pulse.
+  assert.equal(
+    stepFromToolUpdate({
+      sessionUpdate: "tool_call_update",
+      kind: "read",
+      status: "completed",
+      rawInput: { path: "H:/proj/src/config.ts" },
+    } as SessionUpdate),
+    undefined,
+  );
 });
 
 test("stepFromThought prefixes Thinking", () => {

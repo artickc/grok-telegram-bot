@@ -106,6 +106,8 @@ export class ResponseStreamer {
   private lastContentAt = Date.now();
   /** Sticky "still working" line while long tools emit no ACP updates. */
   private livenessLine: string | undefined;
+  /** Single-flight lock so concurrent ensureLiveSurface calls cannot double-post. */
+  private ensureSurfaceInflight: Promise<void> | undefined;
 
   constructor(
     private readonly api: Api,
@@ -141,13 +143,23 @@ export class ResponseStreamer {
   /**
    * Post a placeholder live message immediately so typing+pulse have a surface
    * before the first ACP chunk (critical while subagents work silently).
-   * Replaced in place when real content arrives.
+   * Replaced in place when real content arrives. Concurrent callers share one
+   * in-flight send — rapid setLiveStep must not create duplicate Working bubbles.
    */
   async ensureLiveSurface(placeholder = "\u23F3 Working\u2026"): Promise<void> {
     if (this.closed || this.liveId !== undefined) return;
-    const src = placeholder.trim() || "\u23F3 Working\u2026";
-    const rendered = toTelegramMarkdown(src);
-    this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra());
+    if (this.ensureSurfaceInflight) return this.ensureSurfaceInflight;
+    this.ensureSurfaceInflight = (async () => {
+      try {
+        if (this.closed || this.liveId !== undefined) return;
+        const src = placeholder.trim() || "\u23F3 Working\u2026";
+        const rendered = toTelegramMarkdown(src);
+        this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra());
+      } finally {
+        this.ensureSurfaceInflight = undefined;
+      }
+    })();
+    return this.ensureSurfaceInflight;
   }
 
   /** Current live Telegram message id (for attaching suggestions after finalize). */

@@ -50,7 +50,7 @@ import {
   subagentSummary,
 } from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
-import { ResponseStreamer } from "../stream/streamer.js";
+import { LIVENESS_MIN_SILENCE_MS, ResponseStreamer } from "../stream/streamer.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { collectTurnImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
@@ -490,6 +490,11 @@ export class SessionRuntime {
     if (next === this.liveStep) return;
     this.liveStep = next;
     this.changed();
+    // Long tools / subagents often emit no ACP chunks for minutes. Seed (or
+    // re-seed) the Working bubble immediately so the topic is not blank.
+    if (next && this.foreground && this.streamer && !this.managerMode) {
+      void this.streamer.ensureLiveSurface(next).catch(() => {});
+    }
   }
 
   /** Append thought text and refresh cards when the display line changes. */
@@ -1207,7 +1212,7 @@ export class SessionRuntime {
             : undefined,
         )
       : undefined;
-    // Seed a live bubble immediately so "Still working" / subagent cards have a
+    // Seed a live bubble immediately so the Working / subagent cards have a
     // message to edit before the first ACP chunk (long crew waits).
     if (this.streamer && live && !this.managerMode) {
       void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
@@ -1677,19 +1682,31 @@ export class SessionRuntime {
   }
 
   /**
-   * Every 15s, if we know a live step (tool/subagent) and the bubble is quiet,
-   * refresh that step with elapsed time. Never spam a bare "Still working" timer.
+   * Every ~12s (matches LIVENESS_MIN_SILENCE_MS), if we know a live step
+   * (tool/subagent) and the bubble is quiet, refresh that step with elapsed
+   * time. Re-seeds the live surface if Telegram never got the Working bubble
+   * (429 / race) so project topics do not look dead.
+   * Never spam a bare "Still working" timer — hung ACP with no liveStep stays
+   * quiet by design; use /cancel to unblock.
    */
   private startLivenessPulse(): void {
     this.stopLivenessPulse();
+    // Interval >= silence floor so the first tick is not a permanent no-op.
+    const pulseMs = LIVENESS_MIN_SILENCE_MS;
     this.livenessPulse = setInterval(() => {
       if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
-      if (!this.liveStep?.trim()) return;
-      this.streamer.pulseLiveness(
-        fmtDuration(Date.now() - this.turnPulseStartedAt),
-        this.liveStep,
-      );
-    }, 15_000);
+      const step = this.liveStep?.trim();
+      if (!step) return;
+      const elapsed = fmtDuration(Date.now() - this.turnPulseStartedAt);
+      const streamer = this.streamer;
+      void streamer
+        .ensureLiveSurface(`${step} \u00B7 ${elapsed}`)
+        .then(() => {
+          if (!this.busy || this.cancelled || this.streamer !== streamer) return;
+          streamer.pulseLiveness(elapsed, step);
+        })
+        .catch(() => {});
+    }, pulseMs);
     this.livenessPulse.unref?.();
   }
 
@@ -2265,7 +2282,15 @@ export class SessionRuntime {
       if (!md) return;
       this.shownToolIds.add(`sub:${cacheKey}`);
       const step = stepFromToolUpdate(merged);
-      if (step) this.setLiveStep(`\u{1F916} ${label}: ${step}`);
+      if (step) {
+        this.setLiveStep(`\u{1F916} ${label}: ${step}`);
+      } else if (
+        this.busy &&
+        (status === "completed" || status === "failed") &&
+        (!this.liveStep || this.liveStep.includes(label))
+      ) {
+        this.setLiveStep(`\u{1F916} ${label}: Working\u2026`);
+      }
       this.streamer.upsertTool(`sub:${cacheKey}`, `\u{1F916} **${label}**\n${md}`);
     }
   }
@@ -2934,8 +2959,15 @@ export class SessionRuntime {
       const fo = fileOpFromUpdate(mergedEarly);
       if (fo) this.fileOps.set(fo.path, mergeFileOp(this.fileOps.get(fo.path), fo.op));
       // Live card step — always, even for background sessions.
+      // Completed tools must not sticky "Read X done · 5m" on the pulse.
+      const toolStatus = (mergedEarly.status || "").toLowerCase();
       const step = stepFromToolUpdate(mergedEarly);
-      if (step) this.setLiveStep(step);
+      if (step) {
+        this.setLiveStep(step);
+      } else if (this.busy && (toolStatus === "completed" || toolStatus === "failed")) {
+        // Interim cue until the next in-progress tool arrives (no Still working spam).
+        this.setLiveStep("Working\u2026");
+      }
     } else if (kind === "agent_message_chunk") {
       const text = contentText(update.content);
       if (text) {
