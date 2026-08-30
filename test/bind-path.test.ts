@@ -1,10 +1,18 @@
 import { strict as assert } from "node:assert";
+import { resolve as pathResolve } from "node:path";
 import { test } from "node:test";
 import { resolveBindTarget } from "../src/forum/bind-path.js";
 
+/** Absolute paths that work on both Windows and Linux CI. */
+const ROOT = pathResolve("/Lucru/Domains");
+const DEMO = pathResolve(ROOT, "DemoApp");
+const OTHER = pathResolve(ROOT, "Other");
+const BRAND_NEW = pathResolve(ROOT, "BrandNewApp");
+const MISSING = pathResolve(ROOT, "MissingApp");
+
 const catalog = [
-  { name: "DemoApp", path: "H:/Lucru/Domains/DemoApp" },
-  { name: "Other", path: "H:/Lucru/Domains/Other" },
+  { name: "DemoApp", path: DEMO },
+  { name: "Other", path: OTHER },
 ];
 
 function lookup(name: string) {
@@ -19,7 +27,7 @@ test("resolveBindTarget: exact catalog name (case-insensitive)", () => {
     findExactByName: lookup,
   });
   assert.equal(r.ok, true);
-  if (r.ok) assert.equal(r.path, "H:/Lucru/Domains/DemoApp");
+  if (r.ok) assert.equal(r.path, DEMO);
 });
 
 test("resolveBindTarget: rejects partial / fuzzy names", () => {
@@ -33,7 +41,7 @@ test("resolveBindTarget: rejects partial / fuzzy names", () => {
 });
 
 test("resolveBindTarget: absolute existing directory", () => {
-  const abs = "H:/Lucru/Domains/DemoApp";
+  const abs = DEMO;
   const r = resolveBindTarget(abs, {
     existsSync: (p) => p === abs,
     isDirectory: (p) => p === abs || p.endsWith("DemoApp"),
@@ -73,7 +81,7 @@ test("resolveBindTarget: not a directory", () => {
 });
 
 test("resolveBindTarget: createIfMissing makes absolute path", () => {
-  const abs = "H:/Lucru/Domains/BrandNewApp";
+  const abs = BRAND_NEW;
   const created: string[] = [];
   const r = resolveBindTarget(abs, {
     existsSync: () => false,
@@ -94,7 +102,7 @@ test("resolveBindTarget: createIfMissing makes absolute path", () => {
 
 test("resolveBindTarget: createIfMissing short name under defaultRoot", () => {
   const created: string[] = [];
-  const root = "H:/Lucru/Domains";
+  const root = ROOT;
   const r = resolveBindTarget("FreshApp", {
     existsSync: () => false,
     isDirectory: (p) => created.includes(p),
@@ -113,7 +121,7 @@ test("resolveBindTarget: createIfMissing short name under defaultRoot", () => {
 });
 
 test("resolveBindTarget: without createIfMissing still fails missing absolute", () => {
-  const abs = "H:/Lucru/Domains/MissingApp";
+  const abs = MISSING;
   const r = resolveBindTarget(abs, {
     existsSync: () => false,
     isDirectory: () => false,
