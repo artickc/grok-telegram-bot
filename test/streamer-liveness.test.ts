@@ -6,29 +6,27 @@ import {
   shouldPulseLiveness,
 } from "../src/stream/streamer.js";
 
-test("formatLivenessHint includes elapsed and optional step", () => {
-  assert.equal(formatLivenessHint("2m 14s"), "⏳ Still working · 2m 14s");
-  const withStep = formatLivenessHint("45s", "Run ssh deploy");
-  assert.ok(withStep.startsWith("⏳ Still working · 45s"));
-  assert.ok(withStep.includes("Run ssh deploy"));
+test("formatLivenessHint is empty without a real step (no Still working spam)", () => {
+  assert.equal(formatLivenessHint("2m 14s"), "");
+  assert.equal(formatLivenessHint("2m 14s", "   "), "");
 });
 
-test("formatLivenessHint clamps long steps", () => {
-  const long = "x".repeat(200);
-  const hint = formatLivenessHint("1m", long);
-  assert.ok(hint.length < 120);
-  assert.ok(hint.includes("…"));
+test("formatLivenessHint shows step with elapsed", () => {
+  assert.equal(formatLivenessHint("45s", "Run ssh deploy"), "Run ssh deploy · 45s");
+  assert.ok(formatLivenessHint("1m", "x".repeat(200)).endsWith("· 1m"));
+  assert.ok(!formatLivenessHint("1m", "Run tool").includes("Still working"));
 });
 
-test("shouldPulseLiveness waits for silence and skips duplicates", () => {
+test("shouldPulseLiveness skips empty hints and duplicates", () => {
   const base = {
     closed: false,
     lastContentAt: 1_000,
     now: 1_000 + LIVENESS_MIN_SILENCE_MS + 1,
-    nextHint: "⏳ Still working · 15s",
+    nextHint: "Run ssh · 15s",
     hasLiveSurface: true,
   };
   assert.equal(shouldPulseLiveness(base), true);
+  assert.equal(shouldPulseLiveness({ ...base, nextHint: "" }), false);
   assert.equal(shouldPulseLiveness({ ...base, currentHint: base.nextHint }), false);
   assert.equal(
     shouldPulseLiveness({ ...base, now: 1_000 + LIVENESS_MIN_SILENCE_MS - 1 }),

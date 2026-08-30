@@ -23,7 +23,7 @@ import { outboundThreadExtra } from "../forum/thread.js";
 const SOFT_LIMIT = 3500;
 /** Display budget for a thinking block (middle-truncated; session context keeps all). */
 const THINK_DISPLAY_MAX = 2800;
-/** Do not pulse "still working" until the live bubble has been silent this long. */
+/** Do not refresh the activity line until the live bubble has been silent this long. */
 export const LIVENESS_MIN_SILENCE_MS = 12_000;
 
 type SegKind = "out" | "think" | "tool";
@@ -34,13 +34,16 @@ interface Seg {
   toolId?: string;
 }
 
-/** One-line (or short) honesty hint while ACP is silent on a long tool. */
+/**
+ * Activity footer while ACP is quiet. Empty when there is no known step —
+ * never show a bare "Still working · Xm" timer (useless noise).
+ */
 export function formatLivenessHint(elapsedLabel: string, step?: string): string {
-  const e = elapsedLabel.trim() || "?";
   const s = (step || "").trim();
-  if (!s) return `\u23F3 Still working \u00B7 ${e}`;
-  const short = s.length > 90 ? `${s.slice(0, 89)}\u2026` : s;
-  return `\u23F3 Still working \u00B7 ${e}\n${short}`;
+  if (!s) return "";
+  const e = elapsedLabel.trim();
+  const short = s.length > 120 ? `${s.slice(0, 119)}\u2026` : s;
+  return e ? `${short} \u00B7 ${e}` : short;
 }
 
 /** Whether a liveness pulse should edit the bubble (pure helper for tests). */
@@ -55,6 +58,7 @@ export function shouldPulseLiveness(opts: {
   hasLiveSurface: boolean;
 }): boolean {
   if (opts.closed || !opts.hasLiveSurface) return false;
+  if (!opts.nextHint.trim()) return false;
   const silence = opts.now - opts.lastContentAt;
   if (silence < (opts.minSilenceMs ?? LIVENESS_MIN_SILENCE_MS)) return false;
   if (opts.currentHint === opts.nextHint) return false;
@@ -289,9 +293,8 @@ export class ResponseStreamer {
   }
 
   /**
-   * Edit the live bubble with an honest "still working" elapsed line when ACP
-   * has been silent (long SSH/shell with no mid-flight stdout). No-op when
-   * real content arrived recently or the hint is unchanged.
+   * Refresh the activity footer with a known live step (+ elapsed) when ACP is
+   * quiet. No-op without a step (never a bare timer) or when unchanged/recent.
    */
   pulseLiveness(elapsedLabel: string, step?: string): void {
     const next = formatLivenessHint(elapsedLabel, step);
