@@ -11,6 +11,7 @@ import {
   extractResultSnippet,
   formatFilesPhrase,
   stepFromThought,
+  shortenLiveCommand,
   stepFromToolUpdate,
   stripDirectiveWrappers,
 } from "../src/render/session-comment.js";
@@ -87,6 +88,19 @@ test("formatFilesPhrase", () => {
   assert.ok(p.includes("+") || p.includes("~"));
 });
 
+test("shortenLiveCommand collapses heredocs and prefers git/npm lines", () => {
+  const messy = `git add a.ts b.ts
+$msg = @"
+fix: never sticky done
+"@
+git commit -m $msg
+git push`;
+  const s = shortenLiveCommand(messy);
+  assert.ok(s.startsWith("git add"), s);
+  assert.ok(!s.includes("never sticky"), s);
+  assert.ok(!s.includes("\n"), s);
+});
+
 test("stepFromToolUpdate formats execute and edit", () => {
   const exec = stepFromToolUpdate({
     sessionUpdate: "tool_call",
@@ -95,6 +109,17 @@ test("stepFromToolUpdate formats execute and edit", () => {
     rawInput: { command: "npm run typecheck" },
   } as SessionUpdate);
   assert.ok(exec?.includes("npm run typecheck"));
+
+  const heredoc = stepFromToolUpdate({
+    sessionUpdate: "tool_call",
+    kind: "execute",
+    status: "in_progress",
+    rawInput: {
+      command: 'git add x.ts\n$msg = @"\nlong body\n"@\ngit commit -m $msg',
+    },
+  } as SessionUpdate);
+  assert.ok(heredoc?.startsWith("Run: git add"), heredoc);
+  assert.ok(!heredoc?.includes("long body"), heredoc);
 
   const edit = stepFromToolUpdate({
     sessionUpdate: "tool_call",

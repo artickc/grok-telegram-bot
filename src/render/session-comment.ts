@@ -262,6 +262,32 @@ export function buildLocalTurnComment(opts: {
 }
 
 /**
+ * One-line shell summary for the live pulse. Multiline PowerShell/bash
+ * (especially `@"…"@` heredocs) looked like "unparsed" garbage and stuck
+ * on the bubble for minutes.
+ */
+export function shortenLiveCommand(cmd: string, max = 90): string {
+  let t = cmd.replace(/\r\n/g, "\n").trim();
+  if (!t) return "";
+  // Collapse heredoc / here-string bodies — keep a marker, drop the essay.
+  t = t.replace(/@"[\s\S]*?"@/g, '@"…"@');
+  t = t.replace(/@'[\s\S]*?'@/g, "@'…'@");
+  t = t.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1\b/g, "<<…");
+  const lines = t
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  // Prefer a real toolchain verb over `$msg = …` assignment noise.
+  const primary =
+    lines.find((l) =>
+      /^(git|npm|npx|node|dotnet|pwsh|powershell|gh|cargo|go|python|pip|tsx|curl|ssh)\b/i.test(l),
+    ) ||
+    lines[0] ||
+    t;
+  return cleanCommentLine(primary.replace(/\s+/g, " "), max);
+}
+
+/**
  * Derive a live "current step" line from an ACP tool update.
  * Returns undefined for completed/failed — never sticky "Read X done · 5m"
  * while the next tool runs silent (that looked like a total freeze in TG).
@@ -278,7 +304,10 @@ export function stepFromToolUpdate(u: SessionUpdate): string | undefined {
   switch (kind) {
     case "execute": {
       const cmd = extractCommand(raw);
-      if (cmd) return cleanCommentLine(`Run: ${cmd}`, COMMENT_MAX);
+      if (cmd) {
+        const one = shortenLiveCommand(cmd);
+        return one ? cleanCommentLine(`Run: ${one}`, COMMENT_MAX) : undefined;
+      }
       break;
     }
     case "edit":
