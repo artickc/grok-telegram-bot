@@ -42,7 +42,12 @@ import {
   summarizeFileOpsShort,
   summarizeFileOpsSplit,
 } from "../render/file-summary.js";
-import { isActiveStatus, renderSubagentTransition, statusKey } from "../render/subagent.js";
+import {
+  isActiveStatus,
+  renderSubagentTransition,
+  statusKey,
+  subagentSummary,
+} from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
 import { ResponseStreamer } from "../stream/streamer.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
@@ -1154,6 +1159,11 @@ export class SessionRuntime {
             : undefined,
         )
       : undefined;
+    // Seed a live bubble immediately so "Still working" / subagent cards have a
+    // message to edit before the first ACP chunk (long crew waits).
+    if (this.streamer && live && !this.managerMode) {
+      void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
+    }
     // Bind user message (+ status bubble) → session for reply routing.
     if (this.managerMode && this.sessionId) {
       if (this.turnReplyTo !== undefined) {
@@ -2126,9 +2136,13 @@ export class SessionRuntime {
    * chat-attributed) subagents, so the user sees progress while the main agent
    * waits on them. No-op unless this runtime is the live foreground turn.
    */
-  renderSubagents(subagents: SubagentInfo[], _pending: PendingStage[]): void {
+  renderSubagents(subagents: SubagentInfo[], pending: PendingStage[]): void {
     if (!this.cfg.showSubagents) return;
     if (!this.foreground || !this.busy || !this.streamer) return;
+    // Keep parent idle-watch warm while crew is active (even if no new cards).
+    this.acp.touchActivity(this.sessionId);
+    const summary = subagentSummary(subagents, pending);
+    if (summary) this.setLiveStep(summary);
     for (const s of subagents) {
       const key = statusKey(s);
       const prev = this.subagentShown.get(s.sessionId);
@@ -2138,6 +2152,8 @@ export class SessionRuntime {
       const md = renderSubagentTransition(s, kind);
       if (md) this.streamer.addTool(md);
     }
+    // Ensure pulse has a surface even if no status transition this tick.
+    void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
   }
 
   /**

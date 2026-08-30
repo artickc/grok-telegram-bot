@@ -134,6 +134,18 @@ export class ResponseStreamer {
     this.liveId = messageId;
   }
 
+  /**
+   * Post a placeholder live message immediately so typing+pulse have a surface
+   * before the first ACP chunk (critical while subagents work silently).
+   * Replaced in place when real content arrives.
+   */
+  async ensureLiveSurface(placeholder = "\u23F3 Working\u2026"): Promise<void> {
+    if (this.closed || this.liveId !== undefined) return;
+    const src = placeholder.trim() || "\u23F3 Working\u2026";
+    const rendered = toTelegramMarkdown(src);
+    this.liveId = await safeSend(this.api, this.chatId, rendered, src, this.replyExtra());
+  }
+
   /** Current live Telegram message id (for attaching suggestions after finalize). */
   get liveMessageId(): number | undefined {
     return this.liveId;
