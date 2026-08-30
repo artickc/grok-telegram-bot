@@ -46,6 +46,33 @@ export const ENV_PATH = join(INSTANCE_DIR, ".env");
 // Kiro, etc.) and must never override this Grok instance's identity.
 const instanceEnv = loadDotenv({ path: ENV_PATH }).parsed ?? {};
 
+// Critical permission flags: instance .env wins over inherited process env.
+// dotenv does not override existing vars by default, so a stale User/Machine
+// GROK_TRUST_ALL_TOOLS=false would otherwise force interactive Allow/Deny
+// despite this bot's .env saying true — freezing sessions for hours.
+// If the instance .env file exists but omits a key, drop any inherited value
+// so loadConfig/envFlagOn defaults apply (trust/auto default true).
+const hasInstanceEnvFile = existsSync(ENV_PATH);
+for (const key of [
+  "GROK_TRUST_ALL_TOOLS",
+  "AUTO_APPROVE_PERMISSIONS",
+  "AUTO_APPROVE_PLAN",
+  "ASK_USER_AUTO_SKIP",
+] as const) {
+  if (Object.prototype.hasOwnProperty.call(instanceEnv, key)) {
+    process.env[key] = instanceEnv[key]!;
+  } else if (hasInstanceEnvFile) {
+    delete process.env[key];
+  }
+}
+
+/** Instance .env value if present; else inherited process env only when no instance file. */
+function instancePermFlag(key: string): string | undefined {
+  if (Object.prototype.hasOwnProperty.call(instanceEnv, key)) return instanceEnv[key];
+  if (hasInstanceEnvFile) return undefined;
+  return process.env[key];
+}
+
 function bool(v: string | undefined, def: boolean): boolean {
   if (v === undefined || v === "") return def;
   return ["1", "true", "yes", "on"].includes(v.toLowerCase());
@@ -309,11 +336,14 @@ export function loadConfig(): AppConfig {
     grokMaxTokens: process.env.GROK_MAX_TOKENS ? num(process.env.GROK_MAX_TOKENS, 0) || undefined : undefined,
     maxToolRounds: num(process.env.GROK_MAX_TOOL_ROUNDS, 400),
     agent: process.env.GROK_AGENT?.trim() || undefined,
-    trustAllTools: bool(process.env.GROK_TRUST_ALL_TOOLS, true),
+    // Prefer instance .env over inherited process env (same idea as the token).
+    // When the instance .env file exists but omits a key, use the default
+    // (ignore inherited Machine/User false) so trust stays on unless opted out.
+    trustAllTools: bool(instancePermFlag("GROK_TRUST_ALL_TOOLS"), true),
     // Default true: auto-approve with session-scope when the agent still asks.
-    autoApprovePermissions: bool(process.env.AUTO_APPROVE_PERMISSIONS, true),
-    autoApprovePlan: bool(process.env.AUTO_APPROVE_PLAN, true),
-    askUserAutoSkip: bool(process.env.ASK_USER_AUTO_SKIP, false),
+    autoApprovePermissions: bool(instancePermFlag("AUTO_APPROVE_PERMISSIONS"), true),
+    autoApprovePlan: bool(instancePermFlag("AUTO_APPROVE_PLAN"), true),
+    askUserAutoSkip: bool(instancePermFlag("ASK_USER_AUTO_SKIP"), false),
     sandboxProfile: process.env.GROK_SANDBOX?.trim() || undefined,
     grokMemory: process.env.GROK_MEMORY?.trim() || undefined,
     agentProfile: process.env.GROK_AGENT_PROFILE?.trim() || undefined,

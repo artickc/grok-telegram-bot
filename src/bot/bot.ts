@@ -206,6 +206,10 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   // Interactive prompts are pinned so they aren't lost in a busy chat; on
   // settle we re-pin the status panel (private chats keep a single pin).
   const autoApprovePerms = cfg.autoApprovePermissions || cfg.trustAllTools;
+  log.info(
+    `permission policy: autoApprove=${autoApprovePerms} ` +
+      `(trustAllTools=${cfg.trustAllTools}, autoApprovePermissions=${cfg.autoApprovePermissions})`,
+  );
   const permissions = new PermissionService(bot.api, registry, autoApprovePerms, {
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
