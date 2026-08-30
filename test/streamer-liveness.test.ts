@@ -35,3 +35,29 @@ test("shouldPulseLiveness skips empty hints and duplicates", () => {
   assert.equal(shouldPulseLiveness({ ...base, closed: true }), false);
   assert.equal(shouldPulseLiveness({ ...base, hasLiveSurface: false }), false);
 });
+
+test("pulse interval aligned with silence floor eventually allows elapsed update", () => {
+  // SessionRuntime pulses at LIVENESS_MIN_SILENCE_MS — first tick must clear silence.
+  const lastContentAt = 0;
+  const pulseAt = LIVENESS_MIN_SILENCE_MS;
+  assert.equal(
+    shouldPulseLiveness({
+      closed: false,
+      lastContentAt,
+      now: pulseAt,
+      nextHint: "Run: npm test · 12s",
+      hasLiveSurface: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldPulseLiveness({
+      closed: false,
+      lastContentAt,
+      now: pulseAt - 1,
+      nextHint: "Run: npm test · 12s",
+      hasLiveSurface: true,
+    }),
+    false,
+  );
+});

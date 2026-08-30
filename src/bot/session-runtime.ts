@@ -50,7 +50,7 @@ import {
   subagentSummary,
 } from "../render/subagent.js";
 import type { PendingStage, SubagentInfo } from "../grok/types.js";
-import { ResponseStreamer } from "../stream/streamer.js";
+import { LIVENESS_MIN_SILENCE_MS, ResponseStreamer } from "../stream/streamer.js";
 import { IMAGE_OUTPUT_DIRECTIVE } from "../render/image-output.js";
 import { collectTurnImagePaths, sendImages } from "./image-return.js";
 import { buildContentBlocks, mergeInputs } from "./prompt-content.js";
@@ -1212,7 +1212,7 @@ export class SessionRuntime {
             : undefined,
         )
       : undefined;
-    // Seed a live bubble immediately so "Still working" / subagent cards have a
+    // Seed a live bubble immediately so the Working / subagent cards have a
     // message to edit before the first ACP chunk (long crew waits).
     if (this.streamer && live && !this.managerMode) {
       void this.streamer.ensureLiveSurface("\u23F3 Working\u2026").catch(() => {});
@@ -1682,13 +1682,17 @@ export class SessionRuntime {
   }
 
   /**
-   * Every 10s, if we know a live step (tool/subagent) and the bubble is quiet,
-   * refresh that step with elapsed time. Re-seeds the live surface if Telegram
-   * never got the Working bubble (429 / race) so project topics do not look dead.
-   * Never spam a bare "Still working" timer.
+   * Every ~12s (matches LIVENESS_MIN_SILENCE_MS), if we know a live step
+   * (tool/subagent) and the bubble is quiet, refresh that step with elapsed
+   * time. Re-seeds the live surface if Telegram never got the Working bubble
+   * (429 / race) so project topics do not look dead.
+   * Never spam a bare "Still working" timer — hung ACP with no liveStep stays
+   * quiet by design; use /cancel to unblock.
    */
   private startLivenessPulse(): void {
     this.stopLivenessPulse();
+    // Interval >= silence floor so the first tick is not a permanent no-op.
+    const pulseMs = LIVENESS_MIN_SILENCE_MS;
     this.livenessPulse = setInterval(() => {
       if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
       const step = this.liveStep?.trim();
@@ -1702,7 +1706,7 @@ export class SessionRuntime {
           streamer.pulseLiveness(elapsed, step);
         })
         .catch(() => {});
-    }, 10_000);
+    }, pulseMs);
     this.livenessPulse.unref?.();
   }
 
