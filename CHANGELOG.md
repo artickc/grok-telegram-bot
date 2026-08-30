@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The latest section is published verbatim as the GitHub Release notes by
 `.github/workflows/release.yml` when a `vX.Y.Z` tag is pushed.
 
+## [2.7.0] - 2026-08-30
+
+Contributor batch from [@vincenthehna](https://github.com/vincenthehna) (PRs
+#6–#8), ported onto current main and credited here. PR #9 (one process / many
+tokens) was **not** merged: it conflicts with forum General + `TOPIC_GROUP_ID`
+(which bot owns the group?) and with the named-instance model.
+
+### Added
+
+- **Grok Build slash catalog on Telegram** (PR #6 / #7). `/goal`, `/plan`,
+  `/compact`, `/workflow(s)`, `/deep_research`, memory/imagine commands, and
+  other ACP-useful shell builtins are advertised (menu ≤100) and forwarded into
+  the active session (`executeCommand` then prompt fallback). Underscores map
+  to Grok hyphens; collision aliases (`/grok_new`, `/memory_flush`, …) keep
+  bot-owned bare names. `/goal` is refused in **General** (use a project topic
+  or AI Chat). Catch-all forwards unknown Grok/skills slashes.
+- **Named instances** (PR #8). `grok-tg --name work setup|install|status`
+  gives each BotFather token its own `~/.grok/tg/instances/<slug>/` and unique
+  OS service (`grok-telegram-bot-work`). `grok-tg instances` lists them. Default
+  bot and `TELEGRAM_BOT_TOKEN` are unchanged.
+- **Optional interactive plan review** (PR #7). `AUTO_APPROVE_PLAN=false`
+  shows Approve / Request changes / Abandon (timeout still unblocks). Default
+  remains auto-approve so 24/7 unattended bots never wait. `ask_user_question`
+  gets Telegram buttons unless auto-skip is on.
+- **`/sandbox`** plus spawn env: `GROK_SANDBOX`, `GROK_MEMORY`,
+  `--agent-profile`, `--plugin-dir`. `session/new` sets `_meta.yoloMode` when
+  tools are trusted.
+- **CI workflow** (`typecheck` job) so `main` can require status checks.
+
+### Docs
+
+- README / INSTALL: several bots on one host via `--name`.
+- AGENTS.md: CLI instances.
+
 ## [2.6.0] - 2026-08-30
 
 General becomes a chat-like **manager** for the forum group: memory-first
@@ -1001,6 +1035,7 @@ from a single chat and switch between them, on a redesigned, compact menu.
   diffs, MarkdownV2 rendering, scheduled tasks, multi-image prompts, and a
   cross-platform 24/7 background service.
 
+[2.7.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.7.0
 [2.6.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.6.0
 [2.5.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.5.0
 [2.4.0]: https://github.com/artickc/grok-telegram-bot/releases/tag/v2.4.0

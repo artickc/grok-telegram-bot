@@ -146,6 +146,10 @@ async function main(): Promise<void> {
     model: cfg.grokModel,
     autoRestart: cfg.grokAutoRestart,
     promptIdleTimeoutMs: cfg.promptIdleMs,
+    sandboxProfile: cfg.sandboxProfile,
+    grokMemory: cfg.grokMemory,
+    agentProfile: cfg.agentProfile,
+    pluginDir: cfg.pluginDir,
   });
 
   // Retry ACP connect — agent crash at boot should not kill the Telegram bot.

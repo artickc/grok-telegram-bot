@@ -24,6 +24,14 @@ export const EXT_EXIT_PLAN_MODE_ALT = "x.ai/exit_plan_mode";
 export const EXT_ASK_USER_QUESTION = "_x.ai/ask_user_question";
 export const EXT_ASK_USER_QUESTION_ALT = "x.ai/ask_user_question";
 
+/** Plan approval outcomes accepted by Grok Build's ExitPlanModeExtResponse. */
+export type PlanExitOutcome = "approved" | "abandoned" | "request_changes";
+
+export interface PlanExitDecision {
+  outcome: PlanExitOutcome;
+  feedback?: string;
+}
+
 /**
  * Auto-approve leaving plan mode so the agent can implement.
  *

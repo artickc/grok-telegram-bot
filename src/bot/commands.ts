@@ -5,8 +5,10 @@
  * a shorter list with cancel/menu first — reply keyboards are unreliable there.
  */
 
-/** Full command menu (private chats + default). Order = Telegram "/" menu order. */
-export const COMMANDS: { command: string; description: string }[] = [
+import { GROK_FORWARDED_COMMANDS } from "./handlers/grok-slash.js";
+
+/** Bot-local commands (not forwarded to Grok). Order = Telegram "/" menu order. */
+export const BOT_COMMANDS: { command: string; description: string }[] = [
   // Core control
   { command: "start", description: "Welcome, menu & status panel" },
   { command: "menu", description: "Open the menu" },
@@ -37,8 +39,15 @@ export const COMMANDS: { command: string; description: string }[] = [
   { command: "killall", description: "Kill all active sessions on the PC" },
   { command: "model", description: "Switch model: /model <id>" },
   { command: "restart", description: "Restart the Grok agent" },
+  { command: "sandbox", description: "Show / set Grok sandbox profile" },
   { command: "unwatch", description: "Stop following a live session" },
   { command: "help", description: "Show help" },
+];
+
+/** Full Telegram menu: bot-local + Grok Build shell forwards (≤100). */
+export const COMMANDS: { command: string; description: string }[] = [
+  ...BOT_COMMANDS,
+  ...GROK_FORWARDED_COMMANDS.map(({ command, description }) => ({ command, description })),
 ];
 
 /**
@@ -56,6 +65,9 @@ export const GROUP_COMMANDS: { command: string; description: string }[] = [
   { command: "btw", description: "Queue or run: /btw <text>" },
   { command: "flush", description: "Run queued follow-ups now" },
   { command: "model", description: "Switch model: /model <id>" },
+  { command: "goal", description: "Grok /goal — run until done" },
+  { command: "plan", description: "Grok /plan — enter plan mode" },
+  { command: "compact", description: "Grok /compact — compress context" },
   { command: "help", description: "Show help" },
 ];
 
@@ -91,4 +103,12 @@ export const HELP_TEXT = [
   "/flush \u2014 run queued follow-ups immediately",
   "/reauth \u2014 sign in to Grok",
   "/accounts \u2014 switch saved Grok accounts",
+  "/sandbox \u2014 show or set GROK_SANDBOX (needs /restart)",
+  "",
+  "GROK BUILD SLASH (forwarded into the active session)",
+  "/goal /plan /view_plan /compact /context /session_info",
+  "/deep_research /workflow /workflows /loop",
+  "/remember /memory /memory_flush /dream",
+  "Underscores map to hyphens (e.g. /view_plan \u2192 /view-plan).",
+  "Other non-bot Grok /commands and skills are also forwarded.",
 ].join("\n");

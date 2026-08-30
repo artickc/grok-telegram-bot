@@ -24,7 +24,7 @@ manages account sign-ins, and can run 24/7 as a background service.
 ```
 src/
 ├── index.ts     Entry point, logging, shutdown
-├── cli.ts       run / install / start / stop / status / logs
+├── cli.ts       run / install / start / stop / status / logs / instances (`--name`)
 ├── config.ts    .env loading, paths, daemon options
 ├── logger.ts    Leveled file logger
 ├── grok/        Grok ACP bridge: client, transport, JSONL types, models, session log

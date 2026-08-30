@@ -11,8 +11,12 @@ import type { LaunchSpec, ServiceController, ServiceResult } from "./types.js";
 
 const UNIT = "grok-telegram-bot.service";
 
-function unitPath(): string {
-  return join(homedir(), ".config", "systemd", "user", UNIT);
+function unitName(spec?: { id?: string }): string {
+  return spec?.id ? `${spec.id}.service` : UNIT;
+}
+
+function unitPath(spec?: { id?: string }): string {
+  return join(homedir(), ".config", "systemd", "user", unitName(spec));
 }
 
 export const linuxController: ServiceController = {
@@ -21,35 +25,37 @@ export const linuxController: ServiceController = {
   async install(spec) {
     mkdirSync(join(homedir(), ".config", "systemd", "user"), { recursive: true });
     mkdirSync(spec.logsDir, { recursive: true });
-    writeFileSync(unitPath(), unitFile(spec), "utf-8");
+    const unit = unitName(spec);
+    writeFileSync(unitPath(spec), unitFile(spec), "utf-8");
 
     runSafe("systemctl", ["--user", "daemon-reload"]);
-    const en = runSafe("systemctl", ["--user", "enable", "--now", UNIT]);
+    const en = runSafe("systemctl", ["--user", "enable", "--now", unit]);
     if (!en.ok) return fail(`systemctl enable failed: ${en.out}`);
     const linger = runSafe("loginctl", ["enable-linger", userInfo().username]);
     const note = linger.ok ? " Boot-without-login enabled (linger)." : " (run `loginctl enable-linger` for boot-without-login)";
-    return ok(`Installed and started systemd user service "${UNIT}".${note}`);
+    return ok(`Installed and started systemd user service "${unit}".${note}`);
   },
 
-  async uninstall() {
-    runSafe("systemctl", ["--user", "disable", "--now", UNIT]);
-    rmSync(unitPath(), { force: true });
+  async uninstall(spec) {
+    const unit = unitName(spec);
+    runSafe("systemctl", ["--user", "disable", "--now", unit]);
+    rmSync(unitPath(spec), { force: true });
     runSafe("systemctl", ["--user", "daemon-reload"]);
-    return ok(`Removed systemd user service "${UNIT}".`);
+    return ok(`Removed systemd user service "${unit}".`);
   },
 
-  async start() {
-    const r = runSafe("systemctl", ["--user", "start", UNIT]);
+  async start(spec) {
+    const r = runSafe("systemctl", ["--user", "start", unitName(spec)]);
     return r.ok ? ok("Started.") : fail(r.out);
   },
 
-  async stop() {
-    const r = runSafe("systemctl", ["--user", "stop", UNIT]);
+  async stop(spec) {
+    const r = runSafe("systemctl", ["--user", "stop", unitName(spec)]);
     return r.ok ? ok("Stopped.") : fail(r.out);
   },
 
-  async status() {
-    const r = runSafe("systemctl", ["--user", "status", UNIT, "--no-pager"]);
+  async status(spec) {
+    const r = runSafe("systemctl", ["--user", "status", unitName(spec), "--no-pager"]);
     return ok(r.out.trim() || "No status.");
   },
 };

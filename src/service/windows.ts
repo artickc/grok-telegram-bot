@@ -15,6 +15,14 @@ const TASK = "GrokTelegramBot";
 /** Launcher dropped in the per-user Startup folder when no admin is available. */
 const STARTUP_VBS = "GrokTelegramBot.vbs";
 
+function taskName(spec?: { windowsTaskName?: string }): string {
+  return spec?.windowsTaskName || TASK;
+}
+
+function startupVbsFile(spec?: { slug?: string }): string {
+  return spec?.slug ? `GrokTelegramBot-${spec.slug}.vbs` : STARTUP_VBS;
+}
+
 /** The per-user Startup folder (runs at logon for the current user, no admin).
  *  Undefined only if APPDATA is unset (e.g. running with no roaming profile). */
 function startupDir(): string | undefined {
@@ -22,9 +30,9 @@ function startupDir(): string | undefined {
   return appData ? join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup") : undefined;
 }
 
-function startupVbsPath(): string | undefined {
+function startupVbsPath(spec?: { slug?: string }): string | undefined {
   const dir = startupDir();
-  return dir ? join(dir, STARTUP_VBS) : undefined;
+  return dir ? join(dir, startupVbsFile(spec)) : undefined;
 }
 
 /** Remove a leftover Startup-folder launcher (e.g. from an earlier non-elevated
@@ -40,8 +48,8 @@ function vbsPath(spec: LaunchSpec): string {
 }
 
 /** True when our hidden Scheduled Task is registered. */
-function taskInstalled(): boolean {
-  return runSafe("schtasks", ["/Query", "/TN", TASK]).ok;
+function taskInstalled(spec?: { windowsTaskName?: string }): boolean {
+  return runSafe("schtasks", ["/Query", "/TN", taskName(spec)]).ok;
 }
 
 /** True when a bot process matching this spec is currently running. Launch
@@ -63,35 +71,36 @@ export const windowsController: ServiceController = {
     // Preferred: a hidden ONLOGON Scheduled Task. Registering a *logon-triggered*
     // task is a privileged operation, so /Create succeeds only from an elevated
     // (admin) terminal. From a normal terminal it returns "Access is denied".
-    runSafe("schtasks", ["/Delete", "/F", "/TN", TASK]); // replace if present
+    const tn = taskName(spec);
+    runSafe("schtasks", ["/Delete", "/F", "/TN", tn]); // replace if present
     const res = runSafe("schtasks", [
       "/Create",
       "/F",
       "/SC",
       "ONLOGON",
       "/TN",
-      TASK,
+      tn,
       "/TR",
       `wscript.exe "${vbs}"`,
     ]);
     if (res.ok) {
       removeStartupLauncher(); // avoid a leftover launcher double-starting the bot
-      if (!isRunning(spec)) runSafe("schtasks", ["/Run", "/TN", TASK]);
-      return ok(`Installed scheduled task "${TASK}" (starts at logon) and launched it.`);
+      if (!isRunning(spec)) runSafe("schtasks", ["/Run", "/TN", tn]);
+      return ok(`Installed scheduled task "${tn}" (starts at logon) and launched it.`);
     }
 
     // A task may still exist that we just couldn't overwrite (e.g. created by an
     // earlier elevated install). Reuse it rather than ALSO adding a Startup
     // launcher, which would double-launch the bot at logon (409 Conflict).
-    if (taskInstalled()) {
+    if (taskInstalled(spec)) {
       removeStartupLauncher();
-      if (!isRunning(spec)) runSafe("schtasks", ["/Run", "/TN", TASK]);
-      return ok(`Scheduled task "${TASK}" already exists; launched it. (Re-run elevated to recreate it.)`);
+      if (!isRunning(spec)) runSafe("schtasks", ["/Run", "/TN", tn]);
+      return ok(`Scheduled task "${tn}" already exists; launched it. (Re-run elevated to recreate it.)`);
     }
 
     // Fallback (no admin — the common case): drop the launcher in the per-user
     // Startup folder. It runs hidden at every logon with no elevation.
-    const startupVbs = startupVbsPath();
+    const startupVbs = startupVbsPath(spec);
     const dir = startupDir();
     if (!startupVbs || !dir) {
       return fail(
@@ -118,21 +127,21 @@ export const windowsController: ServiceController = {
 
   async uninstall(spec) {
     await this.stop(spec);
-    runSafe("schtasks", ["/Delete", "/F", "/TN", TASK]); // best-effort (may not exist)
+    runSafe("schtasks", ["/Delete", "/F", "/TN", taskName(spec)]); // best-effort (may not exist)
     rmSync(vbsPath(spec), { force: true });
-    const startupVbs = startupVbsPath();
+    const startupVbs = startupVbsPath(spec);
     if (startupVbs) rmSync(startupVbs, { force: true });
-    return ok(`Removed "${TASK}" (scheduled task and/or Startup launcher).`);
+    return ok(`Removed "${taskName(spec)}" (scheduled task and/or Startup launcher).`);
   },
 
   async start(spec) {
     if (isRunning(spec)) return ok("Already running.");
-    if (taskInstalled()) {
+    if (taskInstalled(spec)) {
       // schtasks /Run returns once the task is queued (does not wait for the bot).
-      const res = runSafe("schtasks", ["/Run", "/TN", TASK]);
+      const res = runSafe("schtasks", ["/Run", "/TN", taskName(spec)]);
       return res.ok ? ok("Started.") : fail(res.out);
     }
-    const startupVbs = startupVbsPath();
+    const startupVbs = startupVbsPath(spec);
     if (startupVbs && existsSync(startupVbs)) {
       // Forever-restart VBS — must be detached or this CLI never returns.
       const launched = launchDetached("wscript.exe", [startupVbs]);
@@ -148,20 +157,20 @@ export const windowsController: ServiceController = {
   },
 
   async stop(spec) {
-    runSafe("schtasks", ["/End", "/TN", TASK]); // best-effort if task-based
+    runSafe("schtasks", ["/End", "/TN", taskName(spec)]); // best-effort if task-based
     const res = runSafe("powershell", ["-NoProfile", "-Command", killScript(entryOf(spec))]);
     return ok(`Stopped. ${res.out.trim()}`);
   },
 
   async status(spec) {
-    const installedTask = taskInstalled();
-    const startupVbs = startupVbsPath();
+    const installedTask = taskInstalled(spec);
+    const startupVbs = startupVbsPath(spec);
     const installedStartup = !!startupVbs && existsSync(startupVbs);
     const installed = installedTask || installedStartup;
     const running = isRunning(spec);
     const how = installedTask ? "scheduled task" : installedStartup ? "Startup folder" : "—";
     const detail = installedTask
-      ? `\n${runSafe("schtasks", ["/Query", "/TN", TASK, "/FO", "LIST"]).out.trim()}`
+      ? `\n${runSafe("schtasks", ["/Query", "/TN", taskName(spec), "/FO", "LIST"]).out.trim()}`
       : installedStartup
         ? `\nLauncher: ${startupVbs}`
         : "";

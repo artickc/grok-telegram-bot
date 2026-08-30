@@ -10,8 +10,12 @@ import type { LaunchSpec, ServiceController, ServiceResult } from "./types.js";
 
 const LABEL = "com.grok.telegrambot";
 
-function plistPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+function labelOf(spec?: { macosLabel?: string }): string {
+  return spec?.macosLabel || LABEL;
+}
+
+function plistPath(spec?: { macosLabel?: string }): string {
+  return join(homedir(), "Library", "LaunchAgents", `${labelOf(spec)}.plist`);
 }
 
 export const macosController: ServiceController = {
@@ -20,32 +24,33 @@ export const macosController: ServiceController = {
   async install(spec) {
     mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
     mkdirSync(spec.logsDir, { recursive: true });
-    const path = plistPath();
+    const path = plistPath(spec);
     runSafe("launchctl", ["unload", "-w", path]); // ignore if not loaded
     writeFileSync(path, plist(spec), "utf-8");
     const r = runSafe("launchctl", ["load", "-w", path]);
-    return r.ok ? ok(`Installed and loaded LaunchAgent "${LABEL}".`) : fail(r.out);
+    return r.ok ? ok(`Installed and loaded LaunchAgent "${labelOf(spec)}".`) : fail(r.out);
   },
 
-  async uninstall() {
-    runSafe("launchctl", ["unload", "-w", plistPath()]);
-    rmSync(plistPath(), { force: true });
-    return ok(`Removed LaunchAgent "${LABEL}".`);
+  async uninstall(spec) {
+    runSafe("launchctl", ["unload", "-w", plistPath(spec)]);
+    rmSync(plistPath(spec), { force: true });
+    return ok(`Removed LaunchAgent "${labelOf(spec)}".`);
   },
 
-  async start() {
-    const r = runSafe("launchctl", ["start", LABEL]);
+  async start(spec) {
+    const r = runSafe("launchctl", ["start", labelOf(spec)]);
     return r.ok ? ok("Started.") : fail(r.out);
   },
 
-  async stop() {
-    const r = runSafe("launchctl", ["stop", LABEL]);
+  async stop(spec) {
+    const r = runSafe("launchctl", ["stop", labelOf(spec)]);
     return r.ok ? ok("Stopped.") : fail(r.out);
   },
 
-  async status() {
+  async status(spec) {
+    const lab = labelOf(spec);
     const r = runSafe("launchctl", ["list"]);
-    const line = r.out.split("\n").find((l) => l.includes(LABEL));
+    const line = r.out.split("\n").find((l) => l.includes(lab));
     return ok(line ? `Loaded: ${line.trim()}` : "Not loaded.");
   },
 };
@@ -67,7 +72,7 @@ function plist(spec: LaunchSpec): string {
     '<plist version="1.0">',
     "<dict>",
     "  <key>Label</key>",
-    `  <string>${LABEL}</string>`,
+    `  <string>${labelOf(spec)}</string>`,
     "  <key>ProgramArguments</key>",
     "  <array>",
     args,

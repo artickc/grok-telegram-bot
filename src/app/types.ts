@@ -97,6 +97,11 @@ export interface PromptInput {
    * "Thinking…" then streams the agent reply into.
    */
   seedMessageId?: number;
+  /**
+   * Grok Build slash command (`/goal`, `/compact`, …). Must stay the first
+   * line of the prompt — skip manager/complexity wrappers.
+   */
+  rawSlashCommand?: boolean;
 }
 
 export function textPrompt(
@@ -108,6 +113,7 @@ export function textPrompt(
     promptId?: string;
     reportBack?: PromptInput["reportBack"];
     seedMessageId?: number;
+    rawSlashCommand?: boolean;
   },
 ): PromptInput {
   return {
@@ -120,5 +126,6 @@ export function textPrompt(
     skipSelfRecheck: opts?.skipSelfRecheck,
     reportBack: opts?.reportBack,
     seedMessageId: opts?.seedMessageId,
+    rawSlashCommand: opts?.rawSlashCommand,
   };
 }

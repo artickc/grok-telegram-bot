@@ -218,6 +218,10 @@ export interface GrokClientOptions {
   autoRestart?: boolean;
   promptIdleTimeoutMs?: number;
   promptMaxMs?: number;
+  sandboxProfile?: string;
+  grokMemory?: string;
+  agentProfile?: string;
+  pluginDir?: string;
 }
 
 interface Pending {
@@ -288,6 +292,10 @@ export class GrokClient extends EventEmitter {
    * outcomes). Must never kill the agent process.
    */
   onSessionCancel?: (sessionId: string) => void;
+  /** Interactive (or auto) plan-mode exit. Default: auto-approve. */
+  planExitHandler?: (params: Record<string, unknown>) => Promise<unknown>;
+  /** Interactive (or skip) ask_user_question. Default: SkipInterview. */
+  askUserHandler?: (params: Record<string, unknown>) => Promise<unknown>;
 
   constructor(private readonly opts: GrokClientOptions) {
     super();
@@ -313,11 +321,15 @@ export class GrokClient extends EventEmitter {
     // the new token. `--no-auto-update` was removed in grok 0.2.x (exit 2).
     const args = ["agent", "--no-leader"];
     if (this.opts.trustAllTools) args.push("--always-approve");
+    if (this.opts.agentProfile) args.push("--agent-profile", this.opts.agentProfile);
+    if (this.opts.pluginDir) args.push("--plugin-dir", this.opts.pluginDir);
     args.push("stdio");
 
     log.info(`spawning: ${this.opts.grokCliPath} ${args.join(" ")}`);
     const env = { ...process.env };
     if (this.opts.apiKey) env.XAI_API_KEY = this.opts.apiKey;
+    if (this.opts.sandboxProfile) env.GROK_SANDBOX = this.opts.sandboxProfile;
+    if (this.opts.grokMemory) env.GROK_MEMORY = this.opts.grokMemory;
     const proc = spawn(this.opts.grokCliPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.opts.workspace,
@@ -419,7 +431,11 @@ export class GrokClient extends EventEmitter {
   }
 
   async newSession(cwd: string): Promise<string> {
-    const res = (await this.request("session/new", { cwd, mcpServers: [] })) as { sessionId: string };
+    const res = (await this.request("session/new", {
+      cwd,
+      mcpServers: [],
+      ...(this.opts.trustAllTools ? { _meta: { yoloMode: true } } : {}),
+    })) as { sessionId: string };
     this.parseSessionExtras(res);
     this.cwd.set(res.sessionId, cwd);
     this.slog.create(res.sessionId, cwd);
@@ -622,6 +638,12 @@ export class GrokClient extends EventEmitter {
     return this.request("_grok.dev/commands/execute", { sessionId, command });
   }
 
+  /** Update spawn-time agent env (applied on the next `grok agent` restart). */
+  setAgentOptions(opts: { sandboxProfile?: string; grokMemory?: string }): void {
+    if (opts.sandboxProfile !== undefined) this.opts.sandboxProfile = opts.sandboxProfile;
+    if (opts.grokMemory !== undefined) this.opts.grokMemory = opts.grokMemory;
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.restartTimer) {
@@ -780,11 +802,13 @@ export class GrokClient extends EventEmitter {
             (planSnippet ? ` plan=${planSnippet.replace(/\s+/g, " ").slice(0, 80)}` : "") +
             (keys ? ` keys=[${keys}]` : ""),
         );
-        result = autoApproveExitPlanMode(params);
+        result = this.planExitHandler
+          ? await this.planExitHandler(params)
+          : autoApproveExitPlanMode(params);
       } else if (isAskUserQuestionMethod(method)) {
-        // No TUI question form: skip so the agent continues (prefer later Telegram UI).
-        log.info(`auto-skipping ${method} (no interactive question UI in Telegram bridge)`);
-        result = autoSkipAskUserQuestion(params);
+        result = this.askUserHandler
+          ? await this.askUserHandler(params)
+          : autoSkipAskUserQuestion(params);
       } else {
         // We advertise no fs/terminal capabilities, so the agent shouldn't ask.
         // Log at warn — unknown reverse methods used to silently break plan exit

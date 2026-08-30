@@ -7,6 +7,12 @@ export interface LaunchSpec {
   id: string;
   /** Human-readable name. */
   displayName: string;
+  /** Windows Scheduled Task name (unique per named instance). */
+  windowsTaskName?: string;
+  /** launchd label (unique per named instance). */
+  macosLabel?: string;
+  /** Named instance slug when using `--name`. */
+  slug?: string;
   /** Absolute path to the node binary that should run the bot. */
   nodePath: string;
   /** Arguments after the node binary (tsx loader + entry file). */

@@ -846,6 +846,7 @@ export class SessionRuntime {
     // Never wrap meta follow-ups even if somehow first.
     if (
       input.skipSelfRecheck ||
+      input.rawSlashCommand ||
       isSelfRecheckPrompt(input.text) ||
       isTelegramBridgeResultsPrompt(input.text) ||
       isManagerWorkReportPrompt(input.text)
@@ -870,6 +871,7 @@ export class SessionRuntime {
   private applyManagerContext(input: PromptInput): PromptInput {
     if (!this.managerMode) return input;
     if (
+      input.rawSlashCommand ||
       isTelegramBridgeResultsPrompt(input.text) ||
       isManagerWorkReportPrompt(input.text) ||
       isSelfRecheckPrompt(input.text)

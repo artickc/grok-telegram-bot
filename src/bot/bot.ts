@@ -44,6 +44,9 @@ import { registerTasks, registerWizardInput } from "./handlers/tasks.js";
 import { registerUsage } from "./handlers/usage.js";
 import { registerVoice } from "./handlers/voice.js";
 import { registerForum } from "./handlers/forum.js";
+import { registerGrokSlash } from "./handlers/grok-slash.js";
+import { AskUserService } from "./ask-user-service.js";
+import { PlanExitService } from "./plan-exit-service.js";
 import { StatusPanel } from "./menu/status-panel.js";
 import { sendMarkdownDoc } from "./telegram-io.js";
 import { Ephemeral } from "./menu/ephemeral.js";
@@ -207,6 +210,18 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     onUnpinned: (chatId) => statusPanel.ensurePinned(chatId),
   });
   acp.permissionHandler = (p) => permissions.handle(p);
+
+  const planExit = new PlanExitService(bot.api, registry, cfg.autoApprovePlan, (chatId) =>
+    statusPanel.ensurePinned(chatId),
+  );
+  acp.planExitHandler = (params) => planExit.handle(params);
+
+  const askUser = new AskUserService(
+    bot.api,
+    registry,
+    cfg.autoApprovePlan && cfg.autoApprovePermissions,
+  );
+  acp.askUserHandler = (params) => askUser.handle(params);
   // /stop and /cancel must cancel pending interactive permissions for that
   // session only (ACP requires cancelled outcomes) — never kill the agent.
   acp.onSessionCancel = (sessionId) => {
@@ -250,6 +265,16 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     await ctx.answerCallbackQuery();
     const sid = permissions.sessionFor(ctx.match![1]!);
     if (sid) await switchAndShow(ctx, deps, sid);
+  });
+
+  bot.callbackQuery(/^planx:(\d+):(ok|chg|no)$/, async (ctx) => {
+    const toast = planExit.resolveChoice(ctx.match![1]!, ctx.match![2]!);
+    await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
+  });
+
+  bot.callbackQuery(/^asku:(\d+):(opt|next|prev|skip)(?::(.*))?$/, async (ctx) => {
+    const toast = askUser.tap(ctx.match![1]!, ctx.match![2]!, ctx.match![3]);
+    await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
   });
 
   // Legacy complexity buttons (removed — agent decides; auto-plan if complex).
@@ -349,6 +374,12 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
 
   registerMenu(bot, deps); // persistent-keyboard buttons (hears)
   registerWizardInput(bot, deps); // wizard text input (before commands)
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message?.text ?? "";
+    if (!text || text.startsWith("/")) return next();
+    if (planExit.takeFeedback(ctx.chat.id, text)) return;
+    await next();
+  });
   if (forum) registerForum(bot, deps, forum);
   registerControl(bot, deps);
   registerProjects(bot, deps);
@@ -367,6 +398,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   registerPhotos(bot, deps); // photos & image documents
   registerDocuments(bot, deps); // non-image files (text inlined, binaries saved)
   registerVoice(bot, deps); // voice / audio -> transcription -> prompt
+  registerGrokSlash(bot, deps); // Grok Build /goal /plan /compact … + catch-all
   registerMessages(bot, deps); // catch-all text prompt — keep last
 
   bot.catch((err) => {

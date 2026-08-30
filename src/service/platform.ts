@@ -4,6 +4,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
+import { parseInstanceFlags, serviceIdentity } from "../app/instance.js";
 import { PROJECT_ROOT, INSTANCE_DIR } from "../config.js";
 
 export type Platform = "windows" | "linux" | "macos" | "unknown";
@@ -31,9 +32,14 @@ export function buildLaunchSpec(): LaunchSpec {
   // the bot where its .env/logs/data live. Only appended for a global install
   // (instance dir differs) so in-place checkouts keep identical launch args.
   if (INSTANCE_DIR !== PROJECT_ROOT) args.push("--instance", INSTANCE_DIR);
+  const flags = parseInstanceFlags(process.argv);
+  const ident = serviceIdentity(INSTANCE_DIR, flags.name || process.env.GROK_TG_NAME);
   return {
-    id: "grok-telegram-bot",
-    displayName: "Grok Telegram Bot",
+    id: ident.id,
+    displayName: ident.displayName,
+    windowsTaskName: ident.windowsTaskName,
+    macosLabel: ident.macosLabel,
+    slug: ident.slug,
     nodePath: process.execPath,
     args,
     cwd: PROJECT_ROOT,
@@ -41,7 +47,10 @@ export function buildLaunchSpec(): LaunchSpec {
     // relaunches on exit — so its auto-updater exits cleanly instead of
     // re-exec'ing (which would double-run). Windows applies no env, so its
     // Scheduled Task (no auto-restart) takes the re-exec path instead.
-    env: { GROK_TG_SUPERVISED: "1" },
+    env: {
+      GROK_TG_SUPERVISED: "1",
+      ...(ident.slug ? { GROK_TG_NAME: ident.slug } : {}),
+    },
     logsDir,
     logFile: join(logsDir, "grok-telegram-bot.log"),
   };

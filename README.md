@@ -120,8 +120,21 @@ ghost/duplicate that was still polling Telegram (the usual cause of a stale
 "⛔ Not authorized"), so the fresh process with your current `.env` wins. A
 plain `grok-tg run` yields to an already-running background service instead.
 
-Startup options: `grok-tg setup [--path] | run | install | status | logs [n] |
-stop | restart | uninstall`. Or try it without installing: `npx
+Want a **second Telegram bot** (one private chat per project) without switching
+sessions? Create another bot in @BotFather and:
+
+```bash
+grok-tg --name work setup <NEW_BOT_TOKEN> <YOUR_USER_ID>
+grok-tg --name work install
+grok-tg instances
+```
+
+Each named instance has its own `~/.grok/tg/instances/<slug>/` and unique
+service (`grok-telegram-bot-work`). The default bot is unchanged.
+
+Startup options: `grok-tg [--name <slug>] setup [--path] | run | install |
+status | logs [n] | stop | restart | uninstall | instances`. Or try it without
+installing: `npx
 grok-telegram-bot setup`. See **[docs/INSTALL.md](./docs/INSTALL.md)** for the
 full guide.
 
