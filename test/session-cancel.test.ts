@@ -32,6 +32,11 @@ test("cancelled stopReason is treated as intentional stop (not empty-response fa
 });
 
 test("PermissionService.cancelForSession only cancels matching session", async () => {
+  const prevTrust = process.env.GROK_TRUST_ALL_TOOLS;
+  const prevAuto = process.env.AUTO_APPROVE_PERMISSIONS;
+  process.env.GROK_TRUST_ALL_TOOLS = "false";
+  process.env.AUTO_APPROVE_PERMISSIONS = "false";
+  try {
   const api = {
     sendMessage: async () => ({ message_id: 1 }),
     pinChatMessage: async () => {},
@@ -87,4 +92,10 @@ test("PermissionService.cancelForSession only cancels matching session", async (
   assert.deepEqual(outB, { outcome: { outcome: "cancelled" } });
 
   assert.equal(perms.cancelForSession("sess-a"), 0);
+  } finally {
+    if (prevTrust === undefined) delete process.env.GROK_TRUST_ALL_TOOLS;
+    else process.env.GROK_TRUST_ALL_TOOLS = prevTrust;
+    if (prevAuto === undefined) delete process.env.AUTO_APPROVE_PERMISSIONS;
+    else process.env.AUTO_APPROVE_PERMISSIONS = prevAuto;
+  }
 });
