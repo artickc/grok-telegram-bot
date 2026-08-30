@@ -184,6 +184,9 @@ export class ChatController {
   /**
    * Cold-start / map-miss: resolve continue target from reply message id, #sess_
    * tag on controlled runtimes, or disk session list (attach into this controller).
+   *
+   * Never imports a session whose cwd belongs to another topic/project (e.g.
+   * replying in General to a MANAGER WORK REPORT that carries a project #sess_).
    */
   async resolveContinueFromReply(opts: {
     replyToMessageId?: number;
@@ -192,10 +195,11 @@ export class ChatController {
     projectName?: string;
   }): Promise<SessionRuntime | undefined> {
     this.ensureRestored();
+    const expectedCwd = this.fixedCwd ?? opts.cwd;
     const byMsg = this.runtimeForTelegramMessage(opts.replyToMessageId);
-    if (byMsg) return byMsg;
+    if (byMsg && cwdAllowsContinue(expectedCwd, byMsg.cwd)) return byMsg;
     const byTag = this.runtimeForSessionTag(opts.replyToText);
-    if (byTag) return byTag;
+    if (byTag && cwdAllowsContinue(expectedCwd, byTag.cwd)) return byTag;
 
     const tag = parseSessTag(opts.replyToText);
     if (!tag) return undefined;
@@ -208,6 +212,8 @@ export class ChatController {
     }
     const meta = metas.find((m) => sessionMatchesTag(m.sessionId, tag));
     if (!meta) return undefined;
+    // Block cross-topic leaks: General must not adopt amo.watch (etc.) sessions.
+    if (!cwdAllowsContinue(expectedCwd, meta.cwd)) return undefined;
     try {
       const sw = await this.addResume(
         meta.sessionId,
@@ -573,6 +579,22 @@ export class ChatController {
 /** Path key for project matching (case / separators / trailing slash). */
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * Whether a session cwd may be continued inside a topic/controller whose
+ * expected project path is `expectedCwd`. Different projects must not mix
+ * (stops General from adopting project-topic sessions via #sess_ replies).
+ */
+export function cwdAllowsContinue(
+  expectedCwd: string | undefined,
+  sessionCwd: string | undefined,
+): boolean {
+  const exp = (expectedCwd || "").trim();
+  const got = (sessionCwd || "").trim();
+  if (!exp) return true;
+  if (!got) return false;
+  return normPath(exp) === normPath(got);
 }
 
 /** Extract `#sess_xxxxxxxx` from bot message text/caption. */
