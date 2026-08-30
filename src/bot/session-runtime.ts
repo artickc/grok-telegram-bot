@@ -153,6 +153,10 @@ export class SessionRuntime {
   private cancelled = false;
   /** Keeps ACP idle-watch alive during long tools/goals with sparse updates. */
   private activityHeartbeat: NodeJS.Timeout | undefined;
+  /** Edits the live Telegram bubble with "still working" while tools are silent. */
+  private livenessPulse: NodeJS.Timeout | undefined;
+  /** Turn start for liveness elapsed labels. */
+  private turnPulseStartedAt = 0;
   private readonly queue: PromptInput[] = [];
   private streamer: ResponseStreamer | undefined;
   private readonly typing: TypingIndicator;
@@ -600,6 +604,7 @@ export class SessionRuntime {
     this.acp.off("restarted", this.restartListener);
     this.typing.stop();
     this.stopActivityHeartbeat();
+    this.stopLivenessPulse();
     this.stopWatch();
   }
 
@@ -1161,7 +1166,9 @@ export class SessionRuntime {
     // Typing indicator for user-facing manager turns and live project streams.
     if (live || (this.managerMode && !managerMeta)) this.typing.start();
     this.activity(true);
+    this.turnPulseStartedAt = startedAt;
     this.startActivityHeartbeat();
+    this.startLivenessPulse();
     this.changed();
     this.imageScanText = "";
     this.sentImagesThisTurn = new Set();
@@ -1563,6 +1570,7 @@ export class SessionRuntime {
       this.turnExpectDone = false;
       this.typing.stop();
       this.stopActivityHeartbeat();
+      this.stopLivenessPulse();
       this.streamer = undefined;
       this.capturingQuiet = false;
       this.quietCaptureBuf = "";
@@ -1607,6 +1615,29 @@ export class SessionRuntime {
     if (this.activityHeartbeat) {
       clearInterval(this.activityHeartbeat);
       this.activityHeartbeat = undefined;
+    }
+  }
+
+  /**
+   * Every 15s, if the live bubble has been silent, edit it with elapsed
+   * "Still working" so long SSH/shell gaps do not look frozen forever.
+   */
+  private startLivenessPulse(): void {
+    this.stopLivenessPulse();
+    this.livenessPulse = setInterval(() => {
+      if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
+      this.streamer.pulseLiveness(
+        fmtDuration(Date.now() - this.turnPulseStartedAt),
+        this.liveStep,
+      );
+    }, 15_000);
+    this.livenessPulse.unref?.();
+  }
+
+  private stopLivenessPulse(): void {
+    if (this.livenessPulse) {
+      clearInterval(this.livenessPulse);
+      this.livenessPulse = undefined;
     }
   }
 
