@@ -2282,7 +2282,15 @@ export class SessionRuntime {
       if (!md) return;
       this.shownToolIds.add(`sub:${cacheKey}`);
       const step = stepFromToolUpdate(merged);
-      if (step) this.setLiveStep(`\u{1F916} ${label}: ${step}`);
+      if (step) {
+        this.setLiveStep(`\u{1F916} ${label}: ${step}`);
+      } else if (
+        this.busy &&
+        (status === "completed" || status === "failed") &&
+        (!this.liveStep || this.liveStep.includes(label))
+      ) {
+        this.setLiveStep(`\u{1F916} ${label}: Working\u2026`);
+      }
       this.streamer.upsertTool(`sub:${cacheKey}`, `\u{1F916} **${label}**\n${md}`);
     }
   }
@@ -2951,8 +2959,15 @@ export class SessionRuntime {
       const fo = fileOpFromUpdate(mergedEarly);
       if (fo) this.fileOps.set(fo.path, mergeFileOp(this.fileOps.get(fo.path), fo.op));
       // Live card step — always, even for background sessions.
+      // Completed tools must not sticky "Read X done · 5m" on the pulse.
+      const toolStatus = (mergedEarly.status || "").toLowerCase();
       const step = stepFromToolUpdate(mergedEarly);
-      if (step) this.setLiveStep(step);
+      if (step) {
+        this.setLiveStep(step);
+      } else if (this.busy && (toolStatus === "completed" || toolStatus === "failed")) {
+        // Interim cue until the next in-progress tool arrives (no Still working spam).
+        this.setLiveStep("Working\u2026");
+      }
     } else if (kind === "agent_message_chunk") {
       const text = contentText(update.content);
       if (text) {

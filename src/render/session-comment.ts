@@ -261,7 +261,11 @@ export function buildLocalTurnComment(opts: {
   return buildLastTurnSummary(opts);
 }
 
-/** Derive a live "current step" line from an ACP tool update. */
+/**
+ * Derive a live "current step" line from an ACP tool update.
+ * Returns undefined for completed/failed — never sticky "Read X done · 5m"
+ * while the next tool runs silent (that looked like a total freeze in TG).
+ */
 export function stepFromToolUpdate(u: SessionUpdate): string | undefined {
   const raw = { ...((u.rawInput || {}) as Record<string, unknown>) };
   const id = resolveToolIdentity(u, raw);
@@ -269,53 +273,52 @@ export function stepFromToolUpdate(u: SessionUpdate): string | undefined {
   const path = extractPath(raw);
   const short = path ? basename(path.replace(/\\/g, "/")) : "";
   const status = (u.status || "").toLowerCase();
-  const done = status === "completed" || status === "failed";
-  const fail = status === "failed" ? " failed" : done ? " done" : "";
+  if (status === "completed" || status === "failed") return undefined;
 
   switch (kind) {
     case "execute": {
       const cmd = extractCommand(raw);
-      if (cmd) return cleanCommentLine(`Run: ${cmd}${fail}`, COMMENT_MAX);
+      if (cmd) return cleanCommentLine(`Run: ${cmd}`, COMMENT_MAX);
       break;
     }
     case "edit":
-      return cleanCommentLine(`Edit ${short || path || "file"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Edit ${short || path || "file"}`, COMMENT_MAX);
     case "write":
     case "create":
-      return cleanCommentLine(`${kind === "create" ? "Create" : "Write"} ${short || path || "file"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`${kind === "create" ? "Create" : "Write"} ${short || path || "file"}`, COMMENT_MAX);
     case "read":
-      return cleanCommentLine(`Read ${short || path || id.toolName || "file"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Read ${short || path || id.toolName || "file"}`, COMMENT_MAX);
     case "list":
-      return cleanCommentLine(`List ${short || path || "."}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`List ${short || path || "."}`, COMMENT_MAX);
     case "search": {
       const q = extractSearchQuery(raw);
-      return cleanCommentLine(`Search${q ? `: ${q}` : ""}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Search${q ? `: ${q}` : ""}`, COMMENT_MAX);
     }
     case "delete":
-      return cleanCommentLine(`Delete ${short || path || "file"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Delete ${short || path || "file"}`, COMMENT_MAX);
     case "move":
     case "rename":
-      return cleanCommentLine(`${kind === "rename" ? "Rename" : "Move"} ${short || path || "file"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`${kind === "rename" ? "Rename" : "Move"} ${short || path || "file"}`, COMMENT_MAX);
     case "fetch":
     case "web_fetch": {
       const url = extractUrl(raw);
-      return cleanCommentLine(`Fetch ${url || "URL"}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Fetch ${url || "URL"}`, COMMENT_MAX);
     }
     case "web_search": {
       const q = extractSearchQuery(raw) || extractUrl(raw);
-      return cleanCommentLine(`Web search${q ? `: ${q}` : ""}${fail}`, COMMENT_MAX);
+      return cleanCommentLine(`Web search${q ? `: ${q}` : ""}`, COMMENT_MAX);
     }
     case "mcp":
       return cleanCommentLine(
-        `MCP ${id.mcpServer ? id.mcpServer + ": " : ""}${id.mcpMethod || id.toolName}${fail}`,
+        `MCP ${id.mcpServer ? id.mcpServer + ": " : ""}${id.mcpMethod || id.toolName}`,
         COMMENT_MAX,
       );
     default:
       break;
   }
-  if (id.toolName) return cleanCommentLine(`${id.toolName}${fail}`, COMMENT_MAX);
+  if (id.toolName) return cleanCommentLine(`${id.toolName}`, COMMENT_MAX);
   if (u.title?.trim() && !/^other$/i.test(u.title.trim())) {
-    return cleanCommentLine(u.title.trim() + fail, COMMENT_MAX);
+    return cleanCommentLine(u.title.trim(), COMMENT_MAX);
   }
   return undefined;
 }
