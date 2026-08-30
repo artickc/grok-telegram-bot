@@ -56,10 +56,10 @@ export function autoApproveExitPlanMode(_params?: Record<string, unknown>): Reco
  * Headless answer for ask_user_question reverse-request: skip the interview so
  * the agent is not stuck waiting for a TUI that does not exist.
  *
- * Externally-tagged enum variant (`SkipInterview`) from AskUserQuestionExtResponse.
+ * Current wire format: internally tagged `{ outcome: "skip_interview", ... }`.
  */
 export function autoSkipAskUserQuestion(_params?: Record<string, unknown>): Record<string, unknown> {
-  return { SkipInterview: null };
+  return { outcome: "skip_interview", partial_answers: {} };
 }
 
 /** Normalize method names: strip optional leading underscore for matching. */

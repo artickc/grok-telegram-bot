@@ -139,6 +139,12 @@ export interface AppConfig {
    * interactive review in Telegram.
    */
   autoApprovePlan: boolean;
+  /**
+   * Skip Grok `ask_user_question` interviews (no Telegram buttons).
+   * Default **false** — show questions inline and wait for answers.
+   * Set true for fully unattended bots.
+   */
+  askUserAutoSkip: boolean;
   /** GROK_SANDBOX profile (workspace-safe, strict, off, …). */
   sandboxProfile?: string;
   /** GROK_MEMORY setting forwarded to the agent process. */
@@ -307,6 +313,7 @@ export function loadConfig(): AppConfig {
     // Default true: auto-approve with session-scope when the agent still asks.
     autoApprovePermissions: bool(process.env.AUTO_APPROVE_PERMISSIONS, true),
     autoApprovePlan: bool(process.env.AUTO_APPROVE_PLAN, true),
+    askUserAutoSkip: bool(process.env.ASK_USER_AUTO_SKIP, false),
     sandboxProfile: process.env.GROK_SANDBOX?.trim() || undefined,
     grokMemory: process.env.GROK_MEMORY?.trim() || undefined,
     agentProfile: process.env.GROK_AGENT_PROFILE?.trim() || undefined,

@@ -38,9 +38,9 @@ test("autoApproveExitPlanMode returns smoke-verified outcome shape", () => {
   assert.equal(r.feedback, "");
 });
 
-test("autoSkipAskUserQuestion returns SkipInterview", () => {
-  const r = autoSkipAskUserQuestion({ questions: [] });
-  assert.ok("SkipInterview" in r);
+test("autoSkipAskUserQuestion returns skip_interview outcome", () => {
+  const r = autoSkipAskUserQuestion({ questions: [] }) as { outcome?: string };
+  assert.equal(r.outcome, "skip_interview");
 });
 
 test("formatToolCall surfaces exit_plan_mode failure reason", () => {
