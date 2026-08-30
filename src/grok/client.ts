@@ -518,7 +518,12 @@ export class GrokClient extends EventEmitter {
           void this.cancel(sessionId);
         } else if (idle > this.promptIdleMs) {
           clearInterval(watch);
-          settleReject(new Error(`No agent activity for ${Math.round(idle / 1000)}s — giving up`));
+          settleReject(
+            new Error(
+              `No agent activity for ${Math.round(idle / 1000)}s — giving up ` +
+                `(long tools/goals need heartbeats; raise PROMPT_IDLE_TIMEOUT_MS if needed)`,
+            ),
+          );
           void this.cancel(sessionId);
         }
       }, 15_000);
@@ -536,6 +541,16 @@ export class GrokClient extends EventEmitter {
         settleReject(e as Error);
       }
     });
+  }
+
+  /**
+   * Refresh idle-watch activity. Call from the host while a turn is still
+   * working even if the agent has not emitted session/update (long tools).
+   */
+  touchActivity(sessionId?: string): void {
+    const now = Date.now();
+    this.lastActivityAny = now;
+    if (sessionId) this.lastActivity.set(sessionId, now);
   }
 
   /** Clear the running/lock state for a finished turn and flush its transcript. */

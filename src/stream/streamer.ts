@@ -194,7 +194,7 @@ export class ResponseStreamer {
     if (!rawMarkdown || this.proseOnly) return;
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown });
-    this.schedule();
+    this.schedule(true);
   }
 
   /**
@@ -227,14 +227,14 @@ export class ResponseStreamer {
           if (i < this.sealedIdx) {
             this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id });
           }
-          this.schedule();
+          this.schedule(true);
           return;
         }
       }
     }
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id || undefined });
-    this.schedule();
+    this.schedule(true);
   }
 
   /** True when agent prose/tools/thoughts were appended (not just a seed bubble). */
@@ -270,14 +270,24 @@ export class ResponseStreamer {
     else this.segs.push({ kind, text });
   }
 
-  private schedule(): void {
+  /**
+   * @param urgent tool updates — flush sooner (~200ms) so heavy /goal turns
+   * feel live instead of waiting a full throttle window.
+   */
+  private schedule(urgent = false): void {
     if (this.closed) return;
     this.dirty = true;
-    if (this.timer) return;
+    const delay = urgent ? Math.min(200, this.throttleMs) : this.throttleMs;
+    if (this.timer) {
+      if (!urgent) return;
+      // Reschedule sooner for tool cards.
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.flush(false);
-    }, this.throttleMs);
+    }, delay);
   }
 
   private async flush(final: boolean): Promise<void> {

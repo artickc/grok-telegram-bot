@@ -151,6 +151,8 @@ export class SessionRuntime {
 
   private busy = false;
   private cancelled = false;
+  /** Keeps ACP idle-watch alive during long tools/goals with sparse updates. */
+  private activityHeartbeat: NodeJS.Timeout | undefined;
   private readonly queue: PromptInput[] = [];
   private streamer: ResponseStreamer | undefined;
   private readonly typing: TypingIndicator;
@@ -1158,6 +1160,7 @@ export class SessionRuntime {
     // Typing indicator for user-facing manager turns and live project streams.
     if (live || (this.managerMode && !managerMeta)) this.typing.start();
     this.activity(true);
+    this.startActivityHeartbeat();
     this.changed();
     this.imageScanText = "";
     this.sentImagesThisTurn = new Set();
@@ -1558,6 +1561,7 @@ export class SessionRuntime {
       }
       this.turnExpectDone = false;
       this.typing.stop();
+      this.stopActivityHeartbeat();
       this.streamer = undefined;
       this.capturingQuiet = false;
       this.quietCaptureBuf = "";
@@ -1584,6 +1588,24 @@ export class SessionRuntime {
       this.onActivity?.(busy);
     } catch {
       /* non-fatal */
+    }
+  }
+
+  /** Touch ACP activity every 60s so long tools do not trip the idle watchdog. */
+  private startActivityHeartbeat(): void {
+    this.stopActivityHeartbeat();
+    this.activityHeartbeat = setInterval(() => {
+      if (!this.busy || this.cancelled) return;
+      this.acp.touchActivity(this.sessionId);
+    }, 60_000);
+    // Unref so this timer alone cannot keep the process alive on shutdown.
+    this.activityHeartbeat.unref?.();
+  }
+
+  private stopActivityHeartbeat(): void {
+    if (this.activityHeartbeat) {
+      clearInterval(this.activityHeartbeat);
+      this.activityHeartbeat = undefined;
     }
   }
 

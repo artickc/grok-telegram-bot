@@ -7,6 +7,7 @@ import {
   formatPromptAnchorBody,
   formatPromptTag,
   newPromptId,
+  splitPromptAnchorParts,
 } from "../src/bot/prompt-anchor.js";
 import { sessionHashtags, tagSafe } from "../src/render/hashtags.js";
 
@@ -32,12 +33,16 @@ test("formatPromptAnchorBody includes prefix, body and tags", () => {
   assert.ok(body.includes("#proj_my_app"));
 });
 
-test("formatPromptAnchorBody truncates very long bodies", () => {
+test("splitPromptAnchorParts keeps full long prompts across parts", () => {
   const long = "x".repeat(10_000);
-  const body = formatPromptAnchorBody(long, "z9");
-  assert.ok(body.length < 4200);
-  assert.ok(body.includes("…"));
-  assert.ok(body.includes("#prompt_z9"));
+  const parts = splitPromptAnchorParts(long, "z9");
+  assert.ok(parts.length >= 3);
+  for (const p of parts) {
+    assert.ok(p.length < 4200);
+    assert.ok(p.includes("#prompt_z9"));
+  }
+  const joined = parts.map((p) => p.replace(/^[^\n]*\n/, "").replace(/\n\n#prompt_[\s\S]*$/, "")).join("");
+  assert.equal(joined, long);
 });
 
 test("fitCaption keeps #prompt_ tags within 1024", () => {

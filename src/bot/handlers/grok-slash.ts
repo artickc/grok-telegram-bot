@@ -13,7 +13,7 @@ import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
 import { isGeneralThread } from "../../forum/thread.js";
 import type { BotDeps } from "../deps.js";
-import { extractReplyContext } from "../reply-context.js";
+import { adoptUserPrompt } from "../prompt-anchor.js";
 import { resolveScope } from "../scope.js";
 
 const log = createLogger("grok-slash");
@@ -270,6 +270,11 @@ export function toGrokSlashLine(text: string): string {
   return `/${name}${rest}`;
 }
 
+/** True for short meta /goal subcommands that do not need a long live stream. */
+function isShortGoalMeta(grokLine: string): boolean {
+  return /^\/goal\s+(status|pause|resume|clear)\s*$/i.test(grokLine.trim());
+}
+
 export async function submitGrokSlash(ctx: Context, deps: BotDeps, line: string): Promise<void> {
   if (!ctx.chat) return;
   const grokLine = toGrokSlashLine(line);
@@ -283,10 +288,15 @@ export async function submitGrokSlash(ctx: Context, deps: BotDeps, line: string)
     return;
   }
   const rt = scope.rt;
+  const userMsgId = ctx.message?.message_id;
   try {
-    // Prefer dedicated ACP command RPC when the agent supports it; fall back to
-    // session/prompt (Grok slash_exec parses leading / in the prompt).
-    if (rt.sessionId) {
+    // Long /goal objectives must run as session/prompt so Telegram streams live.
+    // executeCommand is only for short meta (status/pause/resume/clear) and other
+    // slash builtins that return quickly.
+    const preferPrompt =
+      /^\/goal(?:\s|$)/i.test(grokLine) && !isShortGoalMeta(grokLine);
+
+    if (!preferPrompt && rt.sessionId) {
       try {
         await deps.acp.executeCommand(rt.sessionId, grokLine);
         await ctx.reply(`\u25B6\uFE0F Sent to Grok: \`${grokLine}\``, extra);
@@ -297,10 +307,22 @@ export async function submitGrokSlash(ctx: Context, deps: BotDeps, line: string)
         );
       }
     }
+
+    // Echo full slash line as a searchable prompt anchor (multi-part if long).
+    const anchor = await adoptUserPrompt(deps.api, {
+      chatId: ctx.chat.id,
+      text: grokLine,
+      userMessageIds: userMsgId !== undefined ? [userMsgId] : [],
+      messageThreadId: scope.threadExtra.message_thread_id,
+      projectName: scope.rt.projectName,
+      prefix: "\u{1F3AF}",
+    });
+
     const outcome = await rt.submit(
-      textPrompt(grokLine, ctx.message?.message_id, extractReplyContext(ctx), {
+      textPrompt(grokLine, anchor?.replyTo ?? userMsgId, undefined, {
         skipSelfRecheck: true,
         rawSlashCommand: true,
+        promptId: anchor?.promptId,
       }),
     );
     if (outcome === "queued") {
@@ -308,8 +330,6 @@ export async function submitGrokSlash(ctx: Context, deps: BotDeps, line: string)
         `\u{1F4E5} Queued (position ${rt.queueLength}): \`${grokLine}\` \u2014 runs after the current turn.`,
         extra,
       );
-    } else {
-      await ctx.reply(`\u25B6\uFE0F Running \`${grokLine}\`\u2026`, extra);
     }
   } catch (err) {
     log.warn(`grok slash failed: ${(err as Error).message}`);
