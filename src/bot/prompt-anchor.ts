@@ -219,30 +219,25 @@ async function sendAnchorWithMedia(
   threadExtra: Record<string, unknown>,
   allParts?: string[],
 ): Promise<number> {
-  const caption = fitCaption(body);
   const parts = allParts && allParts.length > 0 ? allParts : [body];
-  const needsFollowUp = parts.length > 1 || body.length > CAPTION_BUDGET;
+  // Short caption only — full prompt text always goes in follow-up messages so
+  // we never double-post part 1 (truncated caption + full part 1).
+  const tagLine = (parts[0] ?? body).split("\n").filter((l) => l.includes("#prompt_")).pop() ?? "";
+  const shortCaption = fitCaption(
+    `\u{1F4DD} Prompt attached\n\n${tagLine}`.trim() || "\u{1F4DD} Prompt",
+  );
 
   // Photo album: one media group (caption on first only).
   if (media.length > 1 && media.every((m) => m.type === "photo")) {
     const group = media.map((m, i) =>
       i === 0
-        ? InputMediaBuilder.photo(m.fileId, { caption })
+        ? InputMediaBuilder.photo(m.fileId, { caption: shortCaption })
         : InputMediaBuilder.photo(m.fileId),
     );
     const msgs = await api.sendMediaGroup(chatId, group, threadExtra);
     const firstId = msgs[0]?.message_id;
     if (firstId === undefined) throw new Error("sendMediaGroup returned no messages");
-    if (needsFollowUp) {
-      for (const part of parts) {
-        await api
-          .sendMessage(chatId, part, {
-            ...threadExtra,
-            reply_parameters: { message_id: firstId, allow_sending_without_reply: true },
-          })
-          .catch(() => {});
-      }
-    }
+    await sendAnchorTextParts(api, chatId, firstId, parts, threadExtra);
     return firstId;
   }
 
@@ -251,7 +246,7 @@ async function sendAnchorWithMedia(
   const restPhotos = media.slice(1).filter((m): m is Extract<AdoptMediaItem, { type: "photo" }> => m.type === "photo");
 
   let replyTo: number;
-  const capOpts = { caption, ...threadExtra };
+  const capOpts = { caption: shortCaption, ...threadExtra };
 
   switch (primary.type) {
     case "photo": {
@@ -280,20 +275,17 @@ async function sendAnchorWithMedia(
       break;
     }
     case "video_note": {
-      // video_note has no caption — post note then text anchor as reply.
+      // video_note has no caption — post note then full text parts as replies.
       const msg = await api.sendVideoNote(chatId, primary.fileId, threadExtra);
       replyTo = msg.message_id;
-      await api
-        .sendMessage(chatId, body, {
-          ...threadExtra,
-          reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
-        })
-        .catch(() => {});
+      await sendAnchorTextParts(api, chatId, replyTo, parts, threadExtra);
       return replyTo;
     }
     default: {
       const msg = await api.sendMessage(chatId, body, threadExtra);
-      return msg.message_id;
+      replyTo = msg.message_id;
+      await sendAnchorTextParts(api, chatId, replyTo, parts.slice(1), threadExtra);
+      return replyTo;
     }
   }
 
@@ -304,18 +296,26 @@ async function sendAnchorWithMedia(
     });
   }
 
-  if (needsFollowUp) {
-    for (const part of parts) {
-      await api
-        .sendMessage(chatId, part, {
-          ...threadExtra,
-          reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
-        })
-        .catch(() => {});
-    }
-  }
-
+  await sendAnchorTextParts(api, chatId, replyTo, parts, threadExtra);
   return replyTo;
+}
+
+/** Send full prompt text parts as replies (no middle crop, no caption duplicate). */
+async function sendAnchorTextParts(
+  api: Api,
+  chatId: number,
+  replyTo: number,
+  parts: string[],
+  threadExtra: Record<string, unknown>,
+): Promise<void> {
+  for (let i = 0; i < parts.length; i++) {
+    await api
+      .sendMessage(chatId, parts[i]!, {
+        ...threadExtra,
+        reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
+      })
+      .catch((e) => log.debug(`anchor text part ${i + 1} failed: ${(e as Error).message}`));
+  }
 }
 
 /** Best-effort delete of user messages (private chats may refuse). */

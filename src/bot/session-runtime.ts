@@ -599,6 +599,7 @@ export class SessionRuntime {
     this.acp.off("session-update", this.listener);
     this.acp.off("restarted", this.restartListener);
     this.typing.stop();
+    this.stopActivityHeartbeat();
     this.stopWatch();
   }
 
