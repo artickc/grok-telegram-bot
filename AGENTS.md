@@ -24,7 +24,7 @@ manages account sign-ins, and can run 24/7 as a background service.
 ```
 src/
 ├── index.ts     Entry point, logging, shutdown
-├── cli.ts       run / install / start / stop / status / logs / instances (`--name`)
+├── cli.ts       run / install / start / stop / status / logs
 ├── config.ts    .env loading, paths, daemon options
 ├── logger.ts    Leveled file logger
 ├── grok/        Grok ACP bridge: client, transport, JSONL types, models, session log
@@ -42,11 +42,10 @@ src/
 ## General manager mode (forum)
 
 The Telegram **General** topic (`FORUM_GENERAL_THREAD_ID = 1`) is a **manager**:
-chat-like orchestration only. Short prose **is shown** to the user (no tools /
-progress / Done spam). Project work is dispatched with `send_prompt` into topic
-sessions; completions wake General via `MANAGER WORK REPORT`. Do not add coding
-progress UX, self-recheck, or multi-session noise to General without an explicit
-product decision. AI Chat remains a normal workspace coding topic.
+chat-like orchestration only. Project work is dispatched with `send_prompt` into
+topic sessions; completions wake General via `MANAGER WORK REPORT`. Do not add
+coding progress UX, self-recheck, or multi-session noise to General without an
+explicit product decision. AI Chat remains a normal workspace coding topic.
 
 ## Conventions (must follow)
 

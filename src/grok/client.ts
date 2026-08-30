@@ -328,6 +328,8 @@ export class GrokClient extends EventEmitter {
     log.info(`spawning: ${this.opts.grokCliPath} ${args.join(" ")}`);
     const env = { ...process.env };
     if (this.opts.apiKey) env.XAI_API_KEY = this.opts.apiKey;
+    // Ensure Grok Build goal mode is available for /goal over ACP.
+    if (env.GROK_GOAL === undefined || env.GROK_GOAL === "") env.GROK_GOAL = "1";
     if (this.opts.sandboxProfile) env.GROK_SANDBOX = this.opts.sandboxProfile;
     if (this.opts.grokMemory) env.GROK_MEMORY = this.opts.grokMemory;
     const proc = spawn(this.opts.grokCliPath, args, {
@@ -516,7 +518,12 @@ export class GrokClient extends EventEmitter {
           void this.cancel(sessionId);
         } else if (idle > this.promptIdleMs) {
           clearInterval(watch);
-          settleReject(new Error(`No agent activity for ${Math.round(idle / 1000)}s — giving up`));
+          settleReject(
+            new Error(
+              `No agent activity for ${Math.round(idle / 1000)}s — giving up ` +
+                `(long tools/goals need heartbeats; raise PROMPT_IDLE_TIMEOUT_MS if needed)`,
+            ),
+          );
           void this.cancel(sessionId);
         }
       }, 15_000);
@@ -534,6 +541,16 @@ export class GrokClient extends EventEmitter {
         settleReject(e as Error);
       }
     });
+  }
+
+  /**
+   * Refresh idle-watch activity. Call from the host while a turn is still
+   * working even if the agent has not emitted session/update (long tools).
+   */
+  touchActivity(sessionId?: string): void {
+    const now = Date.now();
+    this.lastActivityAny = now;
+    if (sessionId) this.lastActivity.set(sessionId, now);
   }
 
   /** Clear the running/lock state for a finished turn and flush its transcript. */

@@ -312,7 +312,8 @@ export function loadConfig(): AppConfig {
     agentProfile: process.env.GROK_AGENT_PROFILE?.trim() || undefined,
     pluginDir: process.env.GROK_PLUGIN_DIR?.trim() || undefined,
     projectRoots: [...new Set(roots)],
-    streamThrottleMs: num(process.env.STREAM_THROTTLE_MS, 1500),
+    // Faster default edits so heavy /goal turns feel closer to live SSE.
+    streamThrottleMs: num(process.env.STREAM_THROTTLE_MS, 500),
     messageBatchMs: nonNegNum(process.env.MESSAGE_BATCH_MS, 800),
     showToolCalls: bool(process.env.SHOW_TOOL_CALLS, true),
     showEditDiffs: bool(process.env.SHOW_EDIT_DIFFS, true),
@@ -326,7 +327,8 @@ export function loadConfig(): AppConfig {
     logsDir,
     logFile,
     grokAutoRestart: bool(process.env.GROK_AUTO_RESTART, true),
-    promptIdleMs: num(process.env.PROMPT_IDLE_TIMEOUT_MS, 900_000),
+    // 30 min default (was 15). Busy turns also heartbeat every 60s.
+    promptIdleMs: num(process.env.PROMPT_IDLE_TIMEOUT_MS, 1_800_000),
     quietNotifications: bool(process.env.QUIET_NOTIFICATIONS, true),
     promptRetryAttempts: nonNegNum(process.env.PROMPT_RETRY_ATTEMPTS, 5),
     autoForkOnError: bool(process.env.AUTO_FORK_ON_ERROR, true),

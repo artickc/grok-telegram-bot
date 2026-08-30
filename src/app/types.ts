@@ -99,7 +99,7 @@ export interface PromptInput {
   seedMessageId?: number;
   /**
    * Grok Build slash command (`/goal`, `/compact`, …). Must stay the first
-   * line of the prompt — skip manager/complexity wrappers.
+   * line of the prompt — skip manager/complexity/progress wrappers and quotes.
    */
   rawSlashCommand?: boolean;
 }
@@ -122,7 +122,7 @@ export function textPrompt(
     resourceLinks: [],
     replyTo,
     promptId: opts?.promptId,
-    quotedText,
+    quotedText: opts?.rawSlashCommand ? undefined : quotedText,
     skipSelfRecheck: opts?.skipSelfRecheck,
     reportBack: opts?.reportBack,
     seedMessageId: opts?.seedMessageId,

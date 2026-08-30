@@ -151,6 +151,12 @@ export class SessionRuntime {
 
   private busy = false;
   private cancelled = false;
+  /** Keeps ACP idle-watch alive during long tools/goals with sparse updates. */
+  private activityHeartbeat: NodeJS.Timeout | undefined;
+  /** Edits the live Telegram bubble with "still working" while tools are silent. */
+  private livenessPulse: NodeJS.Timeout | undefined;
+  /** Turn start for liveness elapsed labels. */
+  private turnPulseStartedAt = 0;
   private readonly queue: PromptInput[] = [];
   private streamer: ResponseStreamer | undefined;
   private readonly typing: TypingIndicator;
@@ -535,8 +541,8 @@ export class SessionRuntime {
       // A turn was started here and is still in flight, but its streamer was
       // finalized when we went background. Recreate it and let onUpdate feed
       // the remaining chunks/thoughts/tools just like a normal live turn.
-      // Recreate the streamer for the live turn (manager: prose-only).
-      if (this.busy && !this.streamer) {
+      // Manager mode never streams (quiet notify-only) — skip streamer rebuild.
+      if (this.busy && !this.streamer && !this.managerMode) {
         // Any transient follow-watch of this session is now superseded.
         if (this.watchIsFollow) this.stopWatch();
         this.streamer = new ResponseStreamer(
@@ -545,11 +551,10 @@ export class SessionRuntime {
           this.cfg.streamThrottleMs,
           this.turnReplyTo,
           this.hashtags(),
-          this.managerMode ? undefined : (pct) => this.setProgress(pct),
-          this.managerMode ? false : this.cfg.progressFallback,
+          (pct) => this.setProgress(pct),
+          this.cfg.progressFallback,
           this.turnStartedAt,
           this.messageThreadId,
-          this.managerMode ? { proseOnly: true, showProgressBar: false } : undefined,
         );
         // Restore the live plan board so steps stay visible above the progress bar.
         if (this.planEntries?.length) {
@@ -598,6 +603,8 @@ export class SessionRuntime {
     this.acp.off("session-update", this.listener);
     this.acp.off("restarted", this.restartListener);
     this.typing.stop();
+    this.stopActivityHeartbeat();
+    this.stopLivenessPulse();
     this.stopWatch();
   }
 
@@ -817,6 +824,8 @@ export class SessionRuntime {
    * Manager mode uses MANAGER_DIRECTIVE instead of complexity/progress coding UX.
    */
   private applyFirstPromptSteering(input: PromptInput): PromptInput {
+    // Grok slash commands (/goal …) must stay the first agent text.
+    if (input.rawSlashCommand) return input;
     if (!this.shouldSteerFirstPrompt(input)) return input;
     let toRun: PromptInput;
     if (this.managerMode) {
@@ -846,7 +855,6 @@ export class SessionRuntime {
     // Never wrap meta follow-ups even if somehow first.
     if (
       input.skipSelfRecheck ||
-      input.rawSlashCommand ||
       isSelfRecheckPrompt(input.text) ||
       isTelegramBridgeResultsPrompt(input.text) ||
       isManagerWorkReportPrompt(input.text)
@@ -870,8 +878,8 @@ export class SessionRuntime {
   /** Memory + topic catalog inject for every real manager user turn. */
   private applyManagerContext(input: PromptInput): PromptInput {
     if (!this.managerMode) return input;
+    if (input.rawSlashCommand) return input;
     if (
-      input.rawSlashCommand ||
       isTelegramBridgeResultsPrompt(input.text) ||
       isManagerWorkReportPrompt(input.text) ||
       isSelfRecheckPrompt(input.text)
@@ -1021,12 +1029,8 @@ export class SessionRuntime {
   private async runTurn(input: PromptInput): Promise<void> {
     // Apply before any turn bookkeeping so card previews / logs see the wrapped
     // text the same way the agent does (also covers flushQueue first messages).
-    try {
-      input = this.applyFirstPromptSteering(input);
-      input = this.applyManagerContext(input);
-    } catch (e) {
-      log.warn(`prompt steering/context failed: ${(e as Error).message}`);
-    }
+    input = this.applyFirstPromptSteering(input);
+    input = this.applyManagerContext(input);
 
     this.busy = true;
     this.cancelled = false;
@@ -1037,17 +1041,16 @@ export class SessionRuntime {
     this.cardThinking = "";
     this.turnExpectDone = false;
     this.turnDonePinged = false;
-    this.isSelfRecheckTurn = isSelfRecheckPrompt(input.text);
-    // Meta turns (recheck, bridge results, work reports) never arm another recheck.
-    const isBridgeResults = isTelegramBridgeResultsPrompt(input.text);
-    const isWorkReport = isManagerWorkReportPrompt(input.text);
-    // Keep the Thinking… bubble across search_memory → results follow-ups so
-    // the user is not left with a deleted placeholder and no reply.
-    if (this.managerStatusMsgId !== undefined && !isBridgeResults) {
+    // Drop any orphaned Thinking… from a prior turn (e.g. bridge-chain defer).
+    if (this.managerStatusMsgId !== undefined) {
       const orphan = this.managerStatusMsgId;
       this.managerStatusMsgId = undefined;
       void this.deleteManagerStatus(orphan);
     }
+    this.isSelfRecheckTurn = isSelfRecheckPrompt(input.text);
+    // Meta turns (recheck, bridge results, work reports) never arm another recheck.
+    const isBridgeResults = isTelegramBridgeResultsPrompt(input.text);
+    const isWorkReport = isManagerWorkReportPrompt(input.text);
     this.skipSelfRecheck =
       !!input.skipSelfRecheck ||
       this.isSelfRecheckTurn ||
@@ -1103,32 +1106,37 @@ export class SessionRuntime {
     // A new streamed turn supersedes any transient "follow" watch of this same
     // session's previous in-flight turn (avoids duplicated output).
     if (this.watchIsFollow) this.stopWatch();
-    // Manager (General): stream short chat prose (no tools/progress). Work
-    // reports stay quiet. Bridge-result follow-ups ARE user-facing — that is
-    // usually when the manager answers after search_memory.
-    const managerSilent =
-      this.managerMode && (isWorkReport || this.isSelfRecheckTurn);
-    const live = this.foreground && !managerSilent;
+    // Manager (General): quiet-by-default — no prose stream. User-facing text
+    // only via notify actions (or one fallback reply for direct user asks).
+    // Project topics stream when foreground. Raw slash (/goal) always streams.
+    const rawSlash = !!input.rawSlashCommand;
+    const live = (this.foreground && !this.managerMode) || rawSlash;
     const startedAt = Date.now();
     this.turnStartedAt = startedAt;
     this.managerNotifyCount = 0;
     this.managerUserVisible = false;
-    // General: Starting… (from message handler) → Thinking… then stream into it.
-    // Work-report wakes stay fully silent (no bubble).
-    const managerMeta = managerSilent;
-    let thinkingMsgId: number | undefined = input.seedMessageId ?? this.managerStatusMsgId;
-    if (this.managerMode && !managerSilent && this.turnReplyTo !== undefined) {
+    this.managerStatusMsgId = undefined;
+    // General: Starting… (from message handler) → Thinking… status only.
+    // Meta wakes (work report / bridge results) stay fully silent (no bubble).
+    const managerMeta =
+      this.managerMode &&
+      !rawSlash &&
+      (isManagerWorkReportPrompt(input.text) ||
+        isTelegramBridgeResultsPrompt(input.text) ||
+        isSelfRecheckPrompt(input.text) ||
+        !!input.skipSelfRecheck);
+    let thinkingMsgId: number | undefined = input.seedMessageId;
+    if (this.managerMode && !managerMeta && this.turnReplyTo !== undefined) {
       if (thinkingMsgId !== undefined) {
         await this.editManagerStatus(thinkingMsgId, "Thinking\u2026");
       } else {
         thinkingMsgId = await this.postManagerStatus(this.turnReplyTo, "Thinking\u2026");
       }
       this.managerStatusMsgId = thinkingMsgId;
-    } else if (this.managerMode && managerSilent && thinkingMsgId !== undefined && !isBridgeResults) {
-      // Drop Starting… leftover on silent work-report / recheck turns.
+    } else if (this.managerMode && managerMeta && thinkingMsgId !== undefined) {
+      // Drop Starting… leftover on meta turns.
       await this.deleteManagerStatus(thinkingMsgId);
       thinkingMsgId = undefined;
-      this.managerStatusMsgId = undefined;
     }
     this.streamer = live
       ? new ResponseStreamer(
@@ -1137,16 +1145,12 @@ export class SessionRuntime {
           this.cfg.streamThrottleMs,
           this.turnReplyTo,
           this.hashtags(),
-          this.managerMode ? undefined : (pct) => this.setProgress(pct),
-          this.managerMode ? false : this.cfg.progressFallback,
+          this.managerMode && !rawSlash ? undefined : (pct) => this.setProgress(pct),
+          this.managerMode && !rawSlash ? false : this.cfg.progressFallback,
           startedAt,
           this.messageThreadId,
-          this.managerMode
-            ? {
-                proseOnly: true,
-                showProgressBar: false,
-                seedMessageId: thinkingMsgId,
-              }
+          this.managerMode && rawSlash
+            ? { proseOnly: true, showProgressBar: false }
             : undefined,
         )
       : undefined;
@@ -1162,6 +1166,9 @@ export class SessionRuntime {
     // Typing indicator for user-facing manager turns and live project streams.
     if (live || (this.managerMode && !managerMeta)) this.typing.start();
     this.activity(true);
+    this.turnPulseStartedAt = startedAt;
+    this.startActivityHeartbeat();
+    this.startLivenessPulse();
     this.changed();
     this.imageScanText = "";
     this.sentImagesThisTurn = new Set();
@@ -1243,7 +1250,8 @@ export class SessionRuntime {
         const pingDone =
           canPing && (this.foreground || !hasQueued) && !queuedBridgeResults;
         // Manager uses notify/finishManagerUserFacing — never arm Done safety-net spam.
-        this.turnExpectDone = pingDone && !this.managerMode;
+        // Raw slash (/goal) uses normal project Done path when streamed.
+        this.turnExpectDone = pingDone && !(this.managerMode && !rawSlash);
 
         // One-shot self-recheck: only after a real *user* turn (not meta/auto),
         // with idle queue. skipSelfRecheck blocks loops after recheck / auto-batch.
@@ -1308,16 +1316,20 @@ export class SessionRuntime {
           }
         }
 
-        // Manager: keep Thinking… while bridge results are chaining so the
-        // follow-up turn can stream the real answer into the same bubble.
-        if (this.managerMode && queuedBridgeResults && this.managerStatusMsgId !== undefined) {
-          void this.editManagerStatus(this.managerStatusMsgId, "Thinking\u2026");
+        // Manager: if bridge results are still chaining, drop Thinking… so it
+        // does not stick forever (meta follow-up is silent by default).
+        if (this.managerMode && queuedBridgeResults) {
+          if (this.managerStatusMsgId !== undefined && this.managerNotifyCount === 0) {
+            const sid = this.managerStatusMsgId;
+            this.managerStatusMsgId = undefined;
+            void this.deleteManagerStatus(sid);
+          }
         }
 
         if (!queuedRecheck && !queuedBridgeResults) {
           // Manager (General): quiet-by-default completion — no Done spam.
           // User-facing only via notify (already sent) or one fallback reply.
-          if (this.managerMode) {
+          if (this.managerMode && !rawSlash) {
             await this.finishManagerUserFacing(managerMeta, final.result?.stopReason, startedAt);
             this.turnDonePinged = true;
             // Suggestions only when something was actually shown to the user.
@@ -1557,6 +1569,8 @@ export class SessionRuntime {
       }
       this.turnExpectDone = false;
       this.typing.stop();
+      this.stopActivityHeartbeat();
+      this.stopLivenessPulse();
       this.streamer = undefined;
       this.capturingQuiet = false;
       this.quietCaptureBuf = "";
@@ -1583,6 +1597,47 @@ export class SessionRuntime {
       this.onActivity?.(busy);
     } catch {
       /* non-fatal */
+    }
+  }
+
+  /** Touch ACP activity every 60s so long tools do not trip the idle watchdog. */
+  private startActivityHeartbeat(): void {
+    this.stopActivityHeartbeat();
+    this.activityHeartbeat = setInterval(() => {
+      if (!this.busy || this.cancelled) return;
+      this.acp.touchActivity(this.sessionId);
+    }, 60_000);
+    // Unref so this timer alone cannot keep the process alive on shutdown.
+    this.activityHeartbeat.unref?.();
+  }
+
+  private stopActivityHeartbeat(): void {
+    if (this.activityHeartbeat) {
+      clearInterval(this.activityHeartbeat);
+      this.activityHeartbeat = undefined;
+    }
+  }
+
+  /**
+   * Every 15s, if the live bubble has been silent, edit it with elapsed
+   * "Still working" so long SSH/shell gaps do not look frozen forever.
+   */
+  private startLivenessPulse(): void {
+    this.stopLivenessPulse();
+    this.livenessPulse = setInterval(() => {
+      if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
+      this.streamer.pulseLiveness(
+        fmtDuration(Date.now() - this.turnPulseStartedAt),
+        this.liveStep,
+      );
+    }, 15_000);
+    this.livenessPulse.unref?.();
+  }
+
+  private stopLivenessPulse(): void {
+    if (this.livenessPulse) {
+      clearInterval(this.livenessPulse);
+      this.livenessPulse = undefined;
     }
   }
 
@@ -1633,18 +1688,13 @@ export class SessionRuntime {
       managerUserAskPreview: this.suggestionUserText || cleanUserPreview(this.turnUserText, 400),
     });
 
-    // Count successful notify actions. Do not delete the live stream bubble
-    // (same id as Thinking…) — that would wipe the user's visible reply.
+    // Count successful notify actions (General user-facing channel).
+    // Drop the Thinking… placeholder once a real notify is out.
     for (const r of results) {
       if (r.action === "notify" && r.ok) {
         this.managerNotifyCount++;
         this.managerUserVisible = true;
-        const streamLive = this.streamer?.liveMessageId;
-        if (
-          this.managerStatusMsgId !== undefined &&
-          this.managerStatusMsgId !== streamLive &&
-          !this.streamer?.hasOutput
-        ) {
+        if (this.managerStatusMsgId !== undefined) {
           const sid = this.managerStatusMsgId;
           this.managerStatusMsgId = undefined;
           void this.deleteManagerStatus(sid);
@@ -1859,16 +1909,6 @@ export class SessionRuntime {
       return;
     }
 
-    // Prose already landed in the Thinking… bubble via the streamer — keep it.
-    if (this.streamer?.hasOutput) {
-      this.managerUserVisible = true;
-      this.lastCompletion =
-        cleanManagerVisibleText(this.turnAssistantText).slice(0, 500) ||
-        `\u2705 Done \u00B7 ${elapsed}`;
-      this.managerStatusMsgId = undefined;
-      return;
-    }
-
     if (this.managerNotifyCount > 0) {
       this.lastCompletion =
         cleanManagerVisibleText(this.turnAssistantText).slice(0, 500) ||
@@ -1880,7 +1920,7 @@ export class SessionRuntime {
       return;
     }
 
-    // Work-report / recheck: silent unless cancelled (handled above).
+    // Meta / bridge / work-report turns: silent unless cancelled (handled above).
     if (metaTurn) {
       this.lastCompletion = `\u2705 Done \u00B7 ${elapsed}`;
       if (this.managerStatusMsgId !== undefined) {
@@ -1890,7 +1930,7 @@ export class SessionRuntime {
       return;
     }
 
-    // Direct user ask: single fallback if the model emitted no visible prose.
+    // Direct user ask: optional single fallback if model forgot notify.
     const cleaned = cleanManagerVisibleText(this.turnAssistantText);
     const fallback = pickManagerFallbackText(cleaned);
     if (fallback && this.managerStatusMsgId !== undefined) {
@@ -1911,17 +1951,6 @@ export class SessionRuntime {
         this.lastCompletion = fallback.slice(0, 500);
         if (this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
       }
-    } else if (this.managerStatusMsgId !== undefined) {
-      // Never delete the placeholder leaving the user with no reply.
-      await this.editManagerStatus(
-        this.managerStatusMsgId,
-        "Working on it \u2014 I\u2019ll report back here.",
-      );
-      this.managerUserVisible = true;
-      this.lastCompletion = "Working on it";
-      if (this.sessionId) this.onTelegramMessageBound?.(this.managerStatusMsgId, this.sessionId);
-      this.managerStatusMsgId = undefined;
-      return;
     } else {
       this.lastCompletion = `\u2705 Done \u00B7 ${elapsed}`;
     }
@@ -2716,6 +2745,7 @@ export class SessionRuntime {
     const head = this.queue[0]!;
     const isMeta =
       !!head.skipSelfRecheck ||
+      !!head.rawSlashCommand ||
       isSelfRecheckPrompt(head.text) ||
       isTelegramBridgeResultsPrompt(head.text);
     const batch = isMeta

@@ -196,8 +196,7 @@ describe("extractTelegramActions", () => {
       allowedBots: [],
     });
     assert.ok(dir.includes("notify"));
-    assert.ok(/free-form prose/i.test(dir));
-    assert.ok(!/Quiet by default/i.test(dir));
+    assert.ok(dir.includes("Quiet by default") || dir.includes("quiet"));
   });
 
   it("parses send_prompt session_id (and sess_ prefix forms)", () => {

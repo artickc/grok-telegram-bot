@@ -20,7 +20,7 @@ import { outboundThreadExtra } from "../forum/thread.js";
 const log = createLogger("prompt-anchor");
 
 /** Telegram hard cap for text messages; leave room for prefix + tags. */
-const BODY_BUDGET = 3800;
+const BODY_BUDGET = 3500;
 /** Telegram caption hard cap on photo/document/audio/video. */
 const CAPTION_BUDGET = 1024;
 
@@ -68,19 +68,59 @@ export function formatPromptTag(promptId: string): string {
   return `#prompt_${tagSafe(promptId)}`;
 }
 
+/** Build tag footer for prompt anchors (hashtags stay tappable). */
+export function formatPromptAnchorTags(
+  promptId: string,
+  opts?: { projectName?: string },
+): string {
+  const tags = [formatPromptTag(promptId)];
+  if (opts?.projectName?.trim()) {
+    tags.push(`#proj_${tagSafe(opts.projectName)}`);
+  }
+  return tags.join(" ");
+}
+
+/**
+ * Split a long user prompt into Telegram-safe parts (no middle crop).
+ * Part 1 carries the prefix; every part ends with the same #prompt_ tags.
+ */
+export function splitPromptAnchorParts(
+  text: string,
+  promptId: string,
+  opts?: { prefix?: string; projectName?: string },
+): string[] {
+  const prefix = (opts?.prefix ?? "\u{1F4DD}").trim();
+  const tags = formatPromptAnchorTags(promptId, opts);
+  const raw = text.trim() || "(empty)";
+  const footer = `\n\n${tags}`;
+  // Conservative body so headers + tags never push over Telegram's 4096.
+  const partBudget = Math.max(800, BODY_BUDGET - footer.length - 80);
+  if (prefix.length + 1 + raw.length + footer.length <= BODY_BUDGET + 200) {
+    return [`${prefix}\n${raw}${footer}`];
+  }
+  const chunks: string[] = [];
+  for (let i = 0; i < raw.length; i += partBudget) {
+    chunks.push(raw.slice(i, i + partBudget));
+  }
+  const total = chunks.length;
+  return chunks.map((chunk, i) => {
+    const head =
+      i === 0
+        ? `${prefix} (part 1/${total})\n`
+        : `\u{1F4DD} (part ${i + 1}/${total})\n`;
+    return `${head}${chunk}${footer}`;
+  });
+}
+
 /** Build the plain-text body of a prompt-anchor message (hashtags stay tappable). */
 export function formatPromptAnchorBody(
   text: string,
   promptId: string,
   opts?: { prefix?: string; projectName?: string },
 ): string {
-  const prefix = (opts?.prefix ?? "\u{1F4DD}").trim();
-  const body = truncateBody(text.trim() || "(empty)", BODY_BUDGET);
-  const tags = [formatPromptTag(promptId)];
-  if (opts?.projectName?.trim()) {
-    tags.push(`#proj_${tagSafe(opts.projectName)}`);
-  }
-  return `${prefix}\n${body}\n\n${tags.join(" ")}`;
+  // Prefer full text via multi-part; this helper returns part 1 only for callers
+  // that still expect a single string (caption fitting uses split separately).
+  return splitPromptAnchorParts(text, promptId, opts)[0]!;
 }
 
 /**
@@ -118,10 +158,11 @@ export async function adoptUserPrompt(
   opts: AdoptPromptOpts,
 ): Promise<PromptAnchor | undefined> {
   const promptId = newPromptId();
-  const body = formatPromptAnchorBody(opts.text, promptId, {
+  const parts = splitPromptAnchorParts(opts.text, promptId, {
     prefix: opts.prefix,
     projectName: opts.projectName,
   });
+  const body = parts[0]!;
   const threadExtra: Record<string, unknown> = {
     disable_notification: true,
     ...outboundThreadExtra(opts.messageThreadId),
@@ -131,10 +172,19 @@ export async function adoptUserPrompt(
   try {
     const media = (opts.media ?? []).filter((m) => !!m.fileId);
     if (media.length > 0) {
-      replyTo = await sendAnchorWithMedia(api, opts.chatId, media, body, threadExtra);
+      // Media caption may be short; send full multi-part text as follow-ups.
+      replyTo = await sendAnchorWithMedia(api, opts.chatId, media, body, threadExtra, parts);
     } else {
       const msg = await api.sendMessage(opts.chatId, body, threadExtra);
       replyTo = msg.message_id;
+      for (let i = 1; i < parts.length; i++) {
+        await api
+          .sendMessage(opts.chatId, parts[i]!, {
+            ...threadExtra,
+            reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
+          })
+          .catch((e) => log.debug(`anchor part ${i + 1} failed: ${(e as Error).message}`));
+      }
     }
   } catch (err) {
     log.warn(`anchor send failed chat=${opts.chatId}: ${(err as Error).message}`);
@@ -142,6 +192,14 @@ export async function adoptUserPrompt(
     try {
       const msg = await api.sendMessage(opts.chatId, body, threadExtra);
       replyTo = msg.message_id;
+      for (let i = 1; i < parts.length; i++) {
+        await api
+          .sendMessage(opts.chatId, parts[i]!, {
+            ...threadExtra,
+            reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
+          })
+          .catch(() => {});
+      }
     } catch (err2) {
       log.warn(`anchor text fallback failed chat=${opts.chatId}: ${(err2 as Error).message}`);
       return undefined;
@@ -159,28 +217,27 @@ async function sendAnchorWithMedia(
   media: AdoptMediaItem[],
   body: string,
   threadExtra: Record<string, unknown>,
+  allParts?: string[],
 ): Promise<number> {
-  const caption = fitCaption(body);
-  const needsFollowUp = body.length > CAPTION_BUDGET;
+  const parts = allParts && allParts.length > 0 ? allParts : [body];
+  // Short caption only — full prompt text always goes in follow-up messages so
+  // we never double-post part 1 (truncated caption + full part 1).
+  const tagLine = (parts[0] ?? body).split("\n").filter((l) => l.includes("#prompt_")).pop() ?? "";
+  const shortCaption = fitCaption(
+    `\u{1F4DD} Prompt attached\n\n${tagLine}`.trim() || "\u{1F4DD} Prompt",
+  );
 
   // Photo album: one media group (caption on first only).
   if (media.length > 1 && media.every((m) => m.type === "photo")) {
     const group = media.map((m, i) =>
       i === 0
-        ? InputMediaBuilder.photo(m.fileId, { caption })
+        ? InputMediaBuilder.photo(m.fileId, { caption: shortCaption })
         : InputMediaBuilder.photo(m.fileId),
     );
     const msgs = await api.sendMediaGroup(chatId, group, threadExtra);
     const firstId = msgs[0]?.message_id;
     if (firstId === undefined) throw new Error("sendMediaGroup returned no messages");
-    if (needsFollowUp) {
-      await api
-        .sendMessage(chatId, body, {
-          ...threadExtra,
-          reply_parameters: { message_id: firstId, allow_sending_without_reply: true },
-        })
-        .catch(() => {});
-    }
+    await sendAnchorTextParts(api, chatId, firstId, parts, threadExtra);
     return firstId;
   }
 
@@ -189,7 +246,7 @@ async function sendAnchorWithMedia(
   const restPhotos = media.slice(1).filter((m): m is Extract<AdoptMediaItem, { type: "photo" }> => m.type === "photo");
 
   let replyTo: number;
-  const capOpts = { caption, ...threadExtra };
+  const capOpts = { caption: shortCaption, ...threadExtra };
 
   switch (primary.type) {
     case "photo": {
@@ -218,20 +275,17 @@ async function sendAnchorWithMedia(
       break;
     }
     case "video_note": {
-      // video_note has no caption — post note then text anchor as reply.
+      // video_note has no caption — post note then full text parts as replies.
       const msg = await api.sendVideoNote(chatId, primary.fileId, threadExtra);
       replyTo = msg.message_id;
-      await api
-        .sendMessage(chatId, body, {
-          ...threadExtra,
-          reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
-        })
-        .catch(() => {});
+      await sendAnchorTextParts(api, chatId, replyTo, parts, threadExtra);
       return replyTo;
     }
     default: {
       const msg = await api.sendMessage(chatId, body, threadExtra);
-      return msg.message_id;
+      replyTo = msg.message_id;
+      await sendAnchorTextParts(api, chatId, replyTo, parts.slice(1), threadExtra);
+      return replyTo;
     }
   }
 
@@ -242,16 +296,26 @@ async function sendAnchorWithMedia(
     });
   }
 
-  if (needsFollowUp) {
+  await sendAnchorTextParts(api, chatId, replyTo, parts, threadExtra);
+  return replyTo;
+}
+
+/** Send full prompt text parts as replies (no middle crop, no caption duplicate). */
+async function sendAnchorTextParts(
+  api: Api,
+  chatId: number,
+  replyTo: number,
+  parts: string[],
+  threadExtra: Record<string, unknown>,
+): Promise<void> {
+  for (let i = 0; i < parts.length; i++) {
     await api
-      .sendMessage(chatId, body, {
+      .sendMessage(chatId, parts[i]!, {
         ...threadExtra,
         reply_parameters: { message_id: replyTo, allow_sending_without_reply: true },
       })
-      .catch(() => {});
+      .catch((e) => log.debug(`anchor text part ${i + 1} failed: ${(e as Error).message}`));
   }
-
-  return replyTo;
 }
 
 /** Best-effort delete of user messages (private chats may refuse). */
@@ -291,7 +355,8 @@ export async function ackCommand(
   }
 }
 
-function truncateBody(text: string, max: number): string {
+/** @deprecated Prefer {@link splitPromptAnchorParts} — kept for tests. */
+export function truncateBody(text: string, max: number): string {
   if (text.length <= max) return text;
   const head = Math.floor(max * 0.7);
   const tail = max - head - 5;

@@ -298,12 +298,11 @@ describe("manager mode helpers", () => {
     );
   });
 
-  it("manager directive shows short prose to the user (not notify-only)", async () => {
+  it("manager directive requires quiet notify for user-facing chat", async () => {
     const { MANAGER_DIRECTIVE } = await import("../src/render/manager-directive.js");
     assert.ok(MANAGER_DIRECTIVE.includes("notify"));
-    assert.ok(/user SEES your free-form prose/i.test(MANAGER_DIRECTIVE));
-    assert.ok(/job tables|sending to/i.test(MANAGER_DIRECTIVE));
-    assert.ok(!/quiet by default/i.test(MANAGER_DIRECTIVE));
+    assert.ok(/quiet by default/i.test(MANAGER_DIRECTIVE));
+    assert.ok(/never spam|job tables|sending to/i.test(MANAGER_DIRECTIVE));
   });
 
   it("pickManagerFallbackText drops tables and dispatch spam", async () => {

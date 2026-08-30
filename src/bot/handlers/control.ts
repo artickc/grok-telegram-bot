@@ -1,5 +1,6 @@
 /**
  * Control commands: /start /help /status /new /cancel /stop /btw /flush /menu.
+ * Grok `/goal` and other Build slash commands: see handlers/grok-slash.ts.
  *
  * Slash messages are deleted instantly by bot.ts middleware; handlers post
  * bot status messages so the user always sees the bot is alive (CLI can be slow).

@@ -134,6 +134,21 @@ export function registerTasks(bot: Bot, deps: BotDeps): void {
     });
   });
 
+  /** Dump the full task prompt as copyable chat messages (no crop). */
+  bot.callbackQuery(new RegExp(`^task:prompt:${UUID}$`), async (ctx) => {
+    const task = deps.tasks.get(ctx.match![1]!);
+    if (!task) return void ctx.answerCallbackQuery({ text: "Not found" });
+    await ctx.answerCallbackQuery({ text: "Sending full prompt\u2026" });
+    const chunks = splitTelegramText(task.prompt || "(empty)", 3500);
+    for (let i = 0; i < chunks.length; i++) {
+      const head =
+        chunks.length === 1
+          ? `\u{1F4CB} Full prompt \u2014 ${task.name}\n\n`
+          : `\u{1F4CB} Full prompt \u2014 ${task.name} (part ${i + 1}/${chunks.length})\n\n`;
+      await ctx.reply(head + chunks[i]!).catch(() => {});
+    }
+  });
+
   bot.callbackQuery(new RegExp(`^task:edit:(name|prompt|project|schedule):${UUID}$`), async (ctx) => {
     await ctx.answerCallbackQuery();
     const field = ctx.match![1] as "name" | "prompt" | "project" | "schedule";
@@ -191,16 +206,23 @@ function listView(deps: BotDeps, chatId: number): { text: string; kb: InlineKeyb
 function detailView(t: Task): { text: string; kb: InlineKeyboard } {
   const next = t.nextRun ? new Date(t.nextRun).toLocaleString() : "\u2014";
   const last = t.lastRun ? `${new Date(t.lastRun).toLocaleString()} (${t.lastStatus ?? "?"})` : "never";
-  const prompt = t.prompt.length > 300 ? t.prompt.slice(0, 300) + "\u2026" : t.prompt;
-  const text = [
+  // Keep full prompt for copy/edit — Telegram hard cap ~4096; split if needed
+  // by the caller (view handler may send overflow as a follow-up).
+  const header = [
     `\u{1F5D3} ${t.name}  ${t.enabled ? "\u{1F7E2} enabled" : "\u26AA disabled"}`,
     `\u{1F4C1} Project: ${t.projectName || basename(t.projectPath)}`,
     `\u{1F501} Schedule: ${describeSchedule(t.schedule)}`,
     `\u23ED Next run: ${next}`,
     `\u23EE Last run: ${last}`,
     "",
-    `\u{1F4AC} ${prompt}`,
+    `\u{1F4AC} Prompt:`,
   ].join("\n");
+  const maxPrompt = Math.max(500, 3900 - header.length);
+  const prompt =
+    t.prompt.length > maxPrompt
+      ? `${t.prompt.slice(0, maxPrompt)}\n\u2026\n(full prompt: tap Edit \u2192 Prompt)`
+      : t.prompt;
+  const text = `${header}\n${prompt}`;
   const kb = new InlineKeyboard()
     .text("\u25B6 Run now", `task:run:${t.id}`)
     .text(t.enabled ? "\u23F8 Disable" : "\u25B6 Enable", `task:toggle:${t.id}`)
@@ -208,6 +230,7 @@ function detailView(t: Task): { text: string; kb: InlineKeyboard } {
     .text("\u270F\uFE0F Edit", `task:editmenu:${t.id}`)
     .text("\u{1F5D1} Delete", `task:del:${t.id}`)
     .row()
+    .text("\u{1F4CB} Full prompt", `task:prompt:${t.id}`)
     .text("\u2B05 Back", "task:list");
   return { text, kb };
 }
@@ -221,4 +244,13 @@ function editMenu(id: string): InlineKeyboard {
     .text("Schedule", `task:edit:schedule:${id}`)
     .row()
     .text("\u2B05 Back", `task:view:${id}`);
+}
+
+/** Split long text into Telegram-safe chunks without middle-cropping. */
+export function splitTelegramText(text: string, max = 3500): string[] {
+  const raw = text || "";
+  if (raw.length <= max) return [raw];
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i += max) out.push(raw.slice(i, i + max));
+  return out;
 }

@@ -23,6 +23,8 @@ import { outboundThreadExtra } from "../forum/thread.js";
 const SOFT_LIMIT = 3500;
 /** Display budget for a thinking block (middle-truncated; session context keeps all). */
 const THINK_DISPLAY_MAX = 2800;
+/** Do not pulse "still working" until the live bubble has been silent this long. */
+export const LIVENESS_MIN_SILENCE_MS = 12_000;
 
 type SegKind = "out" | "think" | "tool";
 interface Seg {
@@ -30,6 +32,33 @@ interface Seg {
   text: string;
   /** When set, later tool updates replace this segment instead of appending. */
   toolId?: string;
+}
+
+/** One-line (or short) honesty hint while ACP is silent on a long tool. */
+export function formatLivenessHint(elapsedLabel: string, step?: string): string {
+  const e = elapsedLabel.trim() || "?";
+  const s = (step || "").trim();
+  if (!s) return `\u23F3 Still working \u00B7 ${e}`;
+  const short = s.length > 90 ? `${s.slice(0, 89)}\u2026` : s;
+  return `\u23F3 Still working \u00B7 ${e}\n${short}`;
+}
+
+/** Whether a liveness pulse should edit the bubble (pure helper for tests). */
+export function shouldPulseLiveness(opts: {
+  closed: boolean;
+  lastContentAt: number;
+  now: number;
+  nextHint: string;
+  currentHint?: string;
+  minSilenceMs?: number;
+  /** Need an existing bubble or real content before pulsing. */
+  hasLiveSurface: boolean;
+}): boolean {
+  if (opts.closed || !opts.hasLiveSurface) return false;
+  const silence = opts.now - opts.lastContentAt;
+  if (silence < (opts.minSilenceMs ?? LIVENESS_MIN_SILENCE_MS)) return false;
+  if (opts.currentHint === opts.nextHint) return false;
+  return true;
 }
 
 export interface StreamerOptions {
@@ -69,6 +98,10 @@ export class ResponseStreamer {
   private planMarkdown: string | undefined;
   private readonly proseOnly: boolean;
   private readonly showProgressBar: boolean;
+  /** Wall clock of last real agent content (not liveness pulses). */
+  private lastContentAt = Date.now();
+  /** Sticky "still working" line while long tools emit no ACP updates. */
+  private livenessLine: string | undefined;
 
   constructor(
     private readonly api: Api,
@@ -176,6 +209,7 @@ export class ResponseStreamer {
     if (!text) return;
     this.outChars += text.length;
     this.merge("out", text);
+    this.noteRealContent();
     this.schedule();
   }
 
@@ -183,6 +217,7 @@ export class ResponseStreamer {
     if (!text || this.proseOnly) return;
     this.thoughtChars += text.length;
     this.merge("think", text);
+    this.noteRealContent();
     this.schedule();
   }
 
@@ -194,7 +229,8 @@ export class ResponseStreamer {
     if (!rawMarkdown || this.proseOnly) return;
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown });
-    this.schedule();
+    this.noteRealContent();
+    this.schedule(true);
   }
 
   /**
@@ -208,6 +244,7 @@ export class ResponseStreamer {
     const next = markdown?.trim() ? markdown.trim() : undefined;
     if (next === this.planMarkdown) return;
     this.planMarkdown = next;
+    this.noteRealContent();
     this.schedule();
   }
 
@@ -227,14 +264,39 @@ export class ResponseStreamer {
           if (i < this.sealedIdx) {
             this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id });
           }
-          this.schedule();
+          this.noteRealContent();
+          this.schedule(true);
           return;
         }
       }
     }
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown, toolId: id || undefined });
-    this.schedule();
+    this.noteRealContent();
+    this.schedule(true);
+  }
+
+  /**
+   * Edit the live bubble with an honest "still working" elapsed line when ACP
+   * has been silent (long SSH/shell with no mid-flight stdout). No-op when
+   * real content arrived recently or the hint is unchanged.
+   */
+  pulseLiveness(elapsedLabel: string, step?: string): void {
+    const next = formatLivenessHint(elapsedLabel, step);
+    if (
+      !shouldPulseLiveness({
+        closed: this.closed,
+        lastContentAt: this.lastContentAt,
+        now: Date.now(),
+        nextHint: next,
+        currentHint: this.livenessLine,
+        hasLiveSurface: this.liveId !== undefined || this.hasOutput,
+      })
+    ) {
+      return;
+    }
+    this.livenessLine = next;
+    this.schedule(true);
   }
 
   /** True when agent prose/tools/thoughts were appended (not just a seed bubble). */
@@ -244,11 +306,23 @@ export class ResponseStreamer {
 
   async finalize(): Promise<void> {
     this.closed = true;
+    this.livenessLine = undefined;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.flush(true);
-    // Seeded Thinking… with zero agent text: leave the placeholder for the
-    // owner to replace (fallback reply) or keep while bridge results chain.
+    // Seeded Thinking… with zero agent text: clear the placeholder.
+    // Manager quiet mode also deletes/replaces this bubble explicitly.
+    if (
+      this.proseOnly &&
+      this.liveId !== undefined &&
+      !this.segs.some((s) => s.text.trim().length > 0)
+    ) {
+      try {
+        await this.api.editMessageText(this.chatId, this.liveId, "\u2026");
+      } catch {
+        /* non-fatal */
+      }
+    }
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -259,14 +333,30 @@ export class ResponseStreamer {
     else this.segs.push({ kind, text });
   }
 
-  private schedule(): void {
+  /** Real agent/tool content — clear any stale "still working" hint. */
+  private noteRealContent(): void {
+    this.lastContentAt = Date.now();
+    this.livenessLine = undefined;
+  }
+
+  /**
+   * @param urgent tool updates — flush sooner (~200ms) so heavy /goal turns
+   * feel live instead of waiting a full throttle window.
+   */
+  private schedule(urgent = false): void {
     if (this.closed) return;
     this.dirty = true;
-    if (this.timer) return;
+    const delay = urgent ? Math.min(200, this.throttleMs) : this.throttleMs;
+    if (this.timer) {
+      if (!urgent) return;
+      // Reschedule sooner for tool cards.
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.flush(false);
-    }, this.throttleMs);
+    }, delay);
   }
 
   private async flush(final: boolean): Promise<void> {
@@ -283,12 +373,13 @@ export class ResponseStreamer {
       this.applyFallback();
       // Never send an empty / progress-only bubble. Plan alone is allowed so the
       // board is visible as soon as the agent publishes steps.
-      if (!base.trim() && !this.planMarkdown) return;
-      // Live bubble: body → plan (always above progress) → progress bar → footer.
+      if (!base.trim() && !this.planMarkdown && !this.livenessLine) return;
+      // Live bubble: body → plan → progress → liveness (silent tools) → footer.
       const parts: string[] = [];
       if (base.trim()) parts.push(base);
       if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
       if (this.showProgressBar && this.progress !== undefined) parts.push(progressBar(this.progress));
+      if (this.livenessLine) parts.push(this.livenessLine);
       if (parts.length === 0) return;
       const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
       const rendered = toTelegramMarkdown(src);

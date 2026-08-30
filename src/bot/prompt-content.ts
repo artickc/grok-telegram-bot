@@ -31,6 +31,13 @@ export function buildContentBlocks(input: PromptInput, opts: ContentOptions = {}
     });
   }
 
+  // Slash commands (/goal, …) must be the first agent text — no wrappers.
+  if (input.rawSlashCommand) {
+    const slash = input.text.trim();
+    blocks.push({ type: "text", text: slash || "/help" });
+    return blocks;
+  }
+
   let text = input.text.trim();
   if (!text && input.images.length > 0) {
     text = input.images.length === 1 ? "Please analyze the attached image." : "Please analyze the attached images.";
@@ -69,6 +76,8 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
   // Preserve meta flags: auto-suggestion batches / self-recheck must not re-arm
   // another recheck after merge (dropping this caused infinite recheck loops).
   const skipSelfRecheck = inputs.some((i) => i.skipSelfRecheck);
+  // Slash commands must never merge with other prompts (would break /goal parsing).
+  const rawSlashCommand = inputs.some((i) => i.rawSlashCommand);
   // First reportBack wins (oldest queued manager dispatch in this merge batch).
   const reportBack = inputs.find((i) => i.reportBack)?.reportBack;
   const seedMessageId = inputs.find((i) => i.seedMessageId !== undefined)?.seedMessageId;
@@ -83,10 +92,15 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
     // First prompt's id wins (same rule as replyTo) so merged queue turns keep
     // one searchable #prompt_ tag threaded to the first anchor.
     promptId: inputs.find((i) => i.promptId)?.promptId,
-    quotedText: quotes.length > 0 ? [...new Set(quotes)].join("\n\n---\n\n") : undefined,
+    quotedText: rawSlashCommand
+      ? undefined
+      : quotes.length > 0
+        ? [...new Set(quotes)].join("\n\n---\n\n")
+        : undefined,
     skipSelfRecheck: skipSelfRecheck || undefined,
     reportBack,
     seedMessageId,
+    rawSlashCommand: rawSlashCommand || undefined,
   };
 }
 

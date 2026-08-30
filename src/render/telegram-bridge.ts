@@ -88,16 +88,17 @@ export const TELEGRAM_BRIDGE_DIRECTIVE_BASE = [
   "  When session_id is set, topic may be omitted — the bridge maps session path → topic.",
   "  session_id is REQUIRED when memory found a related session and the user wants a follow-up there.",
   "  Without session_id the bridge uses the topic's current foreground session (often wrong).",
-  "- notify — optional extra short message. In General the user ALSO sees your free-form prose,",
-  "  so always write a brief chat reply; do not stay silent after search/dispatch.",
-  "  Max 3 notify per turn. Never notify dispatch chatter, job tables, or \"sending to…\" spam.",
+  "- notify — SEND a short message to the user in this chat. In General this is the ONLY user-facing channel.",
+  "  Quiet by default: process/search/dispatch WITHOUT notify. Use notify only for answers the user asked for,",
+  "  important failures, or outcomes they need to know. Max 3 per turn; prefer ONE short message.",
+  "  Never notify dispatch chatter, job tables, \"sending to…\", or cancel status spam.",
   "- search_memory — search indexed forum topics + session titles/comments/history (memory-first).",
   "- list_topics — list all mapped forum topics (name, #id, path, kind).",
   "- list_jobs — list recent manager dispatches from General (status, target topic).",
   "- list_bots — list allowlisted sibling Telegram bots and command catalogs.",
   "- bot_command — /command@bot; waits for that bot to settle. NOT a Done; timeouts return ok=false.",
   "",
-  "Example (General — short prose plus dispatch):",
+  "Example (General — dispatch silently, one short user line):",
   "```json",
   '{ "telegram": [',
   '  { "action": "send_prompt", "topic": "WindowsStoreListingGenerator", "session_id": "019fc9ec", "prompt": "Continue ship gate." },',
@@ -122,7 +123,7 @@ export const TELEGRAM_BRIDGE_DIRECTIVE_BASE = [
   "```",
   "",
   "After you emit these actions, the bridge runs them and may send TELEGRAM BRIDGE RESULTS. Use those facts; do not invent replies.",
-  "The bridge strips the JSON fence from display. In General write a short prose answer the user can see.",
+  "The bridge strips the JSON fence. In General do NOT rely on free-form prose for the user — use notify.",
   "Do not spam actions. Prefer one orchestration block per turn.",
 ].join("\n");
 
@@ -217,7 +218,7 @@ export function buildTelegramBridgeResultsPrompt(results: unknown[]): string {
     payload,
     "```",
     "Continue the user's task with this information. Do not ask the user to paste results. Do not re-emit the same telegram actions unless something failed and a retry is useful.",
-    "If actions succeeded, continue with a short prose answer — never dump job tables or dispatch narration.",
+    "Quiet: if actions succeeded, prefer silent continue or one short notify — never dump job tables or dispatch narration.",
   ].join("\n");
 }
 

@@ -162,10 +162,8 @@ may feed results back as a quiet system turn (not a second Done).
 | `create_topic` | New forum topic; optional `path` binds immediately |
 | `set_path` | Bind/rebind topic by title or `#threadId` |
 | `send_prompt` | Inject a prompt into another topic (`ran` / `queued`; optional `new_session`, **`session_id`** to resume a specific session) |
-| `notify` | Optional extra ping. In **General** the user already sees short chat prose; `notify` is not required. |
-| `search_memory` | Search topic + session indexes (memory-first) |
-| `list_topics` | List mapped forum topics (name, `#id`, path) |
-| `list_jobs` | List recent General → project dispatches |
+| `notify` | **User-facing message** in the current chat. In General this is the only chat surface (quiet by default) |
+| `search_memory` | Search topic + session indexes |
 | `list_bots` | List allowlisted sibling bots |
 | `bot_command` | Call `/command@bot` and wait for that bot to settle |
 

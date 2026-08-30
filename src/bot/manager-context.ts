@@ -74,7 +74,7 @@ export function buildManagerContextBlock(opts: ManagerContextOpts): string {
     topics: topics.length ? topics : undefined,
     preferPaths,
     preferGeneral: true,
-    maxSessions: 32,
+    maxSessions: 80,
   });
   if (hits.length === 0) {
     lines.push(
