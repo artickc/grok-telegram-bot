@@ -490,6 +490,11 @@ export class SessionRuntime {
     if (next === this.liveStep) return;
     this.liveStep = next;
     this.changed();
+    // Long tools / subagents often emit no ACP chunks for minutes. Seed (or
+    // re-seed) the Working bubble immediately so the topic is not blank.
+    if (next && this.foreground && this.streamer && !this.managerMode) {
+      void this.streamer.ensureLiveSurface(next).catch(() => {});
+    }
   }
 
   /** Append thought text and refresh cards when the display line changes. */
@@ -1677,19 +1682,27 @@ export class SessionRuntime {
   }
 
   /**
-   * Every 15s, if we know a live step (tool/subagent) and the bubble is quiet,
-   * refresh that step with elapsed time. Never spam a bare "Still working" timer.
+   * Every 10s, if we know a live step (tool/subagent) and the bubble is quiet,
+   * refresh that step with elapsed time. Re-seeds the live surface if Telegram
+   * never got the Working bubble (429 / race) so project topics do not look dead.
+   * Never spam a bare "Still working" timer.
    */
   private startLivenessPulse(): void {
     this.stopLivenessPulse();
     this.livenessPulse = setInterval(() => {
       if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
-      if (!this.liveStep?.trim()) return;
-      this.streamer.pulseLiveness(
-        fmtDuration(Date.now() - this.turnPulseStartedAt),
-        this.liveStep,
-      );
-    }, 15_000);
+      const step = this.liveStep?.trim();
+      if (!step) return;
+      const elapsed = fmtDuration(Date.now() - this.turnPulseStartedAt);
+      const streamer = this.streamer;
+      void streamer
+        .ensureLiveSurface(`${step} \u00B7 ${elapsed}`)
+        .then(() => {
+          if (!this.busy || this.cancelled || this.streamer !== streamer) return;
+          streamer.pulseLiveness(elapsed, step);
+        })
+        .catch(() => {});
+    }, 10_000);
     this.livenessPulse.unref?.();
   }
 
