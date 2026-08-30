@@ -37,61 +37,61 @@ test("PermissionService.cancelForSession only cancels matching session", async (
   process.env.GROK_TRUST_ALL_TOOLS = "false";
   process.env.AUTO_APPROVE_PERMISSIONS = "false";
   try {
-  const api = {
-    sendMessage: async () => ({ message_id: 1 }),
-    pinChatMessage: async () => {},
-    unpinChatMessage: async () => {},
-    editMessageText: async () => {},
-  } as never;
+    const api = {
+      sendMessage: async () => ({ message_id: 1 }),
+      pinChatMessage: async () => {},
+      unpinChatMessage: async () => {},
+      editMessageText: async () => {},
+    } as never;
 
-  // Minimal registry: every session maps to chat 1 so interactive path runs.
-  const registry = {
-    describeSession: (sessionId: string) => ({
-      chatId: 1,
-      controlled: true,
-      subagent: false,
-      projectName: sessionId,
-    }),
-    get: () => ({ sessionId: "sess-a" }),
-    runtimeForSession: () => undefined,
-    busyRuntimesForChat: () => [],
-  } as unknown as RuntimeRegistry;
+    // Minimal registry: every session maps to chat 1 so interactive path runs.
+    const registry = {
+      describeSession: (sessionId: string) => ({
+        chatId: 1,
+        controlled: true,
+        subagent: false,
+        projectName: sessionId,
+      }),
+      get: () => ({ sessionId: "sess-a" }),
+      runtimeForSession: () => undefined,
+      busyRuntimesForChat: () => [],
+    } as unknown as RuntimeRegistry;
 
-  const perms = new PermissionService(api, registry, false /* interactive */);
+    const perms = new PermissionService(api, registry, false /* interactive */);
 
-  const pA = perms.handle({
-    sessionId: "sess-a",
-    options: [
-      { optionId: "allow", name: "Allow", kind: "allow_once" },
-      { optionId: "deny", name: "Deny", kind: "reject_once" },
-    ],
-    toolCall: { toolCallId: "t1", title: "edit", kind: "edit" },
-  } as never);
+    const pA = perms.handle({
+      sessionId: "sess-a",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      toolCall: { toolCallId: "t1", title: "edit", kind: "edit" },
+    } as never);
 
-  const pB = perms.handle({
-    sessionId: "sess-b",
-    options: [
-      { optionId: "allow", name: "Allow", kind: "allow_once" },
-      { optionId: "deny", name: "Deny", kind: "reject_once" },
-    ],
-    toolCall: { toolCallId: "t2", title: "read", kind: "read" },
-  } as never);
+    const pB = perms.handle({
+      sessionId: "sess-b",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      toolCall: { toolCallId: "t2", title: "read", kind: "read" },
+    } as never);
 
-  // Let the async sendMessage path register pending entries.
-  await new Promise((r) => setTimeout(r, 20));
+    // Let the async sendMessage path register pending entries.
+    await new Promise((r) => setTimeout(r, 20));
 
-  const n = perms.cancelForSession("sess-a");
-  assert.equal(n, 1);
+    const n = perms.cancelForSession("sess-a");
+    assert.equal(n, 1);
 
-  const outA = await pA;
-  assert.deepEqual(outA, { outcome: { outcome: "cancelled" } });
+    const outA = await pA;
+    assert.deepEqual(outA, { outcome: { outcome: "cancelled" } });
 
-  // sess-b still pending — cancel it so the test does not hang on open timers.
-  assert.equal(perms.cancelForSession("sess-b"), 1);
-  const outB = await pB;
-  assert.deepEqual(outB, { outcome: { outcome: "cancelled" } });
+    // sess-b still pending — cancel it so the test does not hang on open timers.
+    assert.equal(perms.cancelForSession("sess-b"), 1);
+    const outB = await pB;
+    assert.deepEqual(outB, { outcome: { outcome: "cancelled" } });
 
-  assert.equal(perms.cancelForSession("sess-a"), 0);
+    assert.equal(perms.cancelForSession("sess-a"), 0);
   } finally {
     if (prevTrust === undefined) delete process.env.GROK_TRUST_ALL_TOOLS;
     else process.env.GROK_TRUST_ALL_TOOLS = prevTrust;
