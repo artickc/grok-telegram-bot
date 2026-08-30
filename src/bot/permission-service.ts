@@ -64,9 +64,22 @@ export class PermissionService {
     this.onUnpinned = opts?.onUnpinned;
   }
 
+  /**
+   * True when we must never block on tool approvals.
+   * Re-reads live env so a stale constructor flag (or an inherited
+   * GROK_TRUST_ALL_TOOLS=false that lost to the instance .env at boot) cannot
+   * leave the bot stuck on Allow/Deny for hours.
+   * Same rule as bot.ts: autoApprovePermissions || trustAllTools (defaults true).
+   */
+  private shouldAutoApprove(): boolean {
+    if (this.autoApprove) return true;
+    return envFlagOn(process.env.GROK_TRUST_ALL_TOOLS, true) ||
+      envFlagOn(process.env.AUTO_APPROVE_PERMISSIONS, true);
+  }
+
   /** Handle a permission request: auto-approve (default), ask the chat, or allow if unattended. */
   async handle(params: RequestPermissionParams): Promise<PermissionOutcome> {
-    if (this.autoApprove) {
+    if (this.shouldAutoApprove()) {
       const decision = autoDecideSession(params);
       log.info(
         `auto-approved permission for session ${params.sessionId.slice(0, 8)} ` +
@@ -238,6 +251,12 @@ export class PermissionService {
       }
     }
   }
+}
+
+/** Parse a trust/auto-approve env flag; blank/unset → default. */
+export function envFlagOn(raw: string | undefined, defaultOn: boolean): boolean {
+  if (raw === undefined || raw.trim() === "") return defaultOn;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
 /** Short line for the live stream while waiting on Approve/Deny. */
