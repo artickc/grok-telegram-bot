@@ -1,6 +1,10 @@
 /**
  * Interactive Grok `ask_user_question` reverse requests.
- * Headless default used to skip; we now present options as Telegram buttons.
+ *
+ * Shows questions as Telegram inline buttons; user can also type a free-text
+ * answer. Resolves the ACP reverse-request with the current wire format
+ * (`outcome: accepted | skip_interview | cancelled`) so the session continues
+ * without interruption.
  */
 import type { Api } from "grammy";
 import { InlineKeyboard } from "grammy";
@@ -13,33 +17,48 @@ const TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface InterviewQuestion {
   id: string;
+  /** Exact prompt text — also used as the answers map key on the wire. */
   prompt: string;
   options: Array<{ id: string; label: string }>;
   multi: boolean;
 }
 
-/** ACP reverse-request result (externally tagged enum, smoke-verified skip). */
+/** Current Grok AskUserQuestionExtResponse (internally tagged on `outcome`). */
 export type AskUserResult =
-  | { SkipInterview: null }
-  | { SubmitAnswers: { answers: Array<{ questionId: string; selected: string[] }> } };
+  | {
+      outcome: "accepted";
+      answers: Record<string, string[]>;
+      annotations?: Record<string, { preview?: string; notes?: string }>;
+    }
+  | { outcome: "skip_interview"; partial_answers?: Record<string, string> }
+  | { outcome: "cancelled" }
+  | { outcome: "chat_about_this"; partial_answers?: Record<string, string> };
 
 interface Pending {
   resolve: (r: AskUserResult) => void;
   chatId: number;
+  sessionId: string;
   messageId?: number;
   questions: InterviewQuestion[];
+  /** questionId → selected option ids */
   picked: Map<string, Set<string>>;
+  /** questionId → free-text notes (typed answer) */
+  notes: Map<string, string>;
   index: number;
   timer: NodeJS.Timeout;
+  waitingText: boolean;
 }
 
 export class AskUserService {
   private readonly pending = new Map<string, Pending>();
+  /** chatId → reqId while waiting for a typed answer. */
+  private readonly textFor = new Map<number, string>();
   private seq = 0;
 
   constructor(
     private readonly api: Api,
     private readonly registry: RuntimeRegistry,
+    /** When true, skip the interview (unattended). Default false = interactive. */
     public autoSkip = false,
   ) {}
 
@@ -47,21 +66,40 @@ export class AskUserService {
     const questions = parseQuestions(params);
     const sessionId = str(params.sessionId) || str(params.session_id) || "";
     if (this.autoSkip || questions.length === 0) {
-      log.info(`skip ask_user_question (${questions.length} q)`);
-      return { SkipInterview: null };
+      log.info(`skip ask_user_question (${questions.length} q, autoSkip=${this.autoSkip})`);
+      return { outcome: "skip_interview", partial_answers: {} };
     }
     const desc = sessionId ? this.registry.describeSession(sessionId) : { chatId: undefined };
     const chatId = desc.chatId;
-    if (chatId === undefined) return { SkipInterview: null };
+    if (chatId === undefined) {
+      log.info("ask_user_question: no owning chat — skip");
+      return { outcome: "skip_interview", partial_answers: {} };
+    }
     const threadExtra = outboundThreadExtra(desc.threadId);
 
     const reqId = String(++this.seq);
     const picked = new Map<string, Set<string>>();
+    const notes = new Map<string, string>();
     for (const q of questions) picked.set(q.id, new Set());
 
+    // Surface wait on the busy live bubble.
+    const waitLine = questions[0]?.prompt?.slice(0, 100) || "question";
+    for (const rt of this.registry.busyRuntimesForChat(chatId, desc.threadId)) {
+      try {
+        rt.noticePermissionWait(`Answer needed: ${waitLine}`);
+      } catch {
+        /* non-fatal */
+      }
+    }
+
     try {
-      const msg = await this.api.sendMessage(chatId, renderQuestion(questions, 0, picked), {
-        reply_markup: questionKeyboard(reqId, questions[0]!, picked.get(questions[0]!.id)!),
+      log.info(
+        `ask_user prompt chat=${chatId}` +
+          (desc.threadId !== undefined ? ` thread=${desc.threadId}` : "") +
+          ` q=${questions.length} session=${sessionId.slice(0, 8) || "?"}`,
+      );
+      const msg = await this.api.sendMessage(chatId, renderQuestion(questions, 0, picked, notes), {
+        reply_markup: questionKeyboard(reqId, questions[0]!, picked.get(questions[0]!.id)!, 0, questions.length),
         disable_notification: false,
         ...threadExtra,
       });
@@ -69,25 +107,31 @@ export class AskUserService {
         const timer = setTimeout(() => {
           const p = this.pending.get(reqId);
           if (!p) return;
+          this.textFor.delete(p.chatId);
           this.pending.delete(reqId);
-          void this.api.editMessageText(p.chatId, p.messageId ?? 0, "\u231B Question timed out \u2014 skipped.").catch(
-            () => {},
-          );
-          resolve({ SkipInterview: null });
+          void this.api
+            .editMessageText(p.chatId, p.messageId ?? 0, "\u231B Question timed out \u2014 skipped.", {
+              reply_markup: { inline_keyboard: [] },
+            })
+            .catch(() => {});
+          resolve({ outcome: "skip_interview", partial_answers: {} });
         }, TIMEOUT_MS);
         this.pending.set(reqId, {
           resolve,
           chatId,
+          sessionId,
           messageId: msg.message_id,
           questions,
           picked,
+          notes,
           index: 0,
           timer,
+          waitingText: false,
         });
       });
     } catch (e) {
       log.warn("send ask_user failed:", (e as Error).message);
-      return { SkipInterview: null };
+      return { outcome: "skip_interview", partial_answers: {} };
     }
   }
 
@@ -98,13 +142,32 @@ export class AskUserService {
     if (!q) return undefined;
 
     if (kind === "skip") {
-      this.settle(p, reqId, { SkipInterview: null }, "\u23ED Skipped questions.");
+      this.settle(p, reqId, { outcome: "skip_interview", partial_answers: {} }, "\u23ED Skipped questions.");
       return "Skipped";
+    }
+    if (kind === "cancel") {
+      this.settle(p, reqId, { outcome: "cancelled" }, "\u26D4 Questions cancelled.");
+      return "Cancelled";
+    }
+    if (kind === "type") {
+      p.waitingText = true;
+      this.textFor.set(p.chatId, reqId);
+      void this.api
+        .editMessageText(
+          p.chatId,
+          p.messageId ?? 0,
+          `${renderQuestion(p.questions, p.index, p.picked, p.notes)}\n\n\u270F\uFE0F Type your answer as the next message.`,
+          { reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {});
+      return "Type your answer";
     }
     if (kind === "opt" && value !== undefined) {
       const opt = q.options[Number(value)];
       if (!opt) return "Expired";
       const set = p.picked.get(q.id)!;
+      // Choosing a canned option clears free-text for this question.
+      p.notes.delete(q.id);
       if (q.multi) {
         if (set.has(opt.id)) set.delete(opt.id);
         else set.add(opt.id);
@@ -116,24 +179,65 @@ export class AskUserService {
       return q.multi ? "Toggled" : "Selected";
     }
     if (kind === "next") {
+      const set = p.picked.get(q.id)!;
+      const note = p.notes.get(q.id);
+      if (set.size === 0 && !note) return "Pick an option or type an answer";
       if (p.index < p.questions.length - 1) {
         p.index += 1;
+        p.waitingText = false;
+        this.textFor.delete(p.chatId);
         void this.redraw(reqId, p);
         return "Next";
       }
-      const answers = p.questions.map((qq) => ({
-        questionId: qq.id,
-        selected: [...(p.picked.get(qq.id) ?? [])],
-      }));
-      this.settle(p, reqId, { SubmitAnswers: { answers } }, "\u2705 Answers sent.");
+      this.settle(p, reqId, buildAcceptedResult(p.questions, p.picked, p.notes), "\u2705 Answers sent.");
       return "Submitted";
     }
     if (kind === "prev" && p.index > 0) {
       p.index -= 1;
+      p.waitingText = false;
+      this.textFor.delete(p.chatId);
       void this.redraw(reqId, p);
       return "Back";
     }
     return undefined;
+  }
+
+  /**
+   * If this chat is waiting for a typed answer, consume the text as free-form
+   * for the current question. Returns true when consumed (do not treat as a
+   * new agent prompt).
+   */
+  takeText(chatId: number, text: string): boolean {
+    const reqId = this.textFor.get(chatId);
+    if (!reqId) return false;
+    const p = this.pending.get(reqId);
+    if (!p || !p.waitingText) {
+      this.textFor.delete(chatId);
+      return false;
+    }
+    const q = p.questions[p.index];
+    if (!q) return false;
+    const trimmed = text.trim();
+    if (!trimmed) return true; // consume empty, stay waiting
+    p.notes.set(q.id, trimmed);
+    p.picked.get(q.id)!.clear(); // free-text replaces option picks
+    p.waitingText = false;
+    this.textFor.delete(chatId);
+    void this.redraw(reqId, p);
+    return true;
+  }
+
+  /** Cancel all pending interviews for a session (e.g. /cancel). */
+  cancelForSession(sessionId: string): number {
+    let n = 0;
+    for (const [reqId, p] of [...this.pending.entries()]) {
+      if (p.sessionId !== sessionId) continue;
+      this.textFor.delete(p.chatId);
+      this.settle(p, reqId, { outcome: "cancelled" }, "\u{1F510} (cancelled \u2014 turn stopped)");
+      n++;
+    }
+    if (n > 0) log.info(`cancelled ${n} ask_user interview(s) for session ${sessionId.slice(0, 8)}`);
+    return n;
   }
 
   private async redraw(reqId: string, p: Pending): Promise<void> {
@@ -141,7 +245,7 @@ export class AskUserService {
     const set = p.picked.get(q.id)!;
     if (p.messageId === undefined) return;
     await this.api
-      .editMessageText(p.chatId, p.messageId, renderQuestion(p.questions, p.index, p.picked), {
+      .editMessageText(p.chatId, p.messageId, renderQuestion(p.questions, p.index, p.picked, p.notes), {
         reply_markup: questionKeyboard(reqId, q, set, p.index, p.questions.length),
       })
       .catch(() => {});
@@ -150,13 +254,40 @@ export class AskUserService {
   private settle(p: Pending, reqId: string, result: AskUserResult, text: string): void {
     clearTimeout(p.timer);
     this.pending.delete(reqId);
+    this.textFor.delete(p.chatId);
     if (p.messageId !== undefined) {
-      void this.api.editMessageText(p.chatId, p.messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(
-        () => {},
-      );
+      void this.api
+        .editMessageText(p.chatId, p.messageId, text, { reply_markup: { inline_keyboard: [] } })
+        .catch(() => {});
     }
     p.resolve(result);
   }
+}
+
+/** Build wire-format accepted response (question text → labels; notes for freeform). */
+export function buildAcceptedResult(
+  questions: InterviewQuestion[],
+  picked: Map<string, Set<string>>,
+  notes: Map<string, string>,
+): AskUserResult {
+  const answers: Record<string, string[]> = {};
+  const annotations: Record<string, { notes?: string }> = {};
+  for (const q of questions) {
+    const note = notes.get(q.id)?.trim();
+    const ids = [...(picked.get(q.id) ?? [])];
+    if (note && ids.length === 0) {
+      answers[q.prompt] = ["Other"];
+      annotations[q.prompt] = { notes: note };
+      continue;
+    }
+    if (ids.length === 0) continue;
+    const labels = ids.map((id) => q.options.find((o) => o.id === id)?.label || id);
+    answers[q.prompt] = labels;
+    if (note) annotations[q.prompt] = { notes: note };
+  }
+  const result: AskUserResult = { outcome: "accepted", answers };
+  if (Object.keys(annotations).length > 0) result.annotations = annotations;
+  return result;
 }
 
 export function parseQuestions(params: Record<string, unknown>): InterviewQuestion[] {
@@ -166,9 +297,14 @@ export function parseQuestions(params: Record<string, unknown>): InterviewQuesti
   raw.forEach((item, i) => {
     if (!item || typeof item !== "object") return;
     const o = item as Record<string, unknown>;
-    const prompt = str(o.question) || str(o.prompt) || str(o.header) || str(o.text) || `Question ${i + 1}`;
+    const prompt =
+      str(o.question) || str(o.prompt) || str(o.header) || str(o.text) || `Question ${i + 1}`;
     const id = str(o.id) || str(o.questionId) || `q${i}`;
-    const multi = o.multiSelect === true || o.multi === true || o.allow_multiple === true;
+    const multi =
+      o.multiSelect === true ||
+      o.multi_select === true ||
+      o.multi === true ||
+      o.allow_multiple === true;
     const optsRaw = Array.isArray(o.options) ? o.options : [];
     const options = optsRaw
       .map((opt, j) => {
@@ -180,7 +316,9 @@ export function parseQuestions(params: Record<string, unknown>): InterviewQuesti
         return { id: oid, label };
       })
       .filter((x): x is { id: string; label: string } => Boolean(x));
-    if (options.length === 0) options.push({ id: "yes", label: "Yes" }, { id: "no", label: "No" });
+    if (options.length === 0) {
+      options.push({ id: "yes", label: "Yes" }, { id: "no", label: "No" });
+    }
     out.push({ id, prompt, options, multi });
   });
   return out;
@@ -190,15 +328,20 @@ function renderQuestion(
   questions: InterviewQuestion[],
   index: number,
   picked: Map<string, Set<string>>,
+  notes: Map<string, string>,
 ): string {
   const q = questions[index]!;
   const set = picked.get(q.id) ?? new Set();
+  const note = notes.get(q.id);
+  const selectedLabels = [...set].map((id) => q.options.find((o) => o.id === id)?.label || id);
   const lines = [
     `\u2753 Grok has a question (${index + 1}/${questions.length})`,
     "",
     q.prompt,
     q.multi ? "\n(multi-select \u2014 tap to toggle, then Next)" : "",
-    set.size ? `\nSelected: ${[...set].join(", ")}` : "",
+    selectedLabels.length ? `\nSelected: ${selectedLabels.join(", ")}` : "",
+    note ? `\nYour text: ${note}` : "",
+    "\nTap an option, or Type answer\u2026 then Next/Submit.",
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -211,13 +354,14 @@ function questionKeyboard(
   total = 1,
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
-  q.options.slice(0, 12).forEach((opt, j) => {
+  q.options.slice(0, 10).forEach((opt, j) => {
     const mark = selected.has(opt.id) ? "\u2705 " : "";
     kb.text(`${mark}${opt.label.slice(0, 40)}`, `asku:${reqId}:opt:${j}`).row();
   });
+  kb.text("\u270F\uFE0F Type answer\u2026", `asku:${reqId}:type`).row();
   if (index > 0) kb.text("\u25C0 Back", `asku:${reqId}:prev`);
   kb.text(index < total - 1 ? "Next \u25B6" : "\u2705 Submit", `asku:${reqId}:next`);
-  kb.row().text("Skip", `asku:${reqId}:skip`);
+  kb.row().text("Skip", `asku:${reqId}:skip`).text("Cancel", `asku:${reqId}:cancel`);
   return kb;
 }
 

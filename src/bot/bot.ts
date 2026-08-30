@@ -216,16 +216,13 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   );
   acp.planExitHandler = (params) => planExit.handle(params);
 
-  const askUser = new AskUserService(
-    bot.api,
-    registry,
-    cfg.autoApprovePlan && cfg.autoApprovePermissions,
-  );
+  const askUser = new AskUserService(bot.api, registry, cfg.askUserAutoSkip);
   acp.askUserHandler = (params) => askUser.handle(params);
-  // /stop and /cancel must cancel pending interactive permissions for that
-  // session only (ACP requires cancelled outcomes) — never kill the agent.
+  // /stop and /cancel must cancel pending interactive permissions / interviews
+  // for that session only (ACP requires settled outcomes) — never kill the agent.
   acp.onSessionCancel = (sessionId) => {
     permissions.cancelForSession(sessionId);
+    askUser.cancelForSession(sessionId);
   };
 
   // The bot pins/unpins the status panel, and Telegram emits a "pinned a
@@ -272,7 +269,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
   });
 
-  bot.callbackQuery(/^asku:(\d+):(opt|next|prev|skip)(?::(.*))?$/, async (ctx) => {
+  bot.callbackQuery(/^asku:(\d+):(opt|next|prev|skip|type|cancel)(?::(.*))?$/, async (ctx) => {
     const toast = askUser.tap(ctx.match![1]!, ctx.match![2]!, ctx.match![3]);
     await ctx.answerCallbackQuery({ text: toast ?? "Expired" });
   });
@@ -377,7 +374,10 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   bot.on("message:text", async (ctx, next) => {
     const text = ctx.message?.text ?? "";
     if (!text || text.startsWith("/")) return next();
+    // Consume typed answers for pending plan-exit / ask_user interviews first
+    // so they never become a new agent prompt (would interrupt the session).
     if (planExit.takeFeedback(ctx.chat.id, text)) return;
+    if (askUser.takeText(ctx.chat.id, text)) return;
     await next();
   });
   if (forum) registerForum(bot, deps, forum);
