@@ -464,6 +464,11 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     },
     shutdown: async () => {
       try {
+        forum?.stopRootsWatcher();
+      } catch {
+        /* ignore */
+      }
+      try {
         await bot.stop();
       } catch {
         /* ignore */
@@ -480,6 +485,7 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
   void deps.ephemeral.cleanupAll().catch(() => {});
 
   // Forum project topics: ensure AI Chat + optional catalog topics (best-effort).
+  // When TOPIC_AUTO_CREATE is on, setup also starts PROJECT_ROOTS folder watchers.
   if (forum) {
     void forum.ensureSetup().catch((e) => {
       log.warn(`forum setup failed: ${(e as Error).message}`);

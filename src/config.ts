@@ -224,6 +224,11 @@ export interface AppConfig {
    * Default true when TOPIC_GROUP_ID is set.
    */
   topicAutoCreateProjects: boolean;
+  /**
+   * How often (ms) to poll PROJECT_ROOTS for new folders when forum auto-create
+   * is on (TOPIC_WATCH_INTERVAL_MS). Default 10000.
+   */
+  topicWatchIntervalMs: number;
   /** Display name for the default AI chat topic (TOPIC_AI_CHAT_NAME). */
   topicAiChatName: string;
   /**
@@ -361,6 +366,7 @@ export function loadConfig(): AppConfig {
       process.env.TOPIC_GROUP_ID ?? process.env.FORUM_GROUP_ID,
     ),
     topicAutoCreateProjects: bool(process.env.TOPIC_AUTO_CREATE, true),
+    topicWatchIntervalMs: num(process.env.TOPIC_WATCH_INTERVAL_MS, 10_000),
     topicAiChatName: (process.env.TOPIC_AI_CHAT_NAME ?? "AI Chat").trim() || "AI Chat",
     allowedTelegramBots: parseTelegramBotUsernames(process.env.ALLOWED_TELEGRAM_BOTS),
     telegramBotCommands: parseTelegramBotCommands(process.env.TELEGRAM_BOT_COMMANDS),

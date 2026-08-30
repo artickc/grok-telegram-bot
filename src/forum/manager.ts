@@ -10,6 +10,7 @@ import type { AppConfig } from "../config.js";
 import { withTelegramRetry } from "../bot/telegram-io.js";
 import { createLogger } from "../logger.js";
 import type { ProjectEntry, ProjectManager } from "../projects/manager.js";
+import { ProjectRootsWatcher } from "../projects/roots-watcher.js";
 import { resolveBindTarget } from "./bind-path.js";
 import { discoverProjectIcon } from "./project-icon.js";
 import { TopicStore } from "./topic-store.js";
@@ -45,6 +46,8 @@ export class ForumManager {
   private ready = false;
   private disabledReason: ForumDisabledReason | null = "access_error";
   private disabledDetail: string | null = "setup not run yet";
+  /** Polls PROJECT_ROOTS for new folders → createProjectTopic. */
+  private rootsWatcher: ProjectRootsWatcher | undefined;
 
   constructor(
     private readonly api: Api,
@@ -83,7 +86,14 @@ export class ForumManager {
     this.ready = false;
     this.disabledReason = reason;
     this.disabledDetail = detail;
+    this.stopRootsWatcher();
     log.warn(`forum management ignored for group ${this.groupId}: [${reason}] ${detail}`);
+  }
+
+  /** Stop watching PROJECT_ROOTS (shutdown / demotion). */
+  stopRootsWatcher(): void {
+    this.rootsWatcher?.stop();
+    this.rootsWatcher = undefined;
   }
 
   /** Verify access and ensure AI chat + optional project topics. Idempotent. */
@@ -113,6 +123,9 @@ export class ForumManager {
       await this.ensureAiChatTopic();
       if (this.cfg.topicAutoCreateProjects) {
         await this.ensureProjectTopics(this.projects.listAll());
+        this.startRootsWatcher();
+      } else {
+        this.stopRootsWatcher();
       }
       this.store.setLastSetup();
       log.info(`forum setup complete for group ${chatId} (${this.store.all().length} topics mapped)`);
@@ -125,6 +138,26 @@ export class ForumManager {
       }
       log.warn(`forum setup partially failed for ${chatId}: ${msg}`);
     }
+  }
+
+  /**
+   * While forum + TOPIC_AUTO_CREATE are on, poll PROJECT_ROOTS for new
+   * top-level folders and create bound topics (no restart needed).
+   */
+  private startRootsWatcher(): void {
+    this.stopRootsWatcher();
+    if (!this.ready || !this.cfg.topicAutoCreateProjects) return;
+    if (this.cfg.projectRoots.length === 0) return;
+    this.rootsWatcher = new ProjectRootsWatcher({
+      roots: this.cfg.projectRoots,
+      intervalMs: this.cfg.topicWatchIntervalMs,
+      isAlreadyMapped: (p) => !!this.store.findByProjectPath(p),
+      onNewProject: async (entry) => {
+        if (!this.ready) return;
+        await this.createProjectTopic(entry);
+      },
+    });
+    this.rootsWatcher.start();
   }
 
   /**

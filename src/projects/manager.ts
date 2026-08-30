@@ -8,7 +8,8 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("projects");
 
-const IGNORE = new Set([
+/** Top-level folder names skipped by catalog discovery and the roots watcher. */
+export const PROJECT_DIR_IGNORE = new Set([
   "node_modules",
   ".git",
   ".history",
@@ -20,6 +21,13 @@ const IGNORE = new Set([
   ".venv",
   "__pycache__",
 ]);
+
+/** True when a child name should not become a project / forum topic. */
+export function shouldIgnoreProjectDirName(name: string): boolean {
+  const n = name.trim();
+  if (!n || n.startsWith(".")) return true;
+  return PROJECT_DIR_IGNORE.has(n);
+}
 
 export interface ProjectEntry {
   name: string;
@@ -52,7 +60,7 @@ export class ProjectManager {
         continue;
       }
       for (const child of children) {
-        if (IGNORE.has(child) || child.startsWith(".")) continue;
+        if (shouldIgnoreProjectDirName(child)) continue;
         const full = join(root, child);
         let mtime = 0;
         try {
