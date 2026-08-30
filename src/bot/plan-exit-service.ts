@@ -7,7 +7,7 @@
 import type { Api } from "grammy";
 import { InlineKeyboard } from "grammy";
 import type { PlanExitDecision, PlanExitOutcome } from "../grok/plan-approval.js";
-import { outboundThreadExtra } from "../forum/thread.js";
+import { forumThreadId, interactiveWaitKey, outboundThreadExtra } from "../forum/thread.js";
 import { createLogger } from "../logger.js";
 import type { RuntimeRegistry } from "./registry.js";
 
@@ -18,6 +18,7 @@ const PREVIEW = 900;
 interface Pending {
   resolve: (d: PlanExitDecision) => void;
   chatId: number;
+  threadId?: number;
   messageId?: number;
   timer: NodeJS.Timeout;
   pinned: boolean;
@@ -26,8 +27,8 @@ interface Pending {
 
 export class PlanExitService {
   private readonly pending = new Map<string, Pending>();
-  /** chatId → reqId while we wait for revision notes after "Request changes". */
-  private readonly feedbackFor = new Map<number, string>();
+  /** `${chatId}:${threadId}` → reqId while waiting for revision notes. */
+  private readonly feedbackFor = new Map<string, string>();
   private seq = 0;
 
   constructor(
@@ -89,11 +90,19 @@ export class PlanExitService {
         const p = this.pending.get(reqId);
         if (!p) return;
         this.pending.delete(reqId);
-        this.feedbackFor.delete(p.chatId);
+        this.clearFeedbackWait(p);
         void this.finish(p, "\u231B Plan approval timed out \u2014 abandoned.");
         resolve({ outcome: "abandoned", feedback: "timed out waiting for review" });
       }, TIMEOUT_MS);
-      this.pending.set(reqId, { resolve, chatId, messageId, timer, pinned, waitingFeedback: false });
+      this.pending.set(reqId, {
+        resolve,
+        chatId,
+        threadId: desc.threadId,
+        messageId,
+        timer,
+        pinned,
+        waitingFeedback: false,
+      });
     });
   }
 
@@ -103,7 +112,7 @@ export class PlanExitService {
     if (!p) return undefined;
     if (action === "chg") {
       p.waitingFeedback = true;
-      this.feedbackFor.set(p.chatId, reqId);
+      this.feedbackFor.set(interactiveWaitKey(p.chatId, p.threadId), reqId);
       void this.api
         .editMessageText(p.chatId, p.messageId ?? 0, "\u270F\uFE0F Send revision notes as your next message.", {
           reply_markup: { inline_keyboard: [] },
@@ -113,7 +122,7 @@ export class PlanExitService {
     }
     clearTimeout(p.timer);
     this.pending.delete(reqId);
-    this.feedbackFor.delete(p.chatId);
+    this.clearFeedbackWait(p);
     const outcome: PlanExitOutcome = action === "ok" ? "approved" : "abandoned";
     const label = outcome === "approved" ? "\u2705 Plan approved \u2014 implementing." : "\u26D4 Plan abandoned.";
     void this.finish(p, label);
@@ -121,19 +130,44 @@ export class PlanExitService {
     return outcome === "approved" ? "Approved" : "Abandoned";
   }
 
-  /** If this chat is waiting for revision notes, consume the text. */
-  takeFeedback(chatId: number, text: string): boolean {
-    const reqId = this.feedbackFor.get(chatId);
+  /** If this forum topic is waiting for revision notes, consume the text. */
+  takeFeedback(chatId: number, text: string, messageThreadId?: number): boolean {
+    const reqId = this.lookupFeedbackWait(chatId, messageThreadId);
     if (!reqId) return false;
     const p = this.pending.get(reqId);
-    this.feedbackFor.delete(chatId);
-    if (!p) return false;
+    if (!p) {
+      this.feedbackFor.delete(interactiveWaitKey(chatId, messageThreadId));
+      return false;
+    }
+    this.clearFeedbackWait(p);
     clearTimeout(p.timer);
     this.pending.delete(reqId);
     const notes = text.trim().slice(0, 4000);
     void this.finish(p, `\u270F\uFE0F Requested changes:\n${notes.slice(0, 400)}`);
     p.resolve({ outcome: "request_changes", feedback: notes || "Please revise the plan." });
     return true;
+  }
+
+  private clearFeedbackWait(p: { chatId: number; threadId?: number }): void {
+    this.feedbackFor.delete(interactiveWaitKey(p.chatId, p.threadId));
+    if (p.threadId === 1 || p.threadId === undefined) {
+      this.feedbackFor.delete(interactiveWaitKey(p.chatId, 1));
+      this.feedbackFor.delete(interactiveWaitKey(p.chatId, undefined));
+    }
+  }
+
+  private lookupFeedbackWait(chatId: number, messageThreadId?: number): string | undefined {
+    const keys = [
+      interactiveWaitKey(chatId, messageThreadId),
+      interactiveWaitKey(chatId, forumThreadId(messageThreadId)),
+    ];
+    if (messageThreadId === undefined) keys.push(interactiveWaitKey(chatId, 1));
+    if (messageThreadId === 1) keys.push(interactiveWaitKey(chatId, undefined));
+    for (const k of keys) {
+      const id = this.feedbackFor.get(k);
+      if (id) return id;
+    }
+    return undefined;
   }
 
   private async finish(p: Pending, text: string): Promise<void> {
