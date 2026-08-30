@@ -380,8 +380,9 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     if (!text || text.startsWith("/")) return next();
     // Consume typed answers for pending plan-exit / ask_user interviews first
     // so they never become a new agent prompt (would interrupt the session).
-    if (planExit.takeFeedback(ctx.chat.id, text)) return;
-    if (askUser.takeText(ctx.chat.id, text)) return;
+    const msgThread = ctx.message?.message_thread_id;
+    if (planExit.takeFeedback(ctx.chat.id, text, msgThread)) return;
+    if (askUser.takeText(ctx.chat.id, text, msgThread)) return;
     await next();
   });
   if (forum) registerForum(bot, deps, forum);

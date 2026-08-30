@@ -284,27 +284,30 @@ export class RuntimeRegistry {
    * Busy foreground runtimes for a chat — forum topic controllers first, then
    * the non-forum controller. Project /goal turns live on forumController, not
    * controller(chatId), so subagent UI must target these.
+   *
+   * When `preferThreadId` is set, ONLY that topic's busy runtime is returned.
+   * Previously we appended every other busy topic too, which leaked ask_user /
+   * permission "waiting" notices across forum topics.
    */
   busyRuntimesForChat(chatId: number, preferThreadId?: number): SessionRuntime[] {
     const out: SessionRuntime[] = [];
     const prefix = `${chatId}:`;
-    const preferred: SessionRuntime[] = [];
     for (const [key, c] of this.forumControllers) {
       if (!key.startsWith(prefix)) continue;
       const fg = c.foreground();
       if (!fg.isBusy) continue;
-      if (preferThreadId !== undefined && c.messageThreadId === preferThreadId) {
-        preferred.push(fg);
-      } else {
-        out.push(fg);
+      if (preferThreadId !== undefined && c.messageThreadId !== preferThreadId) continue;
+      out.push(fg);
+    }
+    // Private / non-forum controller — only when not scoping to a project topic.
+    if (preferThreadId === undefined) {
+      const main = this.controllers.get(chatId);
+      if (main) {
+        const fg = main.foreground();
+        if (fg.isBusy) out.push(fg);
       }
     }
-    const main = this.controllers.get(chatId);
-    if (main) {
-      const fg = main.foreground();
-      if (fg.isBusy) out.push(fg);
-    }
-    return preferred.length > 0 ? [...preferred, ...out] : out;
+    return out;
   }
 
   private onSubagents(subagents: SubagentInfo[], pending: PendingStage[]): void {

@@ -16,6 +16,15 @@ export function forumThreadId(threadId: number | undefined): number {
 }
 
 /**
+ * Map key for pending typed answers (ask_user / plan-exit) so forum topics in
+ * the same group chat do not steal each other's free-text replies.
+ * Private chats use thread 0; forum topics use their real thread id (General=1).
+ */
+export function interactiveWaitKey(chatId: number, threadId?: number): string {
+  return `${chatId}:${threadId ?? 0}`;
+}
+
+/**
  * True when this forum thread is the General manager topic.
  * Only exact id `1` — do NOT treat private chats (undefined) as General.
  * Callers should pass {@link forumThreadId} first when reading raw Telegram ids.

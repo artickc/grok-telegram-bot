@@ -8,7 +8,7 @@
  */
 import type { Api } from "grammy";
 import { InlineKeyboard } from "grammy";
-import { outboundThreadExtra } from "../forum/thread.js";
+import { forumThreadId, interactiveWaitKey, outboundThreadExtra } from "../forum/thread.js";
 import { createLogger } from "../logger.js";
 import type { RuntimeRegistry } from "./registry.js";
 
@@ -37,6 +37,8 @@ export type AskUserResult =
 interface Pending {
   resolve: (r: AskUserResult) => void;
   chatId: number;
+  /** Forum topic id (1 = General); undefined for private chats. */
+  threadId?: number;
   sessionId: string;
   messageId?: number;
   questions: InterviewQuestion[];
@@ -51,8 +53,8 @@ interface Pending {
 
 export class AskUserService {
   private readonly pending = new Map<string, Pending>();
-  /** chatId → reqId while waiting for a typed answer. */
-  private readonly textFor = new Map<number, string>();
+  /** `${chatId}:${threadId}` → reqId while waiting for a typed answer. */
+  private readonly textFor = new Map<string, string>();
   private seq = 0;
 
   constructor(
@@ -107,7 +109,7 @@ export class AskUserService {
         const timer = setTimeout(() => {
           const p = this.pending.get(reqId);
           if (!p) return;
-          this.textFor.delete(p.chatId);
+          this.clearTextWait(p);
           this.pending.delete(reqId);
           void this.api
             .editMessageText(p.chatId, p.messageId ?? 0, "\u231B Question timed out \u2014 skipped.", {
@@ -119,6 +121,7 @@ export class AskUserService {
         this.pending.set(reqId, {
           resolve,
           chatId,
+          threadId: desc.threadId,
           sessionId,
           messageId: msg.message_id,
           questions,
@@ -151,7 +154,7 @@ export class AskUserService {
     }
     if (kind === "type") {
       p.waitingText = true;
-      this.textFor.set(p.chatId, reqId);
+      this.textFor.set(interactiveWaitKey(p.chatId, p.threadId), reqId);
       void this.api
         .editMessageText(
           p.chatId,
@@ -185,7 +188,7 @@ export class AskUserService {
       if (p.index < p.questions.length - 1) {
         p.index += 1;
         p.waitingText = false;
-        this.textFor.delete(p.chatId);
+        this.clearTextWait(p);
         void this.redraw(reqId, p);
         return "Next";
       }
@@ -195,7 +198,7 @@ export class AskUserService {
     if (kind === "prev" && p.index > 0) {
       p.index -= 1;
       p.waitingText = false;
-      this.textFor.delete(p.chatId);
+      this.clearTextWait(p);
       void this.redraw(reqId, p);
       return "Back";
     }
@@ -203,16 +206,19 @@ export class AskUserService {
   }
 
   /**
-   * If this chat is waiting for a typed answer, consume the text as free-form
-   * for the current question. Returns true when consumed (do not treat as a
-   * new agent prompt).
+   * If this forum topic / private chat is waiting for a typed answer, consume
+   * the text as free-form for the current question. Returns true when consumed
+   * (do not treat as a new agent prompt).
+   * `messageThreadId` must be the inbound Telegram thread so other topics in
+   * the same group cannot steal the reply.
    */
-  takeText(chatId: number, text: string): boolean {
-    const reqId = this.textFor.get(chatId);
+  takeText(chatId: number, text: string, messageThreadId?: number): boolean {
+    const reqId = this.lookupTextWait(chatId, messageThreadId);
     if (!reqId) return false;
     const p = this.pending.get(reqId);
     if (!p || !p.waitingText) {
-      this.textFor.delete(chatId);
+      this.textFor.delete(interactiveWaitKey(chatId, messageThreadId));
+      this.textFor.delete(interactiveWaitKey(chatId, forumThreadId(messageThreadId)));
       return false;
     }
     const q = p.questions[p.index];
@@ -222,7 +228,7 @@ export class AskUserService {
     p.notes.set(q.id, trimmed);
     p.picked.get(q.id)!.clear(); // free-text replaces option picks
     p.waitingText = false;
-    this.textFor.delete(chatId);
+    this.clearTextWait(p);
     void this.redraw(reqId, p);
     return true;
   }
@@ -232,12 +238,35 @@ export class AskUserService {
     let n = 0;
     for (const [reqId, p] of [...this.pending.entries()]) {
       if (p.sessionId !== sessionId) continue;
-      this.textFor.delete(p.chatId);
+      this.clearTextWait(p);
       this.settle(p, reqId, { outcome: "cancelled" }, "\u{1F510} (cancelled \u2014 turn stopped)");
       n++;
     }
     if (n > 0) log.info(`cancelled ${n} ask_user interview(s) for session ${sessionId.slice(0, 8)}`);
     return n;
+  }
+
+  private clearTextWait(p: { chatId: number; threadId?: number }): void {
+    this.textFor.delete(interactiveWaitKey(p.chatId, p.threadId));
+    // General may be stored as 1 but inbound messages sometimes omit thread id.
+    if (p.threadId === 1 || p.threadId === undefined) {
+      this.textFor.delete(interactiveWaitKey(p.chatId, 1));
+      this.textFor.delete(interactiveWaitKey(p.chatId, undefined));
+    }
+  }
+
+  private lookupTextWait(chatId: number, messageThreadId?: number): string | undefined {
+    const keys = [
+      interactiveWaitKey(chatId, messageThreadId),
+      interactiveWaitKey(chatId, forumThreadId(messageThreadId)),
+    ];
+    if (messageThreadId === undefined) keys.push(interactiveWaitKey(chatId, 1));
+    if (messageThreadId === 1) keys.push(interactiveWaitKey(chatId, undefined));
+    for (const k of keys) {
+      const id = this.textFor.get(k);
+      if (id) return id;
+    }
+    return undefined;
   }
 
   private async redraw(reqId: string, p: Pending): Promise<void> {
@@ -254,7 +283,7 @@ export class AskUserService {
   private settle(p: Pending, reqId: string, result: AskUserResult, text: string): void {
     clearTimeout(p.timer);
     this.pending.delete(reqId);
-    this.textFor.delete(p.chatId);
+    this.clearTextWait(p);
     if (p.messageId !== undefined) {
       void this.api
         .editMessageText(p.chatId, p.messageId, text, { reply_markup: { inline_keyboard: [] } })
