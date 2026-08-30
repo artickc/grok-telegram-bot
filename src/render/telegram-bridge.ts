@@ -25,10 +25,24 @@ export const TELEGRAM_SEND_PROMPT_MAX = 5;
 export type TelegramAction =
   | { action: "create_topic"; name: string; path?: string }
   | { action: "set_path"; topic: string; path: string }
-  | { action: "send_prompt"; topic: string; prompt: string; newSession?: boolean }
+  | {
+      action: "send_prompt";
+      topic: string;
+      prompt: string;
+      newSession?: boolean;
+      /** Resume this exact Grok session in the topic (full id or short prefix). */
+      sessionId?: string;
+    }
+  /** User-facing message in the current chat (General: only way to talk to the user). */
+  | { action: "notify"; text: string; important?: boolean }
   | { action: "search_memory"; query: string; limit?: number }
+  | { action: "list_topics" }
+  | { action: "list_jobs" }
   | { action: "list_bots" }
   | { action: "bot_command"; bot: string; command: string; args?: string };
+
+/** Max user-facing notify messages per turn (anti-spam). */
+export const TELEGRAM_NOTIFY_MAX = 3;
 
 export interface TelegramActionExtract {
   actions: TelegramAction[];
@@ -49,8 +63,11 @@ export const TELEGRAM_BRIDGE_DIRECTIVE_BASE = [
   '{ "telegram": [',
   '  { "action": "create_topic", "name": "Topic title", "path": "optional absolute project path or exact catalog name" },',
   '  { "action": "set_path", "topic": "Topic title or #threadId", "path": "absolute path or exact catalog name" },',
-  '  { "action": "send_prompt", "topic": "Topic title or #threadId", "prompt": "work for that topic", "new_session": false },',
+  '  { "action": "send_prompt", "topic": "ExactTopicTitle or #threadId", "prompt": "work for that topic", "new_session": false, "session_id": "optional-full-or-short-session-id" },',
+  '  { "action": "notify", "text": "short message for the user", "important": false },',
   '  { "action": "search_memory", "query": "keywords about past work", "limit": 8 },',
+  '  { "action": "list_topics" },',
+  '  { "action": "list_jobs" },',
   '  { "action": "list_bots" },',
   '  { "action": "bot_command", "bot": "username_without_at", "command": "status", "args": "optional" }',
   "] }",
@@ -62,22 +79,51 @@ export const TELEGRAM_BRIDGE_DIRECTIVE_BASE = [
   "- set_path — bind/rebind an existing topic to a project path (absolute dir or exact catalog name).",
   "  Absolute paths that do not exist yet are created on disk.",
   "- send_prompt — start or queue a prompt in another topic's session (does not wait for that turn to finish).",
-  "  From General/AI Chat (GROK_WORKSPACE) you can create a project topic, set_path, then send_prompt with multi-step work.",
-  "  topic = exact topic title, #threadId, \"general\", or \"ai chat\". Optional new_session=true starts a fresh session there.",
-  "- search_memory — search indexed forum topics + session titles/comments/history.",
+  "  From General (manager) you MUST create/set path then send_prompt — never code in General.",
+  "  Child sessions started from General auto report back with a MANAGER WORK REPORT when done.",
+  "  topic = EXACT forum title (from list_topics / memory), #threadId, \"general\", or \"ai chat\".",
+  "  NEVER use placeholders like \"…\", \"...\", \"topic\", \"there\" — call list_topics if unsure.",
+  "  Optional new_session=true starts a FRESH session in that topic.",
+  "  Optional session_id (full UUID or short prefix like 019fc9ec) RESUMES that exact session.",
+  "  When session_id is set, topic may be omitted — the bridge maps session path → topic.",
+  "  session_id is REQUIRED when memory found a related session and the user wants a follow-up there.",
+  "  Without session_id the bridge uses the topic's current foreground session (often wrong).",
+  "- notify — SEND a short message to the user in this chat. In General this is the ONLY user-facing channel.",
+  "  Quiet by default: process/search/dispatch WITHOUT notify. Use notify only for answers the user asked for,",
+  "  important failures, or outcomes they need to know. Max 3 per turn; prefer ONE short message.",
+  "  Never notify dispatch chatter, job tables, \"sending to…\", or cancel status spam.",
+  "- search_memory — search indexed forum topics + session titles/comments/history (memory-first).",
+  "- list_topics — list all mapped forum topics (name, #id, path, kind).",
+  "- list_jobs — list recent manager dispatches from General (status, target topic).",
   "- list_bots — list allowlisted sibling Telegram bots and command catalogs.",
   "- bot_command — /command@bot; waits for that bot to settle. NOT a Done; timeouts return ok=false.",
   "",
+  "Example (General — dispatch silently, one short user line):",
+  "```json",
+  '{ "telegram": [',
+  '  { "action": "send_prompt", "topic": "WindowsStoreListingGenerator", "session_id": "019fc9ec", "prompt": "Continue ship gate." },',
+  '  { "action": "notify", "text": "On it — continuing the ship gate in WindowsStoreListingGenerator." }',
+  "] }",
+  "```",
+  "",
+  "Example (session_id only — topic inferred from session path):",
+  "```json",
+  '{ "telegram": [',
+  '  { "action": "send_prompt", "session_id": "019fc9ec", "prompt": "Continue the related work." }',
+  "] }",
+  "```",
+  "",
   "Example (from General): create project topic + path + kick off work there:",
-  '```json',
+  "```json",
   '{ "telegram": [',
   '  { "action": "create_topic", "name": "MyApp", "path": "H:\\\\Projects\\\\MyApp" },',
-  '  { "action": "send_prompt", "topic": "MyApp", "prompt": "1) scaffold\\n2) tests\\n3) README" }',
+  '  { "action": "send_prompt", "topic": "MyApp", "new_session": true, "prompt": "1) scaffold\\n2) tests\\n3) README" },',
+  '  { "action": "notify", "text": "Created **MyApp** and started scaffolding there." }',
   "] }",
   "```",
   "",
   "After you emit these actions, the bridge runs them and may send TELEGRAM BRIDGE RESULTS. Use those facts; do not invent replies.",
-  "The bridge strips the JSON fence from the user-visible message. Prefer plain prose for the user; put protocol only in the fence.",
+  "The bridge strips the JSON fence. In General do NOT rely on free-form prose for the user — use notify.",
   "Do not spam actions. Prefer one orchestration block per turn.",
 ].join("\n");
 
@@ -87,6 +133,8 @@ export interface TelegramBridgeCaps {
   allowedBots: string[];
   /** username → command list for first-prompt teaching */
   botCommands?: Record<string, Array<{ command: string; description?: string }>>;
+  /** When true, General manager wording is appended. */
+  managerMode?: boolean;
 }
 
 /** Full first-prompt directive including live capabilities. */
@@ -95,7 +143,7 @@ export function buildTelegramBridgeDirective(caps: TelegramBridgeCaps): string {
   if (caps.forumReady && caps.topicGroupId !== undefined) {
     lines.push(
       `- Forum topics: READY (group ${caps.topicGroupId}). You may create_topic, set_path, and send_prompt.`,
-      `- General / AI Chat sessions use GROK_WORKSPACE; other topics use their bound project path.`,
+      `- General is the manager topic (orchestrates only). AI Chat uses GROK_WORKSPACE for coding there; project topics use their bound path.`,
     );
   } else if (caps.topicGroupId !== undefined) {
     lines.push(
@@ -123,7 +171,12 @@ export function buildTelegramBridgeDirective(caps: TelegramBridgeCaps): string {
       "- Sibling bots: none configured (ALLOWED_TELEGRAM_BOTS empty). list_bots returns empty; bot_command disabled.",
     );
   }
-  lines.push("- search_memory: always available against bot-owned session/topic indexes.");
+  lines.push("- search_memory / list_topics / list_jobs: available against bot-owned indexes.");
+  if (caps.managerMode) {
+    lines.push(
+      "- You are in General manager mode: chat-like replies only; memory-first; dispatch via send_prompt; child work auto-reports back.",
+    );
+  }
   return lines.join("\n");
 }
 
@@ -165,6 +218,7 @@ export function buildTelegramBridgeResultsPrompt(results: unknown[]): string {
     payload,
     "```",
     "Continue the user's task with this information. Do not ask the user to paste results. Do not re-emit the same telegram actions unless something failed and a retry is useful.",
+    "Quiet: if actions succeeded, prefer silent continue or one short notify — never dump job tables or dispatch narration.",
   ].join("\n");
 }
 
@@ -190,7 +244,7 @@ export function extractTelegramActions(text: string): TelegramActionExtract {
   cleaned = cleaned.replace(/```(?:json|JSON)?\s*\r?\n[\s\S]*$/i, (tail) => {
     if (
       /"telegram"\s*:/i.test(tail) ||
-      /"action"\s*:\s*"(?:create_topic|set_path|send_prompt|search_memory|list_bots|bot_command)"/i.test(
+      /"action"\s*:\s*"(?:create_topic|set_path|send_prompt|notify|search_memory|list_topics|list_jobs|list_bots|bot_command)"/i.test(
         tail,
       )
     ) {
@@ -280,19 +334,58 @@ function normalizeAction(item: unknown): TelegramAction | undefined {
     case "send_prompt":
     case "topic_prompt":
     case "prompt_topic": {
-      const topic = String(rec.topic ?? rec.name ?? rec.thread ?? rec.thread_id ?? rec.threadId ?? "").trim();
+      let topic = String(rec.topic ?? rec.name ?? rec.thread ?? rec.thread_id ?? rec.threadId ?? "").trim();
       const prompt = String(rec.prompt ?? rec.text ?? rec.message ?? "").trim();
-      if (!topic || !prompt) return undefined;
       const newSessionRaw = rec.new_session ?? rec.newSession ?? rec.fresh;
       const newSession =
         newSessionRaw === true ||
         newSessionRaw === 1 ||
         /^(1|true|yes|y)$/i.test(String(newSessionRaw ?? "").trim());
+      const sessionIdRaw = String(
+        rec.session_id ?? rec.sessionId ?? rec.sess ?? rec.session ?? "",
+      ).trim();
+      const sessionId = sessionIdRaw
+        ? sessionIdRaw.replace(/^#?sess[_-]?/i, "").slice(0, 64)
+        : undefined;
+      // Drop placeholder topics ("…") so resolve can use session_id / memory inference.
+      if (
+        !topic ||
+        /^[\s.…·•⋯︙\-–—_*~`'"“”‘’\u2026\u22ef\u3002]+$/u.test(topic) ||
+        /^(topic|there|here|same|related|todo|tbd|none|null|target)$/i.test(topic)
+      ) {
+        topic = "";
+      }
+      // topic optional when session_id is present OR prompt alone (memory may infer topic).
+      if (!prompt) return undefined;
+      // Allow prompt-only send_prompt: bridge may infer topic from memory + user ask.
+      // Still require at least something actionable (prompt is enough).
+      // Full prompt for the target agent — do NOT hard-crop to Telegram size.
+      // Long prompts are split only in the human-visible announce message.
+      const PROMPT_MAX = 100_000;
       return {
         action: "send_prompt",
         topic: topic.slice(0, 128),
-        prompt: prompt.slice(0, 4000),
+        prompt: prompt.length > PROMPT_MAX ? prompt.slice(0, PROMPT_MAX) : prompt,
         newSession: newSession || undefined,
+        // session_id wins over new_session when both are set (resume is explicit).
+        sessionId: sessionId || undefined,
+      };
+    }
+    case "notify":
+    case "message_user":
+    case "say":
+    case "tell_user": {
+      const text = String(rec.text ?? rec.message ?? rec.body ?? rec.prompt ?? "").trim();
+      if (!text) return undefined;
+      const impRaw = rec.important ?? rec.priority ?? rec.loud;
+      const important =
+        impRaw === true ||
+        impRaw === 1 ||
+        /^(1|true|yes|y|high|urgent|important)$/i.test(String(impRaw ?? "").trim());
+      return {
+        action: "notify",
+        text: text.slice(0, 3500),
+        important: important || undefined,
       };
     }
     case "search_memory":
@@ -305,6 +398,13 @@ function normalizeAction(item: unknown): TelegramAction | undefined {
       limit = Math.max(1, Math.min(20, Math.round(limit)));
       return { action: "search_memory", query: query.slice(0, 300), limit };
     }
+    case "list_topics":
+    case "topics":
+      return { action: "list_topics" };
+    case "list_jobs":
+    case "jobs":
+    case "manager_jobs":
+      return { action: "list_jobs" };
     case "list_bots":
     case "bots":
       return { action: "list_bots" };
@@ -332,6 +432,7 @@ function normalizeAction(item: unknown): TelegramAction | undefined {
 function capBotCommands(actions: TelegramAction[]): TelegramAction[] {
   let botCmds = 0;
   let sendPrompts = 0;
+  let notifies = 0;
   const out: TelegramAction[] = [];
   for (const a of actions) {
     if (a.action === "bot_command") {
@@ -341,6 +442,10 @@ function capBotCommands(actions: TelegramAction[]): TelegramAction[] {
     if (a.action === "send_prompt") {
       if (sendPrompts >= TELEGRAM_SEND_PROMPT_MAX) continue;
       sendPrompts++;
+    }
+    if (a.action === "notify") {
+      if (notifies >= TELEGRAM_NOTIFY_MAX) continue;
+      notifies++;
     }
     out.push(a);
     if (out.length >= TELEGRAM_ACTION_MAX) break;

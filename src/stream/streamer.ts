@@ -18,6 +18,7 @@ import { estimateProgress } from "../render/progress-estimate.js";
 import { stripTelegramActionFences } from "../render/telegram-bridge.js";
 import { truncateMiddle } from "../render/truncate.js";
 import { safeEdit, safeSend } from "../bot/telegram-io.js";
+import { outboundThreadExtra } from "../forum/thread.js";
 
 const SOFT_LIMIT = 3500;
 /** Display budget for a thinking block (middle-truncated; session context keeps all). */
@@ -29,6 +30,18 @@ interface Seg {
   text: string;
   /** When set, later tool updates replace this segment instead of appending. */
   toolId?: string;
+}
+
+export interface StreamerOptions {
+  /** Chat-like mode: drop thoughts/tools/plan; only stream agent prose. */
+  proseOnly?: boolean;
+  /** When false, never render a progress bar (manager chat). Default true. */
+  showProgressBar?: boolean;
+  /**
+   * Pre-posted message id to edit in place (e.g. General "Thinking…" placeholder).
+   * Avoids a separate bubble when the first real tokens arrive.
+   */
+  seedMessageId?: number;
 }
 
 export class ResponseStreamer {
@@ -54,6 +67,8 @@ export class ResponseStreamer {
    * the progress bar when set — done / in-progress / pending steps.
    */
   private planMarkdown: string | undefined;
+  private readonly proseOnly: boolean;
+  private readonly showProgressBar: boolean;
 
   constructor(
     private readonly api: Api,
@@ -68,12 +83,27 @@ export class ResponseStreamer {
     private readonly turnStartedAt = Date.now(),
     /** Forum topic thread — required so stream edits land in the right topic. */
     private readonly messageThreadId?: number,
-  ) {}
+    opts?: StreamerOptions,
+  ) {
+    this.proseOnly = !!opts?.proseOnly;
+    this.showProgressBar = opts?.showProgressBar !== false;
+    if (opts?.seedMessageId !== undefined) this.liveId = opts.seedMessageId;
+  }
 
   /** Replace the hashtag footer (used after a logical fork swaps the session id
    *  mid-turn, so the streamed response carries the NEW session's tags). */
   setFooter(footer: string): void {
     this.footer = footer;
+  }
+
+  /** Seed/replace the live bubble id (General Thinking… placeholder). */
+  seedLiveMessage(messageId: number): void {
+    this.liveId = messageId;
+  }
+
+  /** Current live Telegram message id (for attaching suggestions after finalize). */
+  get liveMessageId(): number | undefined {
+    return this.liveId;
   }
 
   /** "\n\n<footer>" appended to every finished message bubble (e.g. hashtags). */
@@ -94,6 +124,7 @@ export class ResponseStreamer {
    *  and notifying the owner on change. Agent markers are authoritative: once
    *  one arrives, the bot fallback stops contributing. */
   private setProgressValue(pct: number, fromAgent: boolean): void {
+    if (!this.showProgressBar) return;
     if (fromAgent) this.agentReported = true;
     const next = Math.max(this.progress ?? 0, Math.round(pct));
     if (next === this.progress) return;
@@ -108,7 +139,7 @@ export class ResponseStreamer {
   /** Advance the fallback estimate from real activity signals, but only while
    *  the agent itself hasn't reported a value. No-op when fallback is off. */
   private applyFallback(): void {
-    if (!this.fallbackEnabled || this.agentReported) return;
+    if (!this.showProgressBar || !this.fallbackEnabled || this.agentReported) return;
     const est = estimateProgress({
       toolCalls: this.toolCalls,
       outputChars: this.outChars,
@@ -121,12 +152,13 @@ export class ResponseStreamer {
   /** Called when the turn finishes successfully: if the agent never reported
    *  its own progress, fill the fallback bar to 100. No-op otherwise. */
   completeFallback(): void {
-    if (!this.fallbackEnabled || this.agentReported) return;
+    if (!this.showProgressBar || !this.fallbackEnabled || this.agentReported) return;
     this.setProgressValue(100, false);
   }
 
   private threadExtra(): Record<string, unknown> {
-    return this.messageThreadId !== undefined ? { message_thread_id: this.messageThreadId } : {};
+    // Never send message_thread_id=1 (General) — Telegram rejects it.
+    return outboundThreadExtra(this.messageThreadId);
   }
 
   /** reply_parameters threading EVERY message of the turn to the user's prompt,
@@ -148,7 +180,7 @@ export class ResponseStreamer {
   }
 
   appendThought(text: string): void {
-    if (!text) return;
+    if (!text || this.proseOnly) return;
     this.thoughtChars += text.length;
     this.merge("think", text);
     this.schedule();
@@ -159,7 +191,7 @@ export class ResponseStreamer {
    * for ACP tool calls that stream progress/output under a stable toolCallId.
    */
   addTool(rawMarkdown: string): void {
-    if (!rawMarkdown) return;
+    if (!rawMarkdown || this.proseOnly) return;
     this.toolCalls += 1;
     this.segs.push({ kind: "tool", text: rawMarkdown });
     this.schedule();
@@ -172,6 +204,7 @@ export class ResponseStreamer {
    */
   /** Replace the live plan board (or clear with empty/undefined). */
   setPlan(markdown: string | undefined): void {
+    if (this.proseOnly) return;
     const next = markdown?.trim() ? markdown.trim() : undefined;
     if (next === this.planMarkdown) return;
     this.planMarkdown = next;
@@ -179,7 +212,7 @@ export class ResponseStreamer {
   }
 
   upsertTool(toolId: string | undefined, rawMarkdown: string): void {
-    if (!rawMarkdown) return;
+    if (!rawMarkdown || this.proseOnly) return;
     const id = (toolId || "").trim();
     if (id) {
       // Replace any existing segment with this id (newest first; includes rare
@@ -204,8 +237,9 @@ export class ResponseStreamer {
     this.schedule();
   }
 
+  /** True when agent prose/tools/thoughts were appended (not just a seed bubble). */
   get hasOutput(): boolean {
-    return this.liveId !== undefined || this.segs.some((s) => s.text.trim().length > 0);
+    return this.segs.some((s) => s.text.trim().length > 0);
   }
 
   async finalize(): Promise<void> {
@@ -213,6 +247,18 @@ export class ResponseStreamer {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.flush(true);
+    // Seeded Thinking… with zero agent text: clear the placeholder.
+    if (
+      this.proseOnly &&
+      this.liveId !== undefined &&
+      !this.segs.some((s) => s.text.trim().length > 0)
+    ) {
+      try {
+        await this.api.editMessageText(this.chatId, this.liveId, "\u2026");
+      } catch {
+        /* non-fatal */
+      }
+    }
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -251,8 +297,8 @@ export class ResponseStreamer {
       // Live bubble: body → plan (always above progress) → progress bar → footer.
       const parts: string[] = [];
       if (base.trim()) parts.push(base);
-      if (this.planMarkdown) parts.push(this.planMarkdown);
-      if (this.progress !== undefined) parts.push(progressBar(this.progress));
+      if (!this.proseOnly && this.planMarkdown) parts.push(this.planMarkdown);
+      if (this.showProgressBar && this.progress !== undefined) parts.push(progressBar(this.progress));
       if (parts.length === 0) return;
       const src = `${parts.join("\n\n")}${this.footerSuffix()}`;
       const rendered = toTelegramMarkdown(src);

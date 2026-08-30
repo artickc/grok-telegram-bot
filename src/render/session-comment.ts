@@ -52,6 +52,14 @@ export function cleanCommentLine(raw: string, max = COMMENT_MAX): string {
  */
 export function stripDirectiveWrappers(raw: string): string {
   let t = raw.trim().replace(/^\([^)]*\)\s*/, "");
+  // Manager context + work reports (meta).
+  if (/^MANAGER WORK REPORT \(system/i.test(t)) t = "";
+  if (/MANAGER CONTEXT \(auto/i.test(t)) {
+    t = t.replace(/MANAGER CONTEXT \(auto[\s\S]*?\n---\n\n/i, "");
+  }
+  if (/^MANAGER MODE \(General topic/i.test(t)) {
+    t = t.replace(/^MANAGER MODE \(General topic[\s\S]*?User message:\s*/i, "");
+  }
   const marker = "User's new message:";
   const i = t.lastIndexOf(marker);
   if (i !== -1) t = t.slice(i + marker.length);
@@ -68,6 +76,7 @@ export function stripDirectiveWrappers(raw: string): string {
     }
   }
   if (/^TELEGRAM BRIDGE RESULTS \(system/i.test(t.trim())) t = "";
+  if (/^MANAGER WORK REPORT \(system/i.test(t.trim())) t = "";
   return t.trim();
 }
 
@@ -81,6 +90,7 @@ export function cleanUserPreview(raw: string, max = COMMENT_MAX): string {
   if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t)) return "";
   if (/^FOLLOW-UP SUGGESTIONS \(meta only\)/i.test(t)) return "";
   if (/^TELEGRAM BRIDGE RESULTS \(system/i.test(t)) return "Telegram bridge";
+  if (/^MANAGER WORK REPORT \(system/i.test(t)) return "Manager work report";
   return cleanCommentLine(t, max);
 }
 

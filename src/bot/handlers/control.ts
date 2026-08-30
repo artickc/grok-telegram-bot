@@ -1,5 +1,5 @@
 /**
- * Control commands: /start /help /status /new /cancel /stop /btw /flush /menu.
+ * Control commands: /start /help /status /new /cancel /stop /btw /goal /flush /menu.
  *
  * Slash messages are deleted instantly by bot.ts middleware; handlers post
  * bot status messages so the user always sees the bot is alive (CLI can be slow).
@@ -14,7 +14,9 @@ import { refreshMenu } from "../menu/refresh.js";
 import { adoptUserPrompt } from "../prompt-anchor.js";
 import { extractReplyContext } from "../reply-context.js";
 import { resolveScope } from "../scope.js";
+import { isGeneralThread } from "../../forum/thread.js";
 import { openMainMenu } from "./menu.js";
+import { formatGoalUsage, normalizeGoalSlashLine } from "../goal-command.js";
 
 export function registerControl(bot: Bot, deps: BotDeps): void {
   bot.command("start", async (ctx) => {
@@ -130,6 +132,61 @@ export function registerControl(bot: Bot, deps: BotDeps): void {
       }
       await ctx.reply(
         `\u{1F4E5} Queued (position ${scope.rt.queueLength}) \u2014 it'll run automatically as soon as the current task finishes.`,
+        extra,
+      );
+    }
+  });
+
+  /**
+   * Forward Grok Build `/goal` into the current topic session as a raw slash
+   * command (must stay first text — no manager/complexity wrappers).
+   */
+  bot.command("goal", async (ctx) => {
+    const scope = resolveScope(ctx, deps);
+    const args = (ctx.match || "").toString().trim();
+    const slash = normalizeGoalSlashLine(args);
+    if (!slash) {
+      await ctx.reply(formatGoalUsage(), scope.threadExtra);
+      return;
+    }
+    // General is orchestration-only — goals belong in project topics / AI Chat.
+    if (scope.isForum && isGeneralThread(scope.threadId)) {
+      await ctx.reply(
+        "Use /goal in a **project topic** or **AI Chat**, not in General.\n\n" +
+          formatGoalUsage(),
+        scope.threadExtra,
+      );
+      return;
+    }
+    const userMsgId = ctx.message?.message_id;
+    const preview =
+      slash.length > 200 ? slash.slice(0, 197) + "\u2026" : slash;
+    const anchor = await adoptUserPrompt(deps.api, {
+      chatId: ctx.chat.id,
+      text: preview,
+      userMessageIds: userMsgId !== undefined ? [userMsgId] : [],
+      messageThreadId: scope.threadExtra.message_thread_id,
+      projectName: scope.rt.projectName,
+      prefix: "\u{1F3AF} /goal",
+    });
+    await ctx.reply("\u{1F3AF} Starting goal\u2026", scope.threadExtra).catch(() => {});
+    const outcome = await scope.rt.submit(
+      textPrompt(slash, anchor?.replyTo ?? userMsgId, undefined, {
+        skipSelfRecheck: true,
+        rawSlashCommand: true,
+        promptId: anchor?.promptId,
+      }),
+    );
+    if (outcome === "queued") {
+      const extra: Record<string, unknown> = { ...scope.threadExtra };
+      if (anchor?.replyTo !== undefined) {
+        extra.reply_parameters = {
+          message_id: anchor.replyTo,
+          allow_sending_without_reply: true,
+        };
+      }
+      await ctx.reply(
+        `\u{1F4E5} Goal queued (position ${scope.rt.queueLength}) \u2014 runs after the current turn.`,
         extra,
       );
     }

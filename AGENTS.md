@@ -31,12 +31,21 @@ src/
 ├── sessions/    Session discovery, history parser, live tail
 ├── projects/    Project directory discovery
 ├── mcp/         MCP config (list/toggle) + live health probe
-├── render/      Markdown → MarkdownV2, diffs, tool formatting, chunking
-├── stream/      Incremental edit-streaming
+├── render/      Markdown → MarkdownV2, diffs, tool formatting, chunking, manager directive
+├── stream/      Incremental edit-streaming (prose-only for General manager)
 ├── service/     Cross-platform daemon (windows/linux/macos + selector)
 ├── tasks/       Scheduled tasks
-└── bot/         grammY bot, per-chat runtime, handlers
+├── forum/       Forum topics + General manager thread helpers
+└── bot/         grammY bot, per-chat runtime, handlers, manager-jobs/context
 ```
+
+## General manager mode (forum)
+
+The Telegram **General** topic (`FORUM_GENERAL_THREAD_ID = 1`) is a **manager**:
+chat-like orchestration only. Project work is dispatched with `send_prompt` into
+topic sessions; completions wake General via `MANAGER WORK REPORT`. Do not add
+coding progress UX, self-recheck, or multi-session noise to General without an
+explicit product decision. AI Chat remains a normal workspace coding topic.
 
 ## Conventions (must follow)
 

@@ -10,7 +10,14 @@ import {
   TELEGRAM_BRIDGE_MARKER,
   TELEGRAM_BRIDGE_RESULTS_MARKER,
 } from "../render/telegram-bridge.js";
+import {
+  MANAGER_DIRECTIVE_MARKER,
+  MANAGER_WORK_REPORT_MARKER,
+} from "../render/manager-directive.js";
 import type { HistoryEntry, HistoryRole } from "./types.js";
+
+/** Keep in sync with bot/manager-context.ts (avoid sessions→bot import). */
+const MANAGER_CONTEXT_MARKER = "MANAGER CONTEXT (auto — use before dispatching work):";
 
 const TAIL_WINDOWS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024]; // grow until entries found
 
@@ -261,6 +268,17 @@ function cleanStoredText(text: string): string {
   if (/^SELF-RECHECK DECISION \(meta only\)/i.test(t.trim())) t = "";
   if (/^SELF-RECHECK \(automatic quality pass/i.test(t.trim())) t = "";
   if (t.trimStart().startsWith(TELEGRAM_BRIDGE_RESULTS_MARKER)) t = "";
+  if (t.trimStart().startsWith(MANAGER_WORK_REPORT_MARKER)) t = "";
+  // Manager directive / context: keep only the user message tail.
+  if (t.includes(MANAGER_CONTEXT_MARKER)) {
+    const split = t.split(/\n---\n\n/);
+    if (split.length > 1) t = split.slice(1).join("\n---\n\n").trim();
+  }
+  if (t.includes(MANAGER_DIRECTIVE_MARKER)) {
+    const um = "User message:";
+    const ui = t.lastIndexOf(um);
+    if (ui !== -1) t = t.slice(ui + um.length).trim();
+  }
   return t;
 }
 

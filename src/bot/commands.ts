@@ -24,6 +24,7 @@ export const COMMANDS: { command: string; description: string }[] = [
   { command: "projects", description: "Projects: list / search / open / new" },
   // Queue
   { command: "btw", description: "Run ASAP: /btw <text>" },
+  { command: "goal", description: "Grok goal mode: /goal <objective|status|pause|resume|clear>" },
   { command: "flush", description: "Send queued follow-ups now" },
   { command: "queue", description: "Show queued follow-ups" },
   // Account
@@ -54,6 +55,7 @@ export const GROUP_COMMANDS: { command: string; description: string }[] = [
   { command: "running", description: "Sessions this topic controls" },
   { command: "sessions", description: "List / resume sessions" },
   { command: "btw", description: "Queue or run: /btw <text>" },
+  { command: "goal", description: "Goal mode: /goal <objective|status|pause|…>" },
   { command: "flush", description: "Run queued follow-ups now" },
   { command: "model", description: "Switch model: /model <id>" },
   { command: "help", description: "Show help" },
@@ -88,6 +90,7 @@ export const HELP_TEXT = [
   "COMMANDS (more)",
   "/projects \u2014 choose which folder Grok works in (private chats)",
   "/btw <text> \u2014 run now if idle, else right after the current task",
+  "/goal <objective|status|pause|resume|clear> \u2014 Grok run-until-done goal (project topic / AI Chat)",
   "/flush \u2014 run queued follow-ups immediately",
   "/reauth \u2014 sign in to Grok",
   "/accounts \u2014 switch saved Grok accounts",

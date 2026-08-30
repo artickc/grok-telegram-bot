@@ -318,6 +318,8 @@ export class GrokClient extends EventEmitter {
     log.info(`spawning: ${this.opts.grokCliPath} ${args.join(" ")}`);
     const env = { ...process.env };
     if (this.opts.apiKey) env.XAI_API_KEY = this.opts.apiKey;
+    // Ensure Grok Build goal mode is available for /goal over ACP.
+    if (env.GROK_GOAL === undefined || env.GROK_GOAL === "") env.GROK_GOAL = "1";
     const proc = spawn(this.opts.grokCliPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.opts.workspace,

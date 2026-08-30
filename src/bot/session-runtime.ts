@@ -23,7 +23,7 @@ import { type PromptInput, type ReasoningEffort, textPrompt } from "../app/types
 import { createLogger } from "../logger.js";
 import { buildTranscript, readHistory } from "../sessions/history.js";
 import { sessionHashtags } from "../render/hashtags.js";
-import { PROGRESS_DIRECTIVE } from "../render/progress.js";
+import { extractProgress, PROGRESS_DIRECTIVE } from "../render/progress.js";
 import { buildPriming, recentTranscript } from "./session-fork.js";
 import { TailWatcher } from "../sessions/tail.js";
 import type { HistoryEntry } from "../sessions/types.js";
@@ -63,14 +63,30 @@ import {
   suggestionsKeyboard,
 } from "./suggestions.js";
 import type { ForumManager } from "../forum/manager.js";
+import { isGeneralThread, outboundThreadExtra } from "../forum/thread.js";
 import type { SessionStore } from "../sessions/store.js";
 import type { TelegramBotService } from "./telegram-bots.js";
 import { executeTelegramActions } from "./telegram-actions.js";
+import {
+  buildManagerContextBlock,
+  injectManagerContext,
+} from "./manager-context.js";
+import {
+  bindJobSession,
+  updateManagerJob,
+  type ReportBackMeta,
+} from "./manager-jobs.js";
+import {
+  buildManagerWorkReportPrompt,
+  isManagerWorkReportPrompt,
+  wrapManagerDirective,
+} from "../render/manager-directive.js";
 import {
   buildTelegramBridgeDirective,
   buildTelegramBridgeResultsPrompt,
   extractTelegramActions,
   isTelegramBridgeResultsPrompt,
+  stripTelegramActionFences,
   wrapTelegramBridgePrompt,
 } from "../render/telegram-bridge.js";
 import {
@@ -206,7 +222,23 @@ export class SessionRuntime {
     bots: TelegramBotService;
     /** Cross-topic prompt dispatch (create_topic → send_prompt orchestration). */
     submitTopicPrompt?: import("./telegram-actions.js").SubmitTopicPromptFn;
+    /** Wake General manager with a work-report prompt. */
+    wakeManager?: (opts: {
+      originChatId: number;
+      originThreadId: number;
+      prompt: string;
+    }) => Promise<void>;
   };
+  /**
+   * Report-back for the *current* turn chain (dispatch + recheck/suggestions).
+   * Set from PromptInput.reportBack at turn start; kept until queue drains.
+   */
+  private pendingReportBack: ReportBackMeta | undefined;
+  /**
+   * Staged by {@link setReportBack} and attached to the next {@link submit}
+   * so concurrent dispatches carry their own job through the queue.
+   */
+  private stagedReportBack: ReportBackMeta | undefined;
   /** Last credits total reported for this session (for per-turn delta accounting). */
   private lastReportedCredits = 0;
   /** Live "what is happening now" line while a turn is in flight (tools/plan). */
@@ -227,6 +259,15 @@ export class SessionRuntime {
   /** Quiet meta capture (suggestions) — never stream to Telegram. */
   private capturingQuiet = false;
   private quietCaptureBuf = "";
+  /**
+   * General manager: Thinking… / Starting… bubble for this turn (deleted when
+   * silent, or replaced by a single fallback reply).
+   */
+  private managerStatusMsgId: number | undefined;
+  /** Count of successful notify actions this turn (user-facing messages). */
+  private managerNotifyCount = 0;
+  /** True when this turn already delivered at least one user-visible message. */
+  private managerUserVisible = false;
   /**
    * Done delivery bookkeeping for this turn: expect a loud Done ping, and whether
    * one was successfully sent (finally forces a short Done if expected but missing).
@@ -269,6 +310,15 @@ export class SessionRuntime {
   readonly messageThreadId: number | undefined;
   /** Settings storage key (`chatId` or `chatId:t{threadId}`). */
   readonly settingsKey: string;
+  /**
+   * General topic only: OpenClaw-style manager chat (orchestrate, no coding UX).
+   */
+  readonly managerMode: boolean;
+  /**
+   * Optional: register Telegram message id → session for General reply-routing
+   * (user message, Done, stream bubbles). Wired by ChatController.
+   */
+  onTelegramMessageBound: ((messageId: number, sessionId: string) => void) | undefined;
 
   constructor(
     private readonly api: Api,
@@ -286,6 +336,9 @@ export class SessionRuntime {
   ) {
     this.messageThreadId = init?.messageThreadId;
     this.settingsKey = init?.settingsKey ?? String(chatId);
+    // Only the forum General topic is the manager — not AI Chat / private DMs.
+    this.managerMode =
+      this.messageThreadId !== undefined && isGeneralThread(this.messageThreadId);
     if (init) {
       this.cwd = init.cwd;
       this.projectName = init.projectName;
@@ -328,7 +381,25 @@ export class SessionRuntime {
 
   /** Latest task-completion % (0–100) parsed this turn, or undefined if none. */
   get taskProgress(): number | undefined {
+    // Manager chat never shows a progress bar.
+    if (this.managerMode) return undefined;
     return this.progress;
+  }
+
+  /**
+   * Stage report-back for the next {@link submit} (General → project dispatch).
+   * Attached to that prompt so a second dispatch cannot steal the first job's
+   * completion report when the child session is busy/queued.
+   */
+  setReportBack(meta: ReportBackMeta): void {
+    if (this.stagedReportBack && this.stagedReportBack.jobId !== meta.jobId) {
+      updateManagerJob(this.stagedReportBack.jobId, {
+        status: "cancelled",
+        resultSummary: "superseded by a newer manager dispatch before start",
+      });
+    }
+    this.stagedReportBack = meta;
+    if (this.sessionId) bindJobSession(meta.jobId, this.sessionId);
   }
 
   /**
@@ -463,9 +534,9 @@ export class SessionRuntime {
     if (value) {
       // A turn was started here and is still in flight, but its streamer was
       // finalized when we went background. Recreate it and let onUpdate feed
-      // the remaining chunks/thoughts/tools just like a normal live turn вЂ” we
-      // own the agent's session/update events, so no tail-watch is needed.
-      if (this.busy && !this.streamer) {
+      // the remaining chunks/thoughts/tools just like a normal live turn.
+      // Manager mode never streams (quiet notify-only) — skip streamer rebuild.
+      if (this.busy && !this.streamer && !this.managerMode) {
         // Any transient follow-watch of this session is now superseded.
         if (this.watchIsFollow) this.stopWatch();
         this.streamer = new ResponseStreamer(
@@ -488,6 +559,7 @@ export class SessionRuntime {
     } else {
       this.typing.stop();
       this.stopWatch();
+      // Seal live bubble when demoted (manager has no streamer).
       if (this.streamer) {
         // Finalize off the critical path so project/session switches never wait
         // on Telegram edits of the previous live stream.
@@ -703,14 +775,22 @@ export class SessionRuntime {
 
   async submit(input: PromptInput): Promise<"ran" | "queued"> {
     await this.ensureSession();
+    // Attach staged manager report-back to this prompt (FIFO through the queue).
+    let toSubmit = input;
+    if (this.stagedReportBack) {
+      const rb = this.stagedReportBack;
+      this.stagedReportBack = undefined;
+      toSubmit = input.reportBack ? input : { ...input, reportBack: rb };
+      if (this.sessionId) bindJobSession(rb.jobId, this.sessionId);
+    }
     if (this.busy) {
-      this.queue.push(input);
+      this.queue.push(toSubmit);
       this.changed();
       return "queued";
     }
     // First-prompt steering is applied inside runTurn so queued first messages
     // (and flushQueue) get the same complexity + telegram bridge directives.
-    void this.runTurn(input);
+    void this.runTurn(toSubmit);
     return "ran";
   }
 
@@ -726,16 +806,28 @@ export class SessionRuntime {
       topicGroupId: this.cfg.topicGroupId,
       allowedBots: this.cfg.allowedTelegramBots,
       botCommands: this.cfg.telegramBotCommands,
+      managerMode: this.managerMode,
     });
   }
 
   /**
    * Complexity + telegram bridge teaching on the first prompt of a brand-new
    * conversation only (no prior user turns in this process / session jsonl).
+   * Manager mode uses MANAGER_DIRECTIVE instead of complexity/progress coding UX.
    */
   private applyFirstPromptSteering(input: PromptInput): PromptInput {
+    // Grok slash commands (/goal …) must stay the first agent text.
+    if (input.rawSlashCommand) return input;
     if (!this.shouldSteerFirstPrompt(input)) return input;
-    let toRun = wrapAutoComplexityPrompt(input);
+    let toRun: PromptInput;
+    if (this.managerMode) {
+      toRun = wrapManagerDirective(input);
+      toRun = wrapTelegramBridgePrompt(toRun, this.telegramBridgeDirective());
+      this.markFirstPromptSteered();
+      log.info(`chat ${this.chatId}: first-prompt manager + telegram bridge applied`);
+      return toRun;
+    }
+    toRun = wrapAutoComplexityPrompt(input);
     toRun = wrapTelegramBridgePrompt(toRun, this.telegramBridgeDirective());
     this.markFirstPromptSteered();
     log.info(`chat ${this.chatId}: first-prompt complexity + telegram bridge applied`);
@@ -756,7 +848,8 @@ export class SessionRuntime {
     if (
       input.skipSelfRecheck ||
       isSelfRecheckPrompt(input.text) ||
-      isTelegramBridgeResultsPrompt(input.text)
+      isTelegramBridgeResultsPrompt(input.text) ||
+      isManagerWorkReportPrompt(input.text)
     ) {
       return false;
     }
@@ -772,6 +865,31 @@ export class SessionRuntime {
       /* treat as fresh */
     }
     return true;
+  }
+
+  /** Memory + topic catalog inject for every real manager user turn. */
+  private applyManagerContext(input: PromptInput): PromptInput {
+    if (!this.managerMode) return input;
+    if (input.rawSlashCommand) return input;
+    if (
+      isTelegramBridgeResultsPrompt(input.text) ||
+      isManagerWorkReportPrompt(input.text) ||
+      isSelfRecheckPrompt(input.text)
+    ) {
+      return input;
+    }
+    if (!this.bridge) return input;
+    const userText = stripDirectiveWrappers(input.text) || input.text;
+    const block = buildManagerContextBlock({
+      userText,
+      sessionsDir: this.cfg.sessionsDir,
+      store: this.bridge.store,
+      forum: this.bridge.forum,
+    });
+    return {
+      ...input,
+      text: injectManagerContext(input.text, block),
+    };
   }
 
   /**
@@ -904,6 +1022,7 @@ export class SessionRuntime {
     // Apply before any turn bookkeeping so card previews / logs see the wrapped
     // text the same way the agent does (also covers flushQueue first messages).
     input = this.applyFirstPromptSteering(input);
+    input = this.applyManagerContext(input);
 
     this.busy = true;
     this.cancelled = false;
@@ -914,20 +1033,29 @@ export class SessionRuntime {
     this.cardThinking = "";
     this.turnExpectDone = false;
     this.turnDonePinged = false;
+    // Drop any orphaned Thinking… from a prior turn (e.g. bridge-chain defer).
+    if (this.managerStatusMsgId !== undefined) {
+      const orphan = this.managerStatusMsgId;
+      this.managerStatusMsgId = undefined;
+      void this.deleteManagerStatus(orphan);
+    }
     this.isSelfRecheckTurn = isSelfRecheckPrompt(input.text);
-    // Meta turns (recheck, bridge results, auto-suggestion batches) never arm another recheck.
+    // Meta turns (recheck, bridge results, work reports) never arm another recheck.
     const isBridgeResults = isTelegramBridgeResultsPrompt(input.text);
+    const isWorkReport = isManagerWorkReportPrompt(input.text);
     this.skipSelfRecheck =
       !!input.skipSelfRecheck ||
       this.isSelfRecheckTurn ||
-      isBridgeResults;
+      isBridgeResults ||
+      isWorkReport ||
+      this.managerMode;
     // Fresh user work resets bridge-chain depth + suggestion anchors.
-    if (!this.isSelfRecheckTurn && !isBridgeResults) {
+    if (!this.isSelfRecheckTurn && !isBridgeResults && !isWorkReport) {
       this.bridgeResultDepth = 0;
     }
     // Fresh user work resets suggestion anchors; recheck / bridge results keep the original ask.
     // Strip complexity/reply wrappers so suggestions + recheck see the real ask.
-    if (!this.isSelfRecheckTurn && !isBridgeResults) {
+    if (!this.isSelfRecheckTurn && !isBridgeResults && !isWorkReport) {
       this.suggestionUserText = stripDirectiveWrappers(input.text) || input.text;
       this.preRecheckAssistantText = "";
       this.preRecheckFileOps = new Map();
@@ -941,6 +1069,15 @@ export class SessionRuntime {
         this.cardUserPrompt = preview;
         this.setSessionComment(preview);
       }
+    }
+    // Bind THIS prompt's report-back (manager dispatch). Meta follow-ups
+    // (recheck / bridge results) omit reportBack and keep the prior job until
+    // the queue drains and we report once.
+    if (input.reportBack) {
+      this.pendingReportBack = input.reportBack as ReportBackMeta;
+    }
+    if (this.pendingReportBack && this.sessionId) {
+      bindJobSession(this.pendingReportBack.jobId, this.sessionId);
     }
     this.shownToolIds = new Set();
     this.toolCallCache = new Map();
@@ -961,9 +1098,38 @@ export class SessionRuntime {
     // A new streamed turn supersedes any transient "follow" watch of this same
     // session's previous in-flight turn (avoids duplicated output).
     if (this.watchIsFollow) this.stopWatch();
-    const live = this.foreground;
+    // Manager (General): quiet-by-default — no prose stream. User-facing text
+    // only via notify actions (or one fallback reply for direct user asks).
+    // Project topics stream when foreground. Raw slash (/goal) always streams.
+    const rawSlash = !!input.rawSlashCommand;
+    const live = (this.foreground && !this.managerMode) || rawSlash;
     const startedAt = Date.now();
     this.turnStartedAt = startedAt;
+    this.managerNotifyCount = 0;
+    this.managerUserVisible = false;
+    this.managerStatusMsgId = undefined;
+    // General: Starting… (from message handler) → Thinking… status only.
+    // Meta wakes (work report / bridge results) stay fully silent (no bubble).
+    const managerMeta =
+      this.managerMode &&
+      !rawSlash &&
+      (isManagerWorkReportPrompt(input.text) ||
+        isTelegramBridgeResultsPrompt(input.text) ||
+        isSelfRecheckPrompt(input.text) ||
+        !!input.skipSelfRecheck);
+    let thinkingMsgId: number | undefined = input.seedMessageId;
+    if (this.managerMode && !managerMeta && this.turnReplyTo !== undefined) {
+      if (thinkingMsgId !== undefined) {
+        await this.editManagerStatus(thinkingMsgId, "Thinking\u2026");
+      } else {
+        thinkingMsgId = await this.postManagerStatus(this.turnReplyTo, "Thinking\u2026");
+      }
+      this.managerStatusMsgId = thinkingMsgId;
+    } else if (this.managerMode && managerMeta && thinkingMsgId !== undefined) {
+      // Drop Starting… leftover on meta turns.
+      await this.deleteManagerStatus(thinkingMsgId);
+      thinkingMsgId = undefined;
+    }
     this.streamer = live
       ? new ResponseStreamer(
           this.api,
@@ -971,13 +1137,26 @@ export class SessionRuntime {
           this.cfg.streamThrottleMs,
           this.turnReplyTo,
           this.hashtags(),
-          (pct) => this.setProgress(pct),
-          this.cfg.progressFallback,
+          this.managerMode && !rawSlash ? undefined : (pct) => this.setProgress(pct),
+          this.managerMode && !rawSlash ? false : this.cfg.progressFallback,
           startedAt,
           this.messageThreadId,
+          this.managerMode && rawSlash
+            ? { proseOnly: true, showProgressBar: false }
+            : undefined,
         )
       : undefined;
-    if (live) this.typing.start();
+    // Bind user message (+ status bubble) → session for reply routing.
+    if (this.managerMode && this.sessionId) {
+      if (this.turnReplyTo !== undefined) {
+        this.onTelegramMessageBound?.(this.turnReplyTo, this.sessionId);
+      }
+      if (thinkingMsgId !== undefined) {
+        this.onTelegramMessageBound?.(thinkingMsgId, this.sessionId);
+      }
+    }
+    // Typing indicator for user-facing manager turns and live project streams.
+    if (live || (this.managerMode && !managerMeta)) this.typing.start();
     this.activity(true);
     this.changed();
     this.imageScanText = "";
@@ -986,8 +1165,13 @@ export class SessionRuntime {
     const content = buildContentBlocks(input, {
       reasoning: reasoningDirective(this.reasoning),
       priming: this.primingContext,
-      imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      imageOutput:
+        !this.managerMode && this.cfg.sendAgentImages
+          ? IMAGE_OUTPUT_DIRECTIVE
+          : undefined,
+      // Manager chat: no progress spam; project topics keep the usual directive.
+      progress:
+        !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     this.primingContext = undefined;
 
@@ -1054,8 +1238,9 @@ export class SessionRuntime {
         // spam to the chat (live step / status panel only).
         const pingDone =
           canPing && (this.foreground || !hasQueued) && !queuedBridgeResults;
-        // Expect a Done this turn unless we defer for recheck (bridge already excluded).
-        this.turnExpectDone = pingDone;
+        // Manager uses notify/finishManagerUserFacing — never arm Done safety-net spam.
+        // Raw slash (/goal) uses normal project Done path when streamed.
+        this.turnExpectDone = pingDone && !(this.managerMode && !rawSlash);
 
         // One-shot self-recheck: only after a real *user* turn (not meta/auto),
         // with idle queue. skipSelfRecheck blocks loops after recheck / auto-batch.
@@ -1120,16 +1305,51 @@ export class SessionRuntime {
           }
         }
 
+        // Manager: if bridge results are still chaining, drop Thinking… so it
+        // does not stick forever (meta follow-up is silent by default).
+        if (this.managerMode && queuedBridgeResults) {
+          if (this.managerStatusMsgId !== undefined && this.managerNotifyCount === 0) {
+            const sid = this.managerStatusMsgId;
+            this.managerStatusMsgId = undefined;
+            void this.deleteManagerStatus(sid);
+          }
+        }
+
         if (!queuedRecheck && !queuedBridgeResults) {
+          // Manager (General): quiet-by-default completion — no Done spam.
+          // User-facing only via notify (already sent) or one fallback reply.
+          if (this.managerMode && !rawSlash) {
+            await this.finishManagerUserFacing(managerMeta, final.result?.stopReason, startedAt);
+            this.turnDonePinged = true;
+            // Suggestions only when something was actually shown to the user.
+            if (
+              final.result &&
+              !this.cancelled &&
+              !hasQueued &&
+              this.managerUserVisible &&
+              !managerMeta
+            ) {
+              try {
+                const baseForSug =
+                  cleanManagerVisibleText(this.turnAssistantText).slice(0, 500) || "Done";
+                await this.collectAndApplySuggestions(baseForSug, undefined, {
+                  autoQueue: true,
+                });
+              } catch (e) {
+                log.debug(`manager suggestions failed: ${(e as Error).message}`);
+              }
+            }
+          } else {
           // Build Done text *now* (after quiet decision) so a cancel during the
           // recheck-decision wait shows ⏹ Stopped, not a stale ✅ Done head.
           let doneText = this.isSelfRecheckTurn
-            ? this.completionMessageSplit(final.result?.stopReason, startedAt, streamedOutput)
-            : this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
+              ? this.completionMessageSplit(final.result?.stopReason, startedAt, streamedOutput)
+              : this.completionMessage(final.result?.stopReason, startedAt, streamedOutput);
           // 1) Always send Done FIRST — never block the completion ping on the
           // quiet suggestions prompt (which can hang and look like "no Done").
           let doneMsgId: number | undefined;
-          if (pingDone) {
+          const shouldPingDone = pingDone;
+          if (shouldPingDone && doneText.trim()) {
             doneMsgId = await this.notify(doneText, {
               loud: true,
               replyTo: this.turnReplyTo,
@@ -1137,30 +1357,51 @@ export class SessionRuntime {
             });
             if (doneMsgId !== undefined) this.turnDonePinged = true;
           }
-          // 2) Suggestions after Done: edit the Done message (or send a follow-up).
+          // 2) Suggestions: project topics keep Done-edit UX.
           if (final.result && !this.cancelled && !hasQueued) {
             try {
-              const sug = await this.collectAndApplySuggestions(doneText, switchKb, {
-                // Only auto-queue high-need follow-ups when the user is watching;
-                // background sessions store buttons for the Done ping / switch replay.
-                autoQueue: this.foreground,
-              });
-              // Only enhance when suggestions actually changed the Done body.
-              if (pingDone && sug.text !== doneText) {
+              const baseForSug = doneText;
+              const sug = await this.collectAndApplySuggestions(
+                baseForSug,
+                switchKb,
+                {
+                  autoQueue: this.foreground,
+                },
+              );
+              if (shouldPingDone && sug.text !== doneText) {
                 await this.enhanceDoneMessage(doneMsgId, sug.text, sug.markup ?? switchKb);
               }
             } catch (e) {
               log.debug(`suggestions after Done failed: ${(e as Error).message}`);
             }
           }
+          }
           // Clear frozen first-turn ops after final Done (recheck path done).
           if (this.isSelfRecheckTurn) this.preRecheckFileOps = new Map();
+
+          // Child work dispatched from General → wake manager with a report.
+          // (Waits only for same-job meta follow-ups; see maybeReportBackToManager.)
+          await this.maybeReportBackToManager({
+            ok: !!final.result && !this.cancelled,
+            cancelled: this.cancelled,
+            stopReason: final.result?.stopReason,
+            error: undefined,
+          });
         }
         // queuedBridgeResults: stay quiet in chat — agent gets results via queue.
       } else if (final.error) {
-        // If the self-recheck pass itself failed, still surface Done for the
-        // original work (split files + suggestions) so the user is not stuck.
-        if (this.isSelfRecheckTurn && !hasQueued) {
+        // Manager: one short important message (or edit Thinking…); never Done spam.
+        if (this.managerMode) {
+          await this.finishManagerError(final.error.message, startedAt);
+          this.turnDonePinged = true;
+          await this.maybeReportBackToManager({
+            ok: false,
+            cancelled: false,
+            error: final.error.message,
+          });
+        } else if (this.isSelfRecheckTurn && !hasQueued) {
+          // If the self-recheck pass itself failed, still surface Done for the
+          // original work (split files + suggestions) so the user is not stuck.
           const switchKb = this.switchKeyboard();
           const pingDone = canPing && (this.foreground || !hasQueued);
           this.turnExpectDone = pingDone;
@@ -1189,6 +1430,13 @@ export class SessionRuntime {
             }
           }
           this.preRecheckFileOps = new Map();
+          // Self-recheck failed after real work — still report manager job if any.
+          await this.maybeReportBackToManager({
+            ok: true,
+            cancelled: this.cancelled,
+            stopReason: "self_recheck_failed",
+            error: final.error.message,
+          });
         } else {
           const transient = isTransientError(final.error);
           const liveMsg = this.errorMessage(final.error, startedAt, final.attempts, transient);
@@ -1201,6 +1449,11 @@ export class SessionRuntime {
             });
             if (id !== undefined) this.turnDonePinged = true;
           }
+          await this.maybeReportBackToManager({
+            ok: false,
+            cancelled: false,
+            error: final.error.message,
+          });
         }
       }
     } catch (err) {
@@ -1253,6 +1506,14 @@ export class SessionRuntime {
           }
         }
         this.preRecheckFileOps = new Map();
+      } else if (this.managerMode) {
+        await this.finishManagerError(errMsg, startedAt);
+        this.turnDonePinged = true;
+        await this.maybeReportBackToManager({
+          ok: false,
+          cancelled: this.cancelled,
+          error: errMsg,
+        });
       } else {
         const msg = `\u274C Error after ${fmtDuration(Date.now() - startedAt)}: ${errMsg}`;
         this.lastCompletion = msg;
@@ -1267,11 +1528,17 @@ export class SessionRuntime {
           });
           if (id !== undefined) this.turnDonePinged = true;
         }
+        await this.maybeReportBackToManager({
+          ok: false,
+          cancelled: this.cancelled,
+          error: errMsg,
+        });
       }
     } finally {
       // Safety net: turn completed with an expected Done ping that never landed
       // (notify failed, hung path, etc.). Never block queue flush on this.
-      if (this.turnExpectDone && !this.turnDonePinged) {
+      // Manager never uses this path (turnExpectDone is false in manager mode).
+      if (this.turnExpectDone && !this.turnDonePinged && !this.managerMode) {
         const fallback =
           this.lastCompletion?.trim() ||
           `\u2705 Done \u00B7 ${fmtDuration(Date.now() - startedAt)}`;
@@ -1358,20 +1625,42 @@ export class SessionRuntime {
       cfg: this.cfg,
       chatId: this.chatId,
       messageThreadId: this.messageThreadId,
+      replyToMessageId: this.turnReplyTo,
       forum: this.bridge.forum,
       store: this.bridge.store,
       bots: this.bridge.bots,
       submitTopicPrompt: this.bridge.submitTopicPrompt,
+      managerMode: this.managerMode,
+      managerUserAskPreview: this.suggestionUserText || cleanUserPreview(this.turnUserText, 400),
     });
 
+    // Count successful notify actions (General user-facing channel).
+    // Drop the Thinking… placeholder once a real notify is out.
+    for (const r of results) {
+      if (r.action === "notify" && r.ok) {
+        this.managerNotifyCount++;
+        this.managerUserVisible = true;
+        if (this.managerStatusMsgId !== undefined) {
+          const sid = this.managerStatusMsgId;
+          this.managerStatusMsgId = undefined;
+          void this.deleteManagerStatus(sid);
+        }
+        const mid = (r.data as { messageId?: number } | undefined)?.messageId;
+        if (mid !== undefined && this.sessionId) {
+          this.onTelegramMessageBound?.(mid, this.sessionId);
+        }
+      }
+    }
+
     // Only announce durable side-effects in chat (topic create/bind/cross-prompt).
-    // search_memory / list_bots / bot wait status stay silent — results go to the agent.
+    // Manager mode stays quiet — use notify for user text; no auto notes.
+    // search_memory / list_* / bot wait status stay silent — results go to the agent.
     const durableActions = new Set(["create_topic", "set_path", "send_prompt"]);
     const notes = results
       .filter((r) => durableActions.has(r.action) && r.userNote?.trim())
       .map((r) => r.userNote!)
       .filter(Boolean);
-    if (notes.length > 0 && this.foreground) {
+    if (notes.length > 0 && this.foreground && !this.managerMode) {
       await this.notify(notes.join("\n"), {
         loud: true,
         replyTo: this.turnReplyTo,
@@ -1418,7 +1707,7 @@ export class SessionRuntime {
     doneText: string,
     switchKb: InlineKeyboard | undefined,
     opts?: { autoQueue?: boolean },
-  ): Promise<{ text: string; markup?: InlineKeyboard }> {
+  ): Promise<{ text: string; markup?: InlineKeyboard; suggestions?: Suggestion[] }> {
     if (!this.cfg.suggestionsEnabled || !this.sessionId) {
       return { text: doneText, markup: switchKb };
     }
@@ -1428,6 +1717,8 @@ export class SessionRuntime {
     } catch (e) {
       log.debug(`suggestions fetch failed: ${(e as Error).message}`);
     }
+    // Manager: keep 1–4 short follow-ups only.
+    if (this.managerMode) suggestions = suggestions.slice(0, 4);
     if (suggestions.length === 0) return { text: doneText, markup: switchKb };
 
     const batchId = ++this.suggestionBatchSeq;
@@ -1445,12 +1736,13 @@ export class SessionRuntime {
     let banner: string;
     if (auto.length > 0) {
       const batched = formatBatchedSuggestionsPrompt(auto);
-      const lines = auto.map((s, i) => `  ${i + 1}) ${s.need}% \u2014 ${s.text}`);
+      // Hard, visible auto-approve block (especially for General chat).
+      const lines = auto.map((s) => `\u2022 ${s.text}`);
       const autoBlock =
-        `\n\n\u{1F4A1} Auto-running ${auto.length} suggestion${auto.length === 1 ? "" : "s"}` +
-        ` as one prompt (\u2265 ${thr}% need):\n${lines.join("\n")}`;
+        `\n\n\u2705 Auto Approved:\n${lines.join("\n")}` +
+        (this.managerMode ? "" : `\n(need \u2265 ${thr}%)`);
       text += autoBlock;
-      banner = `\u{1F4A1} Suggestions (auto-running ${auto.length} as one prompt):\n${lines.join("\n")}`;
+      banner = `\u2705 Auto Approved:\n${lines.join("\n")}`;
       // Single queue entry — agent executes 1) 2) 3) in one turn.
       // skipSelfRecheck: auto-follow-ups must not arm another recheck cycle.
       this.queue.push(
@@ -1461,7 +1753,9 @@ export class SessionRuntime {
       );
       this.changed();
     } else {
-      text += "\n\n\u{1F4A1} Suggestions \u2014 tap one to continue:";
+      text += this.managerMode
+        ? "\n\nTap a suggestion to continue:"
+        : "\n\n\u{1F4A1} Suggestions \u2014 tap one to continue:";
       banner = "\u{1F4A1} Suggestions \u2014 tap one to continue:";
     }
 
@@ -1469,8 +1763,147 @@ export class SessionRuntime {
     // the same keyboard). Cleared when a new turn starts.
     this.pendingSuggestions = { batchId, suggestions, banner };
 
-    const markup = suggestionsKeyboard(batchId, suggestions, switchKb);
-    return { text, markup };
+    // Keyboard: show remaining (non-auto) suggestions; if all auto, no buttons.
+    const remaining = suggestions.filter((s) => !auto.some((a) => a.text === s.text));
+    const markup =
+      remaining.length > 0
+        ? suggestionsKeyboard(batchId, remaining, switchKb)
+        : switchKb;
+    return { text, markup, suggestions };
+  }
+
+  /** Post General status bubble (Starting… / Thinking…) — streamer edits it later. */
+  private async postManagerStatus(
+    replyTo: number,
+    text: string,
+  ): Promise<number | undefined> {
+    try {
+      const extra: Record<string, unknown> = {
+        disable_notification: true,
+        ...outboundThreadExtra(this.messageThreadId),
+        reply_parameters: {
+          message_id: replyTo,
+          allow_sending_without_reply: true,
+        },
+      };
+      const msg = await this.api.sendMessage(this.chatId, text, extra);
+      return msg.message_id;
+    } catch (e) {
+      log.debug(`manager status "${text}" failed: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  private async editManagerStatus(messageId: number, text: string): Promise<void> {
+    try {
+      await this.api.editMessageText(this.chatId, messageId, text);
+    } catch (e) {
+      log.debug(`manager status edit failed: ${(e as Error).message}`);
+    }
+  }
+
+  private async deleteManagerStatus(messageId: number): Promise<void> {
+    try {
+      await this.api.deleteMessage(this.chatId, messageId);
+    } catch (e) {
+      log.debug(`manager status delete failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** Surface a short important error in General; clear Thinking… bubble. */
+  private async finishManagerError(errorMessage: string, startedAt: number): Promise<void> {
+    const elapsed = fmtDuration(Date.now() - startedAt);
+    const short =
+      errorMessage.length > 280 ? errorMessage.slice(0, 277) + "\u2026" : errorMessage;
+    const text = `\u274C ${short} \u00B7 ${elapsed}`;
+    this.lastCompletion = text;
+    if (this.managerStatusMsgId !== undefined) {
+      await this.editManagerStatus(this.managerStatusMsgId, text);
+      this.managerUserVisible = true;
+      if (this.sessionId) this.onTelegramMessageBound?.(this.managerStatusMsgId, this.sessionId);
+      this.managerStatusMsgId = undefined;
+      return;
+    }
+    if (this.turnReplyTo !== undefined) {
+      const id = await this.notify(text, { loud: true, replyTo: this.turnReplyTo });
+      if (id !== undefined) this.managerUserVisible = true;
+    }
+  }
+
+  /**
+   * General quiet completion:
+   * - if notify already sent → drop Thinking… bubble
+   * - else if direct user ask and clean prose → one short fallback message
+   * - else → delete Thinking… and stay silent
+   */
+  private async finishManagerUserFacing(
+    metaTurn: boolean,
+    stopReason: string | undefined,
+    startedAt: number,
+  ): Promise<void> {
+    const elapsed = fmtDuration(Date.now() - startedAt);
+    if (this.cancelled || stopReason === "cancelled") {
+      this.lastCompletion = `\u23F9 Stopped \u00B7 ${elapsed}`;
+      // Only surface cancel if user was waiting on a visible bubble.
+      if (this.managerStatusMsgId !== undefined && !metaTurn) {
+        await this.editManagerStatus(this.managerStatusMsgId, this.lastCompletion);
+        this.managerUserVisible = true;
+      } else if (this.managerStatusMsgId !== undefined) {
+        await this.deleteManagerStatus(this.managerStatusMsgId);
+      }
+      this.managerStatusMsgId = undefined;
+      return;
+    }
+
+    if (this.managerNotifyCount > 0) {
+      this.lastCompletion =
+        cleanManagerVisibleText(this.turnAssistantText).slice(0, 500) ||
+        `\u2705 Done \u00B7 ${elapsed}`;
+      if (this.managerStatusMsgId !== undefined) {
+        await this.deleteManagerStatus(this.managerStatusMsgId);
+        this.managerStatusMsgId = undefined;
+      }
+      return;
+    }
+
+    // Meta / bridge / work-report turns: silent unless cancelled (handled above).
+    if (metaTurn) {
+      this.lastCompletion = `\u2705 Done \u00B7 ${elapsed}`;
+      if (this.managerStatusMsgId !== undefined) {
+        await this.deleteManagerStatus(this.managerStatusMsgId);
+        this.managerStatusMsgId = undefined;
+      }
+      return;
+    }
+
+    // Direct user ask: optional single fallback if model forgot notify.
+    const cleaned = cleanManagerVisibleText(this.turnAssistantText);
+    const fallback = pickManagerFallbackText(cleaned);
+    if (fallback && this.managerStatusMsgId !== undefined) {
+      await this.editManagerStatus(this.managerStatusMsgId, fallback);
+      this.managerUserVisible = true;
+      this.lastCompletion = fallback.slice(0, 500);
+      if (this.sessionId) this.onTelegramMessageBound?.(this.managerStatusMsgId, this.sessionId);
+      this.managerStatusMsgId = undefined;
+      return;
+    }
+    if (fallback && this.turnReplyTo !== undefined) {
+      const id = await this.notify(fallback, {
+        loud: false,
+        replyTo: this.turnReplyTo,
+      });
+      if (id !== undefined) {
+        this.managerUserVisible = true;
+        this.lastCompletion = fallback.slice(0, 500);
+        if (this.sessionId) this.onTelegramMessageBound?.(id, this.sessionId);
+      }
+    } else {
+      this.lastCompletion = `\u2705 Done \u00B7 ${elapsed}`;
+    }
+    if (this.managerStatusMsgId !== undefined) {
+      await this.deleteManagerStatus(this.managerStatusMsgId);
+      this.managerStatusMsgId = undefined;
+    }
   }
 
   /**
@@ -1698,7 +2131,8 @@ export class SessionRuntime {
         reasoning: reasoningDirective(this.reasoning),
         priming: this.primingContext,
         imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-        progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+        progress:
+          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
       this.primingContext = undefined;
       log.info(
@@ -1761,7 +2195,8 @@ export class SessionRuntime {
       reasoning: reasoningDirective(this.reasoning),
       priming: transcript ? buildPriming(transcript) : undefined,
       imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      progress:
+          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
     return this.runPromptWithRetries(forkContent);
   }
@@ -1813,7 +2248,8 @@ export class SessionRuntime {
           reasoning: reasoningDirective(this.reasoning),
           priming: transcript ? buildPriming(transcript) : undefined,
           imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-          progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+          progress:
+          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
         });
         return this.runPromptWithRetries(content);
       }
@@ -1860,7 +2296,8 @@ export class SessionRuntime {
         reasoning: reasoningDirective(this.reasoning),
         priming: transcript ? buildPriming(transcript) : undefined,
         imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      progress:
+          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
       });
       log.info(
         `chat ${this.chatId} auto-rotating to account ${t.label}` +
@@ -1990,7 +2427,8 @@ export class SessionRuntime {
     const resumeContent = buildContentBlocks(textPrompt(RESUME_INSTRUCTION), {
       reasoning: reasoningDirective(this.reasoning),
       imageOutput: this.cfg.sendAgentImages ? IMAGE_OUTPUT_DIRECTIVE : undefined,
-      progress: this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
+      progress:
+          !this.managerMode && this.cfg.showProgress ? PROGRESS_DIRECTIVE : undefined,
     });
 
     let last = final;
@@ -2061,6 +2499,111 @@ export class SessionRuntime {
     return `\u{1F4E8} From other session ${this.sessionTag()}\n${head}\n${summarizeFileOpsShort(this.fileOps)}\n\n${tags}`;
   }
 
+  /** Soft completion for General manager (no file-ops / progress spam). */
+  private managerCompletionMessage(
+    stopReason: string | undefined,
+    startedAt: number,
+    streamedOutput: boolean,
+  ): string {
+    const elapsed = fmtDuration(Date.now() - startedAt);
+    if (this.cancelled || stopReason === "cancelled") {
+      const msg = `\u23F9 Stopped \u00B7 ${elapsed}`;
+      this.lastCompletion = msg;
+      return streamedOutput ? "" : msg;
+    }
+    // When prose already streamed, no extra Done line (chat-like).
+    if (streamedOutput) {
+      this.lastCompletion = this.turnAssistantText.slice(0, 800) || `\u2705 Done \u00B7 ${elapsed}`;
+      return "";
+    }
+    const msg = `\u2705 Done \u00B7 ${elapsed}`;
+    this.lastCompletion = msg;
+    return msg;
+  }
+
+  /**
+   * True when the next queued prompt is a continuation of the *same* manager
+   * job (self-recheck / bridge results / suggestion batch), not a new user
+   * ask or a different send_prompt dispatch.
+   */
+  private queueIsSameJobContinuation(jobId: string): boolean {
+    if (this.queue.length === 0) return false;
+    const next = this.queue[0]!;
+    if (next.reportBack && next.reportBack.jobId !== jobId) return false;
+    if (next.reportBack && next.reportBack.jobId === jobId) return true;
+    // Meta continuations omit reportBack but keep the open job.
+    return (
+      !!next.skipSelfRecheck ||
+      isSelfRecheckPrompt(next.text) ||
+      isTelegramBridgeResultsPrompt(next.text) ||
+      isManagerWorkReportPrompt(next.text)
+    );
+  }
+
+  /**
+   * If this runtime was dispatched from General, wake the manager with a
+   * structured WORK REPORT once for this job. Waits only for same-job meta
+   * follow-ups; reports immediately when a different dispatch/user turn is next.
+   */
+  private async maybeReportBackToManager(opts: {
+    ok: boolean;
+    cancelled: boolean;
+    stopReason?: string;
+    error?: string;
+  }): Promise<void> {
+    const meta = this.pendingReportBack;
+    if (!meta || !this.bridge?.wakeManager) return;
+    // Same-job recheck / bridge results / suggestions still pending — wait.
+    if (this.queueIsSameJobContinuation(meta.jobId)) return;
+
+    const status = opts.cancelled ? "cancelled" : opts.ok ? "done" : "failed";
+    const assistantSummary = (
+      this.turnAssistantText.trim() ||
+      this.lastCompletion ||
+      "(no assistant text)"
+    ).replace(/\s+/g, " ").trim();
+    const filesSummary =
+      this.fileOps.size > 0 ? summarizeFileOpsShort(this.fileOps) : undefined;
+
+    updateManagerJob(meta.jobId, {
+      status: status === "done" ? "done" : status === "cancelled" ? "cancelled" : "failed",
+      resultSummary: assistantSummary.slice(0, 400),
+      childSessionId: this.sessionId,
+    });
+
+    const prompt = buildManagerWorkReportPrompt({
+      jobId: meta.jobId,
+      targetName: meta.targetName || this.projectName || basename(this.cwd),
+      targetThreadId: this.messageThreadId ?? 0,
+      targetPath: meta.targetPath || this.cwd,
+      userAskPreview: meta.userAskPreview,
+      dispatchPromptPreview: meta.dispatchPrompt,
+      status,
+      stopReason: opts.stopReason,
+      error: opts.error,
+      assistantSummary,
+      filesSummary,
+      childSessionId: this.sessionId,
+    });
+
+    // Clear before await so a re-entry cannot double-report this job.
+    this.pendingReportBack = undefined;
+    try {
+      await this.bridge.wakeManager({
+        originChatId: meta.originChatId,
+        originThreadId: meta.originThreadId,
+        prompt,
+      });
+      log.info(
+        `report-back job ${meta.jobId} → general (#${meta.originThreadId}) status=${status}`,
+      );
+    } catch (e) {
+      log.warn(`report-back failed for job ${meta.jobId}: ${(e as Error).message}`);
+      // Restore so a later turn might retry once if still attached.
+      this.pendingReportBack = meta;
+    }
+  }
+
   /**
    * Final Done after a self-recheck: head + split file lists (first turn vs recheck).
    */
@@ -2129,6 +2672,9 @@ export class SessionRuntime {
   /** Searchable Telegram hashtags so you can pull up every message of a session
    *  or project (and this turn's prompt) by tapping the tag. */
   private hashtags(): string {
+    // General manager: no tags (user requested clean chat). Reply routing uses
+    // Telegram message-id → session map, not #sess_ footers.
+    if (this.managerMode) return "";
     return sessionHashtags({
       projectName: this.projectName,
       cwd: this.cwd,
@@ -2145,6 +2691,7 @@ export class SessionRuntime {
     const head = this.queue[0]!;
     const isMeta =
       !!head.skipSelfRecheck ||
+      !!head.rawSlashCommand ||
       isSelfRecheckPrompt(head.text) ||
       isTelegramBridgeResultsPrompt(head.text);
     const batch = isMeta
@@ -2314,13 +2861,17 @@ export class SessionRuntime {
   ): Promise<number | undefined> {
     const send = async (body: string, withMarkup: boolean): Promise<number | undefined> => {
       try {
-        const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
-        if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
+        const extra: Record<string, unknown> = {
+          ...(opts?.loud ? { disable_notification: false } : {}),
+          // Never pass message_thread_id=1 (General) — Telegram rejects it.
+          ...outboundThreadExtra(this.messageThreadId),
+        };
         if (opts?.replyTo !== undefined) {
           extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
         }
         if (withMarkup && opts?.replyMarkup) extra.reply_markup = opts.replyMarkup;
         const msg = await this.api.sendMessage(this.chatId, body, extra);
+        if (this.sessionId) this.onTelegramMessageBound?.(msg.message_id, this.sessionId);
         return msg.message_id;
       } catch (e) {
         log.debug("notify failed:", (e as Error).message);
@@ -2344,8 +2895,8 @@ export class SessionRuntime {
   ): Promise<void> {
     if (messageId !== undefined) {
       try {
+        // editMessageText does not need message_thread_id; keep markup only.
         const extra: Record<string, unknown> = {};
-        if (this.messageThreadId !== undefined) extra.message_thread_id = this.messageThreadId;
         if (markup) extra.reply_markup = markup;
         await this.api.editMessageText(this.chatId, messageId, text, extra);
         return;
@@ -2376,6 +2927,41 @@ export class SessionRuntime {
       });
     }
   }
+}
+
+/** Visible manager reply body (no progress markers / telegram action fences). */
+function cleanManagerVisibleText(raw: string): string {
+  if (!raw?.trim()) return "";
+  const withoutTg = stripTelegramActionFences(raw);
+  return extractProgress(withoutTg).cleaned.trim();
+}
+
+/**
+ * One short user-facing fallback when General forgot `notify`.
+ * Drops empty, table-spam, and pure status narration.
+ */
+export function pickManagerFallbackText(cleaned: string): string | undefined {
+  let t = cleaned.replace(/\r\n/g, "\n").trim();
+  if (!t) return undefined;
+  // Drop markdown tables and multi-line job dumps.
+  if (/^\s*\|.+\|/m.test(t) && (t.match(/\|/g) || []).length >= 6) return undefined;
+  // Collapse whitespace.
+  t = t.replace(/\n{3,}/g, "\n\n").trim();
+  // Prefer first 1–2 short paragraphs.
+  const paras = t.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+  let out = paras.slice(0, 2).join("\n\n");
+  if (out.length > 600) out = out.slice(0, 597) + "\u2026";
+  // Ignore pure meta / empty placeholders.
+  if (/^(thinking|starting|ok|done|\.+|\u2026)+$/i.test(out.trim())) return undefined;
+  if (out.length < 2) return undefined;
+  // Skip "Dispatching… / Sending to…" spam patterns if that is all we got.
+  if (
+    /^(dispatching|sending to|queued|cancelling|already running)\b/i.test(out) &&
+    out.length < 280
+  ) {
+    return undefined;
+  }
+  return out;
 }
 
 /** Format an elapsed duration compactly (e.g. "8s", "2m 13s", "1h 4m"). */

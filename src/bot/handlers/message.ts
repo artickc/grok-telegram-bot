@@ -8,22 +8,27 @@
  * rapid consecutive text messages per chat within a short debounce window
  * (`MESSAGE_BATCH_MS`) into a single prompt — one submission, one confirmation.
  *
- * User messages are replaced by a bot-owned prompt anchor (`#prompt_<id>`) so
- * the chat shows immediate life while CLI/ACP starts, and all AI replies thread
- * to that anchor with the same searchable tag.
+ * Project topics: user messages are replaced by a bot-owned prompt anchor
+ * (`#prompt_<id>`) so the chat shows immediate life while CLI/ACP starts.
  *
- * While a turn is running, the combined message is queued and runs
- * automatically when the current turn finishes.
- * (Wizard input and menu-button text are intercepted by earlier handlers.)
+ * General (manager): user messages are KEPT; AI replies thread to the user
+ * message. Each message is a NEW session (parallel), unless the user replies
+ * to a bot message — then that session continues.
  */
 import type { Bot } from "grammy";
 import { textPrompt } from "../../app/types.js";
 import { createLogger } from "../../logger.js";
-import { batchKey, forumThreadId } from "../../forum/thread.js";
+import {
+  batchKey,
+  forumThreadId,
+  isGeneralThread,
+  outboundThreadExtra,
+} from "../../forum/thread.js";
 import type { BotDeps } from "../deps.js";
-import { adoptUserPrompt } from "../prompt-anchor.js";
+import { adoptUserPrompt, newPromptId } from "../prompt-anchor.js";
 import { extractReplyContext } from "../reply-context.js";
 import { resolveForumRuntime } from "./forum.js";
+import type { SessionRuntime } from "../session-runtime.js";
 
 const log = createLogger("message");
 
@@ -35,6 +40,10 @@ interface TextBatch {
   threadId?: number;
   /** Reference content if the burst began as a reply to another message. */
   quoted?: string;
+  /** Telegram message_id the user is replying to (for session follow-up). */
+  replyToMessageId?: number;
+  /** Text of the replied-to message (for #sess_ recovery). */
+  replyToText?: string;
   timer: NodeJS.Timeout;
 }
 
@@ -49,7 +58,6 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
     const text = ctx.message.text;
     if (!text.trim()) return;
     // Slash commands are handled by bot.command / menu — never batch as agent prompts.
-    // (Otherwise /forum_setup and /help would also hit the debounce → agent path.)
     if (!text.includes("\n") && text.startsWith("/")) return;
 
     const chatId = ctx.chat.id;
@@ -58,7 +66,14 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
     const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
     const threadId = isForum ? forumThreadId(rawThreadId) : rawThreadId;
     const quoted = extractReplyContext(ctx);
-    const key = batchKey(chatId, rawThreadId, isForum);
+    const replyToMessageId = ctx.message.reply_to_message?.message_id;
+    const replyToText =
+      ctx.message.reply_to_message?.text ?? ctx.message.reply_to_message?.caption;
+    // General: do not coalesce independent messages (parallel sessions).
+    // Still coalesce multi-part 4096 splits when reply chain is empty and rapid.
+    const key = isGeneralThread(threadId) && isForum
+      ? `${chatId}:${threadId ?? 1}:m${id}`
+      : batchKey(chatId, rawThreadId, isForum);
 
     const batch = batches.get(key);
     if (batch) {
@@ -66,6 +81,10 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
       batch.parts.push(text);
       batch.ids.push(id);
       if (quoted && !batch.quoted) batch.quoted = quoted;
+      if (replyToMessageId !== undefined && batch.replyToMessageId === undefined) {
+        batch.replyToMessageId = replyToMessageId;
+        batch.replyToText = replyToText;
+      }
       batch.timer = arm(key);
       return;
     }
@@ -74,6 +93,8 @@ export function registerMessages(bot: Bot, deps: BotDeps): void {
       ids: [id],
       threadId,
       quoted,
+      replyToMessageId,
+      replyToText,
       timer: arm(key),
     });
   });
@@ -85,8 +106,6 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   if (!batch) return;
   batches.delete(key);
 
-  // Telegram splits at 4096 chars, almost always on a line boundary, so
-  // rejoining with a newline reconstructs the original text faithfully.
   const combined = batch.parts.join("\n").trim();
   if (!combined) return;
 
@@ -94,14 +113,16 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   const chatId = Number(chatIdStr);
   const threadId = batch.threadId;
 
-  // Defense-in-depth: never submit slash-only lines as agent prompts.
   if (batch.parts.length === 1 && !combined.includes("\n") && combined.startsWith("/")) {
     return;
   }
 
-  let rt = deps.registry.get(chatId);
-  // Forum group: topic-scoped multi-session controller (model/reasoning/running).
-  if (deps.forum?.isActiveForumChat(chatId)) {
+  const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
+  const isGeneral = isForum && isGeneralThread(threadId);
+
+  let rt: SessionRuntime = deps.registry.get(chatId);
+
+  if (isForum && deps.forum) {
     const resolved = await resolveForumRuntime(
       deps,
       deps.forum,
@@ -111,10 +132,98 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
       batch.ids[0]!,
     );
     if (resolved === "handled" || resolved === "ignore") return;
+
+    if (isGeneral) {
+      // ── General manager path ─────────────────────────────────────────
+      const controller = deps.registry.forumController(
+        chatId,
+        forumThreadId(threadId),
+        resolved.rt.cwd,
+        resolved.rt.projectName ?? "General",
+      );
+
+      // Reply → continue same session (map, #sess_ on controlled runtimes, or disk).
+      // Fresh message → new parallel session (does not queue behind other General work).
+      const continueRt = await controller.resolveContinueFromReply({
+        replyToMessageId: batch.replyToMessageId,
+        replyToText: batch.replyToText,
+        cwd: resolved.rt.cwd,
+        projectName: resolved.rt.projectName ?? "General",
+      });
+
+      const userMsgId = batch.ids[0]!;
+      const replyTo = userMsgId;
+      // Keep user message; reply to it. No overwrite / adopt delete.
+
+      // New session: post "Starting…" FIRST (before ACP session/new) so the user
+      // sees life immediately. runTurn later edits it to Thinking… then streams.
+      // Follow-up on existing session: skip Starting (runTurn posts Thinking…).
+      let seedMessageId: number | undefined;
+      if (!continueRt) {
+        seedMessageId = await sendStatus(
+          deps,
+          chatId,
+          "Starting\u2026",
+          threadId,
+          replyTo,
+        );
+        rt = await controller.addParallel(
+          resolved.rt.cwd,
+          resolved.rt.projectName ?? "General",
+        );
+        if (seedMessageId !== undefined && rt.sessionId) {
+          controller.bindTelegramMessage(seedMessageId, rt.sessionId);
+        }
+      } else {
+        rt = continueRt;
+        // FG for status panel; manager setForeground keeps busy siblings streaming.
+        if (rt.sessionId) await controller.switchTo(rt.sessionId).catch(() => {});
+      }
+      if (rt.sessionId) controller.bindTelegramMessage(userMsgId, rt.sessionId);
+
+      try {
+        const outcome = await rt.submit(
+          textPrompt(combined, replyTo, batch.quoted, {
+            promptId: newPromptId(),
+            seedMessageId,
+          }),
+        );
+        if (rt.sessionId) {
+          controller.bindTelegramMessage(userMsgId, rt.sessionId);
+          if (seedMessageId !== undefined) {
+            controller.bindTelegramMessage(seedMessageId, rt.sessionId);
+          }
+        }
+        // Never show "queued" spam for new parallel sessions; only if continuing
+        // the same session that is already busy.
+        if (outcome === "queued" && continueRt) {
+          await send(
+            deps,
+            chatId,
+            `\u{1F4E5} Got it — queued as a follow-up on that thread.`,
+            threadId,
+            replyTo,
+          );
+        }
+      } catch (err) {
+        log.warn(`general submit failed chat ${chatId}: ${(err as Error).message}`);
+        if (seedMessageId !== undefined) {
+          await editStatus(deps, chatId, seedMessageId, `\u274C Couldn't start: ${(err as Error).message}`);
+        } else {
+          await send(
+            deps,
+            chatId,
+            `\u274C Couldn't start: ${(err as Error).message}`,
+            threadId,
+            replyTo,
+          );
+        }
+      }
+      return;
+    }
+
+    // ── Project / AI Chat topics (existing behavior) ─────────────────
     rt = resolved.rt;
-    // If nothing is selected / no session yet, ensure a new session is created
-    // on first message (ensureSession inside submit). If FG has no sessionId
-    // after a closed session, start a fresh one for this topic.
     if (!rt.sessionId && !rt.isBusy) {
       try {
         await rt.startNewSession(rt.cwd, rt.projectName);
@@ -125,11 +234,8 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
   }
 
   const note = batch.parts.length > 1 ? ` (combined ${batch.parts.length} messages)` : "";
-  // Hoisted so a submit failure after a successful adopt can still thread the error.
   let replyTo: number | undefined = batch.ids[0];
   try {
-    // Instant bot anchor: user sees the prompt adopted immediately while CLI warms.
-    // All AI output + Done reply to this message and carry #prompt_<id>.
     const anchor = await adoptUserPrompt(deps.api, {
       chatId,
       text: combined,
@@ -151,7 +257,6 @@ async function flush(deps: BotDeps, batches: Map<string, TextBatch>, key: string
         replyTo,
       );
     }
-    // "ran": turn started; complexity is steered silently by the agent.
   } catch (err) {
     log.warn(`submit failed for chat ${chatId}: ${(err as Error).message}`);
     await send(
@@ -172,12 +277,47 @@ async function send(
   replyTo?: number,
 ): Promise<void> {
   try {
-    const extra: Record<string, unknown> = {};
-    if (threadId !== undefined) extra.message_thread_id = threadId;
+    const extra: Record<string, unknown> = { ...outboundThreadExtra(threadId) };
     if (replyTo !== undefined) {
       extra.reply_parameters = { message_id: replyTo, allow_sending_without_reply: true };
     }
     await deps.api.sendMessage(chatId, text, extra);
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Post status bubble; returns message_id for later edit (Starting… → Thinking…). */
+async function sendStatus(
+  deps: BotDeps,
+  chatId: number,
+  text: string,
+  threadId?: number,
+  replyTo?: number,
+): Promise<number | undefined> {
+  try {
+    const extra: Record<string, unknown> = {
+      disable_notification: true,
+      ...outboundThreadExtra(threadId),
+    };
+    if (replyTo !== undefined) {
+      extra.reply_parameters = { message_id: replyTo, allow_sending_without_reply: true };
+    }
+    const msg = await deps.api.sendMessage(chatId, text, extra);
+    return msg.message_id;
+  } catch {
+    return undefined;
+  }
+}
+
+async function editStatus(
+  deps: BotDeps,
+  chatId: number,
+  messageId: number,
+  text: string,
+): Promise<void> {
+  try {
+    await deps.api.editMessageText(chatId, messageId, text);
   } catch {
     /* non-fatal */
   }

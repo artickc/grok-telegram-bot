@@ -89,6 +89,39 @@ describe("extractTelegramActions", () => {
     assert.equal(actions.length, 0);
   });
 
+  it("keeps long send_prompt bodies (not cropped at 4000)", () => {
+    const long = "X".repeat(12_000);
+    const raw = [
+      "```json",
+      JSON.stringify({
+        telegram: [{ action: "send_prompt", topic: "MyApp", prompt: long }],
+      }),
+      "```",
+    ].join("\n");
+    const { actions } = extractTelegramActions(raw);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]?.action, "send_prompt");
+    if (actions[0]?.action === "send_prompt") {
+      assert.equal(actions[0].prompt.length, 12_000);
+    }
+  });
+
+  it("splitBridgeAnnounceParts covers full prompt without loss", async () => {
+    const { splitBridgeAnnounceParts } = await import("../src/bot/telegram-actions.js");
+    const long = "ABCDEFGHIJ".repeat(800); // 8000 chars
+    const parts = splitBridgeAnnounceParts(long, true);
+    assert.ok(parts.length >= 2, "long prompt should multi-part");
+    for (const p of parts) {
+      assert.ok(p.length <= 4000, `part too long: ${p.length}`);
+      assert.ok(p.includes("Prompt from bridge"));
+    }
+    // Reconstruct body by stripping headers — all payload chars present.
+    const joined = parts
+      .map((p) => p.replace(/^[^\n]*\n\n/, ""))
+      .join("");
+    assert.equal(joined, long, "multi-part announce must not drop prompt bytes");
+  });
+
   it("parses set_path and send_prompt for cross-topic orchestration", () => {
     const raw = [
       "```json",
@@ -135,6 +168,86 @@ describe("extractTelegramActions", () => {
     assert.ok(actions.length <= 9);
     const sends = actions.filter((a) => a.action === "send_prompt");
     assert.ok(sends.length <= 5);
+  });
+
+  it("parses notify action and caps at 3", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        telegram: [
+          { action: "notify", text: "On it." },
+          { action: "notify", text: "Second", important: true },
+          { action: "notify", text: "Third" },
+          { action: "notify", text: "Fourth dropped" },
+          { action: "send_prompt", topic: "MyApp", prompt: "go" },
+        ],
+      }),
+      "```",
+    ].join("\n");
+    const { actions, cleaned } = extractTelegramActions(raw);
+    const notes = actions.filter((a) => a.action === "notify");
+    assert.equal(notes.length, 3);
+    if (notes[0]?.action === "notify") assert.equal(notes[0].text, "On it.");
+    if (notes[1]?.action === "notify") assert.equal(notes[1].important, true);
+    assert.ok(!cleaned.includes("On it."));
+    const dir = buildTelegramBridgeDirective({
+      forumReady: true,
+      topicGroupId: -100,
+      allowedBots: [],
+    });
+    assert.ok(dir.includes("notify"));
+    assert.ok(dir.includes("Quiet by default") || dir.includes("quiet"));
+  });
+
+  it("parses send_prompt session_id (and sess_ prefix forms)", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        telegram: [
+          {
+            action: "send_prompt",
+            topic: "WSLG",
+            session_id: "019fc9ec",
+            prompt: "continue the fix",
+          },
+          {
+            action: "send_prompt",
+            topic: "WSLG",
+            sessionId: "#sess_abcdef12",
+            prompt: "also this",
+          },
+          {
+            action: "send_prompt",
+            session_id: "019fc9ec-full",
+            prompt: "session only, no topic",
+          },
+        ],
+      }),
+      "```",
+    ].join("\n");
+    const { actions } = extractTelegramActions(raw);
+    assert.equal(actions.length, 3);
+    assert.equal(actions[0]?.action, "send_prompt");
+    if (actions[0]?.action === "send_prompt") {
+      assert.equal(actions[0].sessionId, "019fc9ec");
+      assert.equal(actions[0].prompt, "continue the fix");
+    }
+    if (actions[1]?.action === "send_prompt") {
+      assert.equal(actions[1].sessionId, "abcdef12");
+    }
+    if (actions[2]?.action === "send_prompt") {
+      assert.equal(actions[2].sessionId, "019fc9ec-full");
+      assert.equal(actions[2].topic, "");
+    }
+    // Directive must teach session_id resume.
+    const dir = buildTelegramBridgeDirective({
+      forumReady: true,
+      topicGroupId: -100,
+      allowedBots: [],
+    });
+    assert.ok(dir.includes("session_id"));
+    assert.ok(dir.includes("RESUMES") || dir.includes("resume") || dir.includes("019fc9ec"));
+    assert.ok(dir.includes("NEVER use placeholders") || dir.includes("placeholders"));
   });
 });
 

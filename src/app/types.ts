@@ -78,13 +78,43 @@ export interface PromptInput {
    * trigger another self-recheck — only real user prompts do (once each).
    */
   skipSelfRecheck?: boolean;
+  /**
+   * Manager dispatch metadata for this prompt only (General → project).
+   * Carried through the queue so concurrent send_prompt jobs do not steal
+   * each other's report-back. Shape matches bot/manager-jobs ReportBackMeta.
+   */
+  reportBack?: {
+    jobId: string;
+    originChatId: number;
+    originThreadId: number;
+    userAskPreview: string;
+    targetName: string;
+    targetPath: string;
+    dispatchPrompt: string;
+  };
+  /**
+   * Pre-posted status bubble (General: "Starting…") that the turn edits to
+   * "Thinking…" then streams the agent reply into.
+   */
+  seedMessageId?: number;
+  /**
+   * Grok TUI slash command (e.g. `/goal …`). Must stay the first text the agent
+   * sees — skip manager/complexity/progress wrappers and quote/priming prefixes.
+   */
+  rawSlashCommand?: boolean;
 }
 
 export function textPrompt(
   text: string,
   replyTo?: number,
   quotedText?: string,
-  opts?: { skipSelfRecheck?: boolean; promptId?: string },
+  opts?: {
+    skipSelfRecheck?: boolean;
+    promptId?: string;
+    reportBack?: PromptInput["reportBack"];
+    seedMessageId?: number;
+    rawSlashCommand?: boolean;
+  },
 ): PromptInput {
   return {
     text,
@@ -92,7 +122,10 @@ export function textPrompt(
     resourceLinks: [],
     replyTo,
     promptId: opts?.promptId,
-    quotedText,
+    quotedText: opts?.rawSlashCommand ? undefined : quotedText,
     skipSelfRecheck: opts?.skipSelfRecheck,
+    reportBack: opts?.reportBack,
+    seedMessageId: opts?.seedMessageId,
+    rawSlashCommand: opts?.rawSlashCommand,
   };
 }

@@ -265,7 +265,8 @@ export class ForumManager {
       () =>
         this.api.sendMessage(
           this.groupId,
-          `\u{1F916} **AI Chat** — general conversation (workspace).\nPath: \`${this.cfg.workspace}\``,
+          `\u{1F916} **AI Chat** — workspace coding chat.\nPath: \`${this.cfg.workspace}\`\n\n` +
+            `Use **General** to orchestrate projects (manager). Code here or in a project topic.`,
           { message_thread_id: topic.message_thread_id, parse_mode: "Markdown" },
         ),
       "ai-chat-announce",
