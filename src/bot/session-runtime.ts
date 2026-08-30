@@ -1663,13 +1663,14 @@ export class SessionRuntime {
   }
 
   /**
-   * Every 15s, if the live bubble has been silent, edit it with elapsed
-   * "Still working" so long SSH/shell gaps do not look frozen forever.
+   * Every 15s, if we know a live step (tool/subagent) and the bubble is quiet,
+   * refresh that step with elapsed time. Never spam a bare "Still working" timer.
    */
   private startLivenessPulse(): void {
     this.stopLivenessPulse();
     this.livenessPulse = setInterval(() => {
       if (!this.busy || this.cancelled || !this.streamer || !this.foreground) return;
+      if (!this.liveStep?.trim()) return;
       this.streamer.pulseLiveness(
         fmtDuration(Date.now() - this.turnPulseStartedAt),
         this.liveStep,
