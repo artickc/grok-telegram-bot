@@ -56,6 +56,8 @@ grok-tg run                     # run in the foreground (Ctrl-C to stop)
 | `grok-tg logs [n]` | Tail the last `n` log lines (default 100). |
 | `grok-tg stop` / `restart` / `start` | Control the running service. |
 | `grok-tg uninstall` | Stop + remove the background service. |
+| `grok-tg --name <slug> …` | Same commands for a **second Telegram bot** (own token, own chat, own service). |
+| `grok-tg instances` | List the default bot and every named instance. |
 | `grok-tg help` | Show all commands. |
 
 The background service is **user-level** and auto-detected per platform — a

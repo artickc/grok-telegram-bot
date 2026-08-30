@@ -248,6 +248,7 @@ export class ResponseStreamer {
     this.timer = undefined;
     await this.flush(true);
     // Seeded Thinking… with zero agent text: clear the placeholder.
+    // Manager quiet mode also deletes/replaces this bubble explicitly.
     if (
       this.proseOnly &&
       this.liveId !== undefined &&

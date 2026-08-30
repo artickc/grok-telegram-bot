@@ -24,6 +24,8 @@ import type { SessionRuntime } from "./session-runtime.js";
 export interface SessionDescription {
   /** Chat that owns the session (controlled session or subagent parent). */
   chatId?: number;
+  /** Forum topic thread id when the session lives in a project topic. */
+  threadId?: number;
   /** True when this is a session the chat directly controls. */
   controlled: boolean;
   /** True when this is a subagent of a controlled turn. */
@@ -202,10 +204,17 @@ export class RuntimeRegistry {
   describeSession(sessionId: string): SessionDescription {
     const controlledChat = this.findChatBySession(sessionId);
     if (controlledChat !== undefined) {
-      const project = this.controller(controlledChat)
+      const forum = this.forumControllerForSession(sessionId);
+      const project = (forum ?? this.controller(controlledChat))
         .list()
         .find((s) => s.sessionId === sessionId)?.projectName;
-      return { chatId: controlledChat, controlled: true, subagent: false, projectName: project };
+      return {
+        chatId: controlledChat,
+        threadId: forum?.messageThreadId,
+        controlled: true,
+        subagent: false,
+        projectName: project,
+      };
     }
     const parent = this.subagentParents.get(sessionId);
     const info = this.acp.subagentById(sessionId);

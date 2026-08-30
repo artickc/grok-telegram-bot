@@ -98,8 +98,8 @@ export interface PromptInput {
    */
   seedMessageId?: number;
   /**
-   * Grok TUI slash command (e.g. `/goal …`). Must stay the first text the agent
-   * sees — skip manager/complexity/progress wrappers and quote/priming prefixes.
+   * Grok Build slash command (`/goal`, `/compact`, …). Must stay the first
+   * line of the prompt — skip manager/complexity/progress wrappers and quotes.
    */
   rawSlashCommand?: boolean;
 }
