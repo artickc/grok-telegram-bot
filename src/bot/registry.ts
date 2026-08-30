@@ -44,8 +44,8 @@ export class RuntimeRegistry {
   private refresher: ((chatId: number) => void) | undefined;
   private rotator: AccountRotator | undefined;
   private bridge: ChatBridgeServices | undefined;
-  /** Chat ids with a running turn, most-recently-started last. */
-  private readonly activeChats: number[] = [];
+  /** Turns currently busy, most-recently-started last (forum thread when set). */
+  private readonly activeTurns: Array<{ chatId: number; threadId?: number }> = [];
   /** Subagent sessionId -> owner chat id. */
   private readonly subagentParents = new Map<string, number>();
 
@@ -86,7 +86,7 @@ export class RuntimeRegistry {
         this.settings,
         this.store,
         (id) => this.refresher?.(id),
-        (busy) => this.noteActivity(chatId, busy),
+        (busy) => this.noteActivity(chatId, busy, undefined),
         () => this.rotator,
       );
       c.bridge = this.bridge;
@@ -127,7 +127,7 @@ export class RuntimeRegistry {
         this.settings,
         this.store,
         (id) => this.refresher?.(id),
-        (busy) => this.noteActivity(chatId, busy),
+        (busy) => this.noteActivity(chatId, busy, threadId),
         () => this.rotator,
         {
           messageThreadId: threadId,
@@ -238,15 +238,44 @@ export class RuntimeRegistry {
 
   // ── subagent attribution ─────────────────────────────────────────────────
 
-  private noteActivity(chatId: number, busy: boolean): void {
-    const i = this.activeChats.indexOf(chatId);
-    if (i !== -1) this.activeChats.splice(i, 1);
-    if (busy) this.activeChats.push(chatId);
+  private noteActivity(chatId: number, busy: boolean, threadId?: number): void {
+    for (let i = this.activeTurns.length - 1; i >= 0; i--) {
+      const t = this.activeTurns[i]!;
+      if (t.chatId === chatId && t.threadId === threadId) this.activeTurns.splice(i, 1);
+    }
+    if (busy) this.activeTurns.push({ chatId, threadId });
   }
 
   /** The chat most likely to own freshly-spawned subagents. */
-  private currentOwner(): number | undefined {
-    return this.activeChats.at(-1);
+  private currentOwner(): { chatId: number; threadId?: number } | undefined {
+    return this.activeTurns.at(-1);
+  }
+
+  /**
+   * Busy foreground runtimes for a chat — forum topic controllers first, then
+   * the non-forum controller. Project /goal turns live on forumController, not
+   * controller(chatId), so subagent UI must target these.
+   */
+  busyRuntimesForChat(chatId: number, preferThreadId?: number): SessionRuntime[] {
+    const out: SessionRuntime[] = [];
+    const prefix = `${chatId}:`;
+    const preferred: SessionRuntime[] = [];
+    for (const [key, c] of this.forumControllers) {
+      if (!key.startsWith(prefix)) continue;
+      const fg = c.foreground();
+      if (!fg.isBusy) continue;
+      if (preferThreadId !== undefined && c.messageThreadId === preferThreadId) {
+        preferred.push(fg);
+      } else {
+        out.push(fg);
+      }
+    }
+    const main = this.controllers.get(chatId);
+    if (main) {
+      const fg = main.foreground();
+      if (fg.isBusy) out.push(fg);
+    }
+    return preferred.length > 0 ? [...preferred, ...out] : out;
   }
 
   private onSubagents(subagents: SubagentInfo[], pending: PendingStage[]): void {
@@ -254,10 +283,13 @@ export class RuntimeRegistry {
     // Record parents for any subagent we haven't attributed yet.
     if (owner !== undefined) {
       for (const s of subagents) {
-        if (!this.subagentParents.has(s.sessionId)) this.subagentParents.set(s.sessionId, owner);
+        if (!this.subagentParents.has(s.sessionId)) {
+          this.subagentParents.set(s.sessionId, owner.chatId);
+        }
       }
     }
-    // Group by attributed chat and route visibility to each owner's foreground.
+    // Group by attributed chat and route visibility to each owner's *busy*
+    // runtime (forum topic streamer for project /goal — not the bare chat controller).
     const byChat = new Map<number, SubagentInfo[]>();
     for (const s of subagents) {
       const chatId = this.subagentParents.get(s.sessionId);
@@ -267,10 +299,16 @@ export class RuntimeRegistry {
       else byChat.set(chatId, [s]);
     }
     for (const [chatId, list] of byChat) {
-      try {
-        this.controller(chatId).foreground().renderSubagents(list, pending);
-      } catch {
-        /* non-fatal */
+      const preferThread =
+        owner?.chatId === chatId ? owner.threadId : undefined;
+      const runtimes = this.busyRuntimesForChat(chatId, preferThread);
+      for (const rt of runtimes) {
+        try {
+          if (rt.sessionId) this.acp.touchActivity(rt.sessionId);
+          rt.renderSubagents(list, pending);
+        } catch {
+          /* non-fatal */
+        }
       }
       this.refresher?.(chatId);
     }
