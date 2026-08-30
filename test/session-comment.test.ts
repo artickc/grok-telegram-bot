@@ -88,7 +88,7 @@ test("formatFilesPhrase", () => {
   assert.ok(p.includes("+") || p.includes("~"));
 });
 
-test("shortenLiveCommand collapses heredocs and prefers git/npm lines", () => {
+test("shortenLiveCommand collapses heredocs and prefers last toolchain line", () => {
   const messy = `git add a.ts b.ts
 $msg = @"
 fix: never sticky done
@@ -96,9 +96,30 @@ fix: never sticky done
 git commit -m $msg
 git push`;
   const s = shortenLiveCommand(messy);
-  assert.ok(s.startsWith("git add"), s);
+  assert.ok(s.startsWith("git push"), s);
   assert.ok(!s.includes("never sticky"), s);
   assert.ok(!s.includes("\n"), s);
+  assert.ok(!s.includes("$msg"), s);
+
+  assert.equal(shortenLiveCommand("npm run typecheck"), "npm run typecheck");
+  assert.equal(shortenLiveCommand("   "), "");
+  assert.equal(shortenLiveCommand(""), "");
+
+  const bash = `cat <<EOF
+hello body
+EOF
+npm test`;
+  const b = shortenLiveCommand(bash);
+  assert.ok(b.startsWith("npm test"), b);
+  assert.ok(!b.includes("hello body"), b);
+
+  const long = "npm run " + "x".repeat(200);
+  assert.ok(shortenLiveCommand(long, 90).length <= 90);
+
+  // Single-quoted PowerShell here-string
+  const sq = `gh pr create --body @'\nlong\n'@`;
+  assert.ok(shortenLiveCommand(sq).startsWith("gh pr create"), shortenLiveCommand(sq));
+  assert.ok(!shortenLiveCommand(sq).includes("long"));
 });
 
 test("stepFromToolUpdate formats execute and edit", () => {
@@ -118,7 +139,7 @@ test("stepFromToolUpdate formats execute and edit", () => {
       command: 'git add x.ts\n$msg = @"\nlong body\n"@\ngit commit -m $msg',
     },
   } as SessionUpdate);
-  assert.ok(heredoc?.startsWith("Run: git add"), heredoc);
+  assert.ok(heredoc?.startsWith("Run: git commit"), heredoc);
   assert.ok(!heredoc?.includes("long body"), heredoc);
 
   const edit = stepFromToolUpdate({

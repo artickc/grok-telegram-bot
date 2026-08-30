@@ -266,6 +266,9 @@ export function buildLocalTurnComment(opts: {
  * (especially `@"…"@` heredocs) looked like "unparsed" garbage and stuck
  * on the bubble for minutes.
  */
+const LIVE_TOOL_LINE =
+  /^(git|npm|npx|node|dotnet|pwsh|powershell|gh|cargo|go|python|pip|tsx|curl|ssh)\b/i;
+
 export function shortenLiveCommand(cmd: string, max = 90): string {
   let t = cmd.replace(/\r\n/g, "\n").trim();
   if (!t) return "";
@@ -277,13 +280,11 @@ export function shortenLiveCommand(cmd: string, max = 90): string {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
-  // Prefer a real toolchain verb over `$msg = …` assignment noise.
-  const primary =
-    lines.find((l) =>
-      /^(git|npm|npx|node|dotnet|pwsh|powershell|gh|cargo|go|python|pip|tsx|curl|ssh)\b/i.test(l),
-    ) ||
-    lines[0] ||
-    t;
+  // Prefer real toolchain verbs over `$msg = …` noise. Use the LAST match so a
+  // script of `git add` → `git commit` → `npm test` / `gh pr` labels the part
+  // that usually still runs when the pulse is visible — not the first add.
+  const toolLines = lines.filter((l) => LIVE_TOOL_LINE.test(l));
+  const primary = (toolLines.length > 0 ? toolLines[toolLines.length - 1] : lines[0]) || t;
   return cleanCommentLine(primary.replace(/\s+/g, " "), max);
 }
 
