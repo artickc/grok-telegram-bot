@@ -198,6 +198,7 @@ export class SessionRuntime {
   /** Monotonic count used to reject ACP "success" responses with no turn updates. */
   private sessionUpdateCount = 0;
   private readonly listener: (sessionId: string, update: SessionUpdate) => void;
+  private readonly planExitListener: (sessionId: string | undefined, result: unknown) => void;
   private primingContext: string | undefined;
   private watcher: TailWatcher | undefined;
   /** True when the active watch is a transient "follow" of this session's own
@@ -372,6 +373,8 @@ export class SessionRuntime {
     this.typing = new TypingIndicator(api, chatId);
     this.listener = (sid, update) => this.onUpdate(sid, update);
     this.acp.on("session-update", this.listener);
+    this.planExitListener = (sid, result) => this.onPlanExit(sid, result);
+    this.acp.on("plan-exit", this.planExitListener);
     this.restartListener = () => {
       this.sessionLive = false;
       if (this.sessionId) this.rebindPending = true;
@@ -613,11 +616,32 @@ export class SessionRuntime {
 
   dispose(): void {
     this.acp.off("session-update", this.listener);
+    this.acp.off("plan-exit", this.planExitListener);
     this.acp.off("restarted", this.restartListener);
     this.typing.stop();
     this.stopActivityHeartbeat();
     this.stopLivenessPulse();
     this.stopWatch();
+  }
+
+  /** Plan → build transition: show it and keep the idle watch warm. */
+  private onPlanExit(sessionId: string | undefined, result: unknown): void {
+    if (!this.busy) return;
+    if (sessionId && this.sessionId && sessionId !== this.sessionId) return;
+    this.acp.touchActivity(this.sessionId);
+    const outcome =
+      result && typeof result === "object" && "outcome" in result
+        ? String((result as { outcome?: unknown }).outcome ?? "")
+        : "";
+    const approved = !outcome || outcome === "approved" || outcome === "accept";
+    if (!this.foreground || !this.streamer) return;
+    if (approved) {
+      this.setLiveStep("Plan approved \u2014 implementing\u2026");
+      this.streamer.addTool("\u2705 **Plan approved** \u2014 implementing.");
+    } else {
+      this.setLiveStep(`Plan exit: ${outcome || "done"}`);
+      this.streamer.addTool(`\u{1F4CB} Plan exit: **${outcome || "done"}**`);
+    }
   }
 
   // в”Ђв”Ђ sessions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -1620,13 +1644,13 @@ export class SessionRuntime {
     }
   }
 
-  /** Touch ACP activity every 60s so long tools do not trip the idle watchdog. */
+  /** Touch ACP activity every 30s so long tools/plan waits do not trip idle. */
   private startActivityHeartbeat(): void {
     this.stopActivityHeartbeat();
     this.activityHeartbeat = setInterval(() => {
       if (!this.busy || this.cancelled) return;
       this.acp.touchActivity(this.sessionId);
-    }, 60_000);
+    }, 30_000);
     // Unref so this timer alone cannot keep the process alive on shutdown.
     this.activityHeartbeat.unref?.();
   }

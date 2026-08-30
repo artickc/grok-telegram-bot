@@ -243,11 +243,13 @@ export declare interface GrokClient {
   on(e: "exit", l: (code: number | null) => void): this;
   on(e: "restarted", l: () => void): this;
   on(e: "subagents", l: (subagents: SubagentInfo[], pending: PendingStage[]) => void): this;
+  on(e: "plan-exit", l: (sessionId: string | undefined, result: unknown) => void): this;
   emit(e: "session-update", sessionId: string, update: SessionUpdate): boolean;
   emit(e: "notification", method: string, params: unknown): boolean;
   emit(e: "exit", code: number | null): boolean;
   emit(e: "restarted"): boolean;
   emit(e: "subagents", subagents: SubagentInfo[], pending: PendingStage[]): boolean;
+  emit(e: "plan-exit", sessionId: string | undefined, result: unknown): boolean;
 }
 
 export class GrokClient extends EventEmitter {
@@ -793,6 +795,15 @@ export class GrokClient extends EventEmitter {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    // Plan exit / ask-user / permissions can await for a long time with no
+    // session/update — keep the parent idle watchdog alive for that whole wait.
+    const sid =
+      (typeof params.sessionId === "string" && params.sessionId) ||
+      (typeof params.session_id === "string" && params.session_id) ||
+      undefined;
+    this.touchActivity(sid);
+    const keepAlive = setInterval(() => this.touchActivity(sid), 15_000);
+    keepAlive.unref?.();
     try {
       let result: unknown;
       if (method === "session/request_permission" && this.permissionHandler) {
@@ -813,8 +824,8 @@ export class GrokClient extends EventEmitter {
           "";
         const keys = Object.keys(params || {}).slice(0, 20).join(",");
         log.info(
-          `auto-approving plan exit via ${method}` +
-            (params.sessionId ? ` session=${String(params.sessionId).slice(0, 8)}` : "") +
+          `plan exit via ${method}` +
+            (sid ? ` session=${sid.slice(0, 8)}` : "") +
             (params.toolCallId ? ` tool=${String(params.toolCallId).slice(0, 24)}` : "") +
             (planSnippet ? ` plan=${planSnippet.replace(/\s+/g, " ").slice(0, 80)}` : "") +
             (keys ? ` keys=[${keys}]` : ""),
@@ -822,6 +833,9 @@ export class GrokClient extends EventEmitter {
         result = this.planExitHandler
           ? await this.planExitHandler(params)
           : autoApproveExitPlanMode(params);
+        // Transition to build — touch again so the post-plan gap isn't idle-killed.
+        this.touchActivity(sid);
+        this.emit("plan-exit", sid, result);
       } else if (isAskUserQuestionMethod(method)) {
         result = this.askUserHandler
           ? await this.askUserHandler(params)
@@ -836,6 +850,9 @@ export class GrokClient extends EventEmitter {
       this.transport?.send({ jsonrpc: "2.0", id, result });
     } catch (err) {
       this.transport?.send({ jsonrpc: "2.0", id, error: { code: -32000, message: (err as Error).message } });
+    } finally {
+      clearInterval(keepAlive);
+      this.touchActivity(sid);
     }
   }
 
