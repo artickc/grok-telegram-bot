@@ -116,20 +116,57 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     forum,
     bots: telegramBots,
     // Cross-topic orchestration: General can create a topic and send_prompt there.
-    submitTopicPrompt: async ({ threadId, cwd, projectName, prompt, newSession }) => {
+    // sessionId resumes a specific Grok session (memory follow-up) instead of
+    // dumping into whatever is currently open in that topic.
+    submitTopicPrompt: async ({
+      threadId,
+      cwd,
+      projectName,
+      prompt,
+      newSession,
+      sessionId,
+      reportBack,
+    }) => {
       if (cfg.topicGroupId === undefined) {
         throw new Error("TOPIC_GROUP_ID unset");
       }
       const groupId = cfg.topicGroupId;
       const controller = registry.forumController(groupId, threadId, cwd, projectName);
+      // Explicit resume wins over newSession / foreground.
+      if (sessionId) {
+        const sw = await controller.addResume(sessionId, cwd, projectName);
+        if (reportBack) sw.rt.setReportBack(reportBack);
+        const outcome = await sw.rt.submit(textPrompt(prompt));
+        return { outcome, sessionId: sw.rt.sessionId ?? sessionId };
+      }
       if (newSession) {
         const rt = await controller.addNew(cwd, projectName);
+        if (reportBack) rt.setReportBack(reportBack);
         const outcome = await rt.submit(textPrompt(prompt));
         return { outcome, sessionId: rt.sessionId };
       }
       const rt = controller.foreground();
+      if (reportBack) rt.setReportBack(reportBack);
       const outcome = await rt.submit(textPrompt(prompt));
       return { outcome, sessionId: rt.sessionId };
+    },
+    // Child topic Done → wake General manager with a WORK REPORT.
+    wakeManager: async ({ originChatId, originThreadId, prompt }) => {
+      if (cfg.topicGroupId === undefined) {
+        throw new Error("TOPIC_GROUP_ID unset");
+      }
+      const groupId = cfg.topicGroupId;
+      // origin is always General in manager mode; bind workspace.
+      const controller = registry.forumController(
+        originChatId || groupId,
+        originThreadId,
+        cfg.workspace,
+        "General",
+      );
+      const rt = controller.foreground();
+      await rt.submit(
+        textPrompt(prompt, undefined, undefined, { skipSelfRecheck: true }),
+      );
     },
   });
 
@@ -231,18 +268,50 @@ export async function createBot(cfg: AppConfig, acp: GrokClient): Promise<BotBun
     const index = Number(ctx.match![2]);
     const { resolveScope } = await import("./scope.js");
     const { adoptUserPrompt } = await import("./prompt-anchor.js");
+    const { isGeneralThread } = await import("../forum/thread.js");
     const scope = resolveScope(ctx, deps);
-    const rt = scope.rt;
-    const text = rt.takeSuggestion(batchId, index);
-    if (!text) {
+    // General may have parallel sessions — find the runtime that owns this batch.
+    const hit =
+      scope.controller.takeSuggestionAnywhere(batchId, index) ??
+      (() => {
+        const t = scope.rt.takeSuggestion(batchId, index);
+        return t ? { rt: scope.rt, text: t } : undefined;
+      })();
+    if (!hit) {
       await ctx.answerCallbackQuery({ text: "Suggestion expired", show_alert: true });
       return;
     }
+    const { rt, text } = hit;
     await ctx.answerCallbackQuery({ text: "Sending\u2026" });
     // Dim the keyboard so double-taps don't re-fire.
     await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {});
     try {
       const chatId = ctx.chat?.id;
+      const isGeneral = isGeneralThread(scope.threadId);
+      const sugMsgId = ctx.callbackQuery.message?.message_id;
+      // General: keep chat clean — no anchor overwrite; continue same session
+      // and reply to the message that carried the buttons.
+      if (isGeneral) {
+        if (rt.sessionId && sugMsgId !== undefined) {
+          scope.controller.bindTelegramMessage(sugMsgId, rt.sessionId);
+        }
+        const outcome = await rt.submit(
+          textPrompt(text, sugMsgId, undefined, { promptId: undefined }),
+        );
+        if (outcome === "queued") {
+          const extra: Record<string, unknown> = { ...scope.threadExtra };
+          if (sugMsgId !== undefined) {
+            extra.reply_parameters = {
+              message_id: sugMsgId,
+              allow_sending_without_reply: true,
+            };
+          }
+          await deps.api
+            .sendMessage(chatId!, "\u{1F4E5} Queued on that thread.", extra)
+            .catch(() => {});
+        }
+        return;
+      }
       const anchor =
         chatId !== undefined
           ? await adoptUserPrompt(deps.api, {

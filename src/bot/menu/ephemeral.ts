@@ -101,8 +101,11 @@ export class Ephemeral {
       msg && "message_thread_id" in msg
         ? (msg as { message_thread_id?: number }).message_thread_id
         : undefined;
+    // Omit General (1) — Bot API rejects message_thread_id=1.
     const merged =
-      threadId !== undefined && extra.message_thread_id === undefined
+      threadId !== undefined &&
+      threadId !== 1 &&
+      extra.message_thread_id === undefined
         ? { ...extra, message_thread_id: threadId }
         : extra;
     return this.serialize(chatId, async () => {

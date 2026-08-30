@@ -176,7 +176,8 @@ export class TelegramBotService {
       : `/${cmd}@${username}`;
 
     const extra: Record<string, unknown> = {};
-    if (opts.messageThreadId !== undefined) {
+    // Omit General (1) — Bot API rejects message_thread_id=1.
+    if (opts.messageThreadId !== undefined && opts.messageThreadId !== 1) {
       extra.message_thread_id = opts.messageThreadId;
     }
 

@@ -69,6 +69,9 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
   // Preserve meta flags: auto-suggestion batches / self-recheck must not re-arm
   // another recheck after merge (dropping this caused infinite recheck loops).
   const skipSelfRecheck = inputs.some((i) => i.skipSelfRecheck);
+  // First reportBack wins (oldest queued manager dispatch in this merge batch).
+  const reportBack = inputs.find((i) => i.reportBack)?.reportBack;
+  const seedMessageId = inputs.find((i) => i.seedMessageId !== undefined)?.seedMessageId;
   return {
     text: inputs
       .map((i) => i.text)
@@ -82,6 +85,8 @@ export function mergeInputs(inputs: PromptInput[]): PromptInput {
     promptId: inputs.find((i) => i.promptId)?.promptId,
     quotedText: quotes.length > 0 ? [...new Set(quotes)].join("\n\n---\n\n") : undefined,
     skipSelfRecheck: skipSelfRecheck || undefined,
+    reportBack,
+    seedMessageId,
   };
 }
 

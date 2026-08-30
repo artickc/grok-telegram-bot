@@ -193,8 +193,11 @@ async function submit(
     quotedText: quoted,
   });
   if (outcome === "queued") {
+    // Omit General (1) — Bot API rejects message_thread_id=1.
     const extra: Record<string, unknown> =
-      threadId !== undefined ? { message_thread_id: threadId } : {};
+      threadId !== undefined && threadId !== 1
+        ? { message_thread_id: threadId }
+        : {};
     if (anchor?.replyTo !== undefined) {
       extra.reply_parameters = {
         message_id: anchor.replyTo,

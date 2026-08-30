@@ -5,7 +5,11 @@ import type { Bot } from "grammy";
 import { createLogger } from "../../logger.js";
 import type { ForumManager } from "../../forum/manager.js";
 import type { BotDeps } from "../deps.js";
-import { FORUM_GENERAL_THREAD_ID, forumThreadId } from "../../forum/thread.js";
+import {
+  FORUM_GENERAL_THREAD_ID,
+  forumThreadId,
+  outboundThreadExtra,
+} from "../../forum/thread.js";
 
 const log = createLogger("forum-handler");
 
@@ -89,8 +93,7 @@ export function registerForum(bot: Bot, deps: BotDeps, forum: ForumManager): voi
   // Optional: re-run setup command for admins in the group.
   bot.command("forum_setup", async (ctx) => {
     const threadId = ctx.message?.message_thread_id;
-    const replyOpts =
-      threadId !== undefined ? { message_thread_id: threadId } : {};
+    const replyOpts = outboundThreadExtra(threadId);
     if (ctx.chat?.id !== groupId) {
       await ctx.reply("Use this command inside the configured forum group.", replyOpts).catch(() => {});
       return;
@@ -167,7 +170,11 @@ export async function resolveForumRuntime(
         .sendMessage(
           chatId,
           `\u2705 Bound to project:\n\`${result.binding.projectPath}\`${iconNote}\n\nYou can chat here now.`,
-          { message_thread_id: tid, parse_mode: "Markdown", reply_parameters: { message_id: messageId } },
+          {
+            ...outboundThreadExtra(tid),
+            parse_mode: "Markdown",
+            reply_parameters: { message_id: messageId },
+          },
         )
         .catch(() => {});
       // Warm runtime; path-only message is not submitted as an agent prompt.
@@ -181,7 +188,10 @@ export async function resolveForumRuntime(
       .sendMessage(
         chatId,
         `\u2753 ${result.error}\n\n${BIND_HINT.replace(/\*\*/g, "")}`,
-        { message_thread_id: tid, reply_parameters: { message_id: messageId } },
+        {
+          ...outboundThreadExtra(tid),
+          reply_parameters: { message_id: messageId },
+        },
       )
       .catch(() => {});
     return "handled";
@@ -194,7 +204,7 @@ export async function resolveForumRuntime(
       .sendMessage(
         chatId,
         `\u2753 This topic is not linked to a project yet.\n${BIND_HINT.replace(/\*\*/g, "")}`,
-        { message_thread_id: tid },
+        outboundThreadExtra(tid),
       )
       .catch(() => {});
     return "handled";

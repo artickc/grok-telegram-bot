@@ -63,6 +63,12 @@ export class ChatController {
   /** Telegram bridge (forum / memory / sibling bots); set by the registry. */
   bridge?: ChatBridgeServices;
 
+  /**
+   * General manager: map Telegram message ids (user + bot) → session id so a
+   * reply-to continues the same ACP session instead of spawning a new one.
+   */
+  private readonly telegramMsgSessions = new Map<number, string>();
+
   constructor(
     private readonly api: Api,
     private readonly chatId: number,
@@ -126,6 +132,105 @@ export class ChatController {
     this.markSeen(rt);
     this.persist();
     return rt;
+  }
+
+  /**
+   * General manager: spawn a fresh session for one user message without
+   * killing an in-flight sibling's Telegram stream (parallel prompts).
+   */
+  async addParallel(cwd: string, projectName?: string): Promise<SessionRuntime> {
+    return this.addNew(cwd, projectName);
+  }
+
+  /** Remember that a Telegram message belongs to a Grok session (reply routing). */
+  bindTelegramMessage(messageId: number, sessionId: string): void {
+    if (!messageId || !sessionId) return;
+    this.telegramMsgSessions.set(messageId, sessionId);
+    // Cap map growth (keep newest ~500).
+    if (this.telegramMsgSessions.size > 500) {
+      const drop = this.telegramMsgSessions.size - 500;
+      let i = 0;
+      for (const k of this.telegramMsgSessions.keys()) {
+        this.telegramMsgSessions.delete(k);
+        if (++i >= drop) break;
+      }
+    }
+  }
+
+  /** Resolve a controlled runtime from a Telegram message id (reply-to). */
+  runtimeForTelegramMessage(messageId: number | undefined): SessionRuntime | undefined {
+    if (messageId === undefined) return undefined;
+    this.ensureRestored();
+    const sid = this.telegramMsgSessions.get(messageId);
+    if (sid) {
+      const byId = this.runtimes.find((r) => r.sessionId === sid);
+      if (byId) return byId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve session from `#sess_xxxxxxxx` in a replied-to bot message body
+   * (works across process restarts when the in-memory map is cold).
+   */
+  runtimeForSessionTag(text: string | undefined): SessionRuntime | undefined {
+    if (!text) return undefined;
+    this.ensureRestored();
+    const tag = parseSessTag(text);
+    if (!tag) return undefined;
+    return this.runtimes.find((r) => r.sessionId && sessionMatchesTag(r.sessionId, tag));
+  }
+
+  /**
+   * Cold-start / map-miss: resolve continue target from reply message id, #sess_
+   * tag on controlled runtimes, or disk session list (attach into this controller).
+   */
+  async resolveContinueFromReply(opts: {
+    replyToMessageId?: number;
+    replyToText?: string;
+    cwd: string;
+    projectName?: string;
+  }): Promise<SessionRuntime | undefined> {
+    this.ensureRestored();
+    const byMsg = this.runtimeForTelegramMessage(opts.replyToMessageId);
+    if (byMsg) return byMsg;
+    const byTag = this.runtimeForSessionTag(opts.replyToText);
+    if (byTag) return byTag;
+
+    const tag = parseSessTag(opts.replyToText);
+    if (!tag) return undefined;
+    // Disk fallback: find full session id, then resume into this controller.
+    let metas;
+    try {
+      metas = this.store.list(80);
+    } catch {
+      return undefined;
+    }
+    const meta = metas.find((m) => sessionMatchesTag(m.sessionId, tag));
+    if (!meta) return undefined;
+    try {
+      const sw = await this.addResume(
+        meta.sessionId,
+        meta.cwd || opts.cwd,
+        opts.projectName,
+      );
+      return sw.rt;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Find any runtime that still holds this suggestion batch (General parallel). */
+  takeSuggestionAnywhere(
+    batchId: number,
+    index: number,
+  ): { rt: SessionRuntime; text: string } | undefined {
+    this.ensureRestored();
+    for (const r of this.runtimes) {
+      const text = r.takeSuggestion(batchId, index);
+      if (text) return { rt: r, text };
+    }
+    return undefined;
   }
 
   /**
@@ -410,6 +515,9 @@ export class ChatController {
       this.markSeen(rt);
       this.persist();
     };
+    rt.onTelegramMessageBound = (messageId, sessionId) => {
+      this.bindTelegramMessage(messageId, sessionId);
+    };
     return rt;
   }
 
@@ -465,4 +573,25 @@ export class ChatController {
 /** Path key for project matching (case / separators / trailing slash). */
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Extract `#sess_xxxxxxxx` from bot message text/caption. */
+function parseSessTag(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const m = text.match(/#sess_([a-z0-9]{6,12})/i);
+  return m?.[1]?.toLowerCase();
+}
+
+/** Match full session UUID (or short form) to a #sess_ tag body. */
+function sessionMatchesTag(sessionId: string, tag: string): boolean {
+  const compact = sessionId.replace(/-/g, "").toLowerCase();
+  const short = sessionId.slice(0, 8).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const t = tag.toLowerCase();
+  return (
+    short === t ||
+    short.startsWith(t) ||
+    t.startsWith(short) ||
+    compact.startsWith(t) ||
+    sessionId.toLowerCase().startsWith(t)
+  );
 }

@@ -183,7 +183,10 @@ export async function sendMarkdownDoc(
   opts?: { loud?: boolean; messageThreadId?: number },
 ): Promise<void> {
   const extra: Record<string, unknown> = opts?.loud ? { disable_notification: false } : {};
-  if (opts?.messageThreadId !== undefined) extra.message_thread_id = opts.messageThreadId;
+  // Omit General (1) — Bot API rejects message_thread_id=1.
+  if (opts?.messageThreadId !== undefined && opts.messageThreadId !== 1) {
+    extra.message_thread_id = opts.messageThreadId;
+  }
   const rendered = toTelegramMarkdown(rawMarkdown);
   const mdChunks = chunkMarkdown(rendered);
   const plainChunks = chunkMarkdown(rawMarkdown);

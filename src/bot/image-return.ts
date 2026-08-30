@@ -145,7 +145,10 @@ export async function sendImages(
   if (opts.replyTo !== undefined) {
     extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
   }
-  if (opts.messageThreadId !== undefined) extra.message_thread_id = opts.messageThreadId;
+  // Omit General (1) — Bot API rejects message_thread_id=1.
+  if (opts.messageThreadId !== undefined && opts.messageThreadId !== 1) {
+    extra.message_thread_id = opts.messageThreadId;
+  }
   for (const path of paths) {
     if (sent >= opts.max) break;
     if (opts.already.has(path)) continue;

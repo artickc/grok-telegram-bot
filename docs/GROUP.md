@@ -67,11 +67,24 @@ When the bot is later promoted to admin, it re-probes automatically (`my_chat_me
 
 | Topic | Working directory | Typical use |
 |---|---|---|
-| **General** / **AI Chat** | `GROK_WORKSPACE` | Orchestration, cross-project planning, agent bridge actions |
+| **General** | `GROK_WORKSPACE` | **Manager chat** (OpenClaw-style): routes work, memory-first, no coding spam |
+| **AI Chat** | `GROK_WORKSPACE` | Normal coding/conversation in the workspace |
 | **Project topic** | Bound project path | All coding work for that folder |
 | **User-created topic** | Bound after name/path match | Ad-hoc projects or new folders |
 
-Messages you send **inside a topic** are prompts for a session whose `cwd` is
+### General = manager
+
+Messages in **General** drive a chat-like orchestrator, not a coding agent:
+
+1. User asks in General (e.g. “fix login in MyApp”).
+2. Bot uses **memory + topic catalog** (auto-injected) and may call `search_memory` / `list_topics`.
+3. It replies briefly (“OK — I’ll start … in **MyApp**”) with **no progress bars / tool dumps**.
+4. It **dispatches** via `create_topic` / `set_path` / `send_prompt` into the right project topic.
+5. When that child turn finishes, the bridge **wakes General** with a `MANAGER WORK REPORT` so the manager summarizes success/fail for you.
+
+Real implementation stays in **project topics**. General should not edit app code.
+
+Messages you send **inside a project topic** are prompts for a session whose `cwd` is
 that topic’s path. Menus, model/reasoning picks, `/sessions`, `/running`, and
 Stop are **topic-scoped** so one project does not steal another’s session.
 
@@ -148,8 +161,11 @@ may feed results back as a quiet system turn (not a second Done).
 |---|---|
 | `create_topic` | New forum topic; optional `path` binds immediately |
 | `set_path` | Bind/rebind topic by title or `#threadId` |
-| `send_prompt` | Inject a prompt into another topic (`ran` / `queued`; optional `new_session`) |
-| `search_memory` | Search topic + session indexes |
+| `send_prompt` | Inject a prompt into another topic (`ran` / `queued`; optional `new_session`, **`session_id`** to resume a specific session) |
+| `notify` | Optional extra ping. In **General** the user already sees short chat prose; `notify` is not required. |
+| `search_memory` | Search topic + session indexes (memory-first) |
+| `list_topics` | List mapped forum topics (name, `#id`, path) |
+| `list_jobs` | List recent General → project dispatches |
 | `list_bots` | List allowlisted sibling bots |
 | `bot_command` | Call `/command@bot` and wait for that bot to settle |
 
@@ -173,6 +189,25 @@ Example (from General / AI Chat):
 ```
 
 `topic` may be the exact title, `#threadId`, `general`, or `ai chat`.
+
+To **resume a related session** found via memory (not the topic's currently open session):
+
+```json
+{
+  "telegram": [
+    {
+      "action": "send_prompt",
+      "topic": "MyApp",
+      "session_id": "019fc9ec",
+      "prompt": "Continue: apply the follow-up fix."
+    }
+  ]
+}
+```
+
+`session_id` may be a full UUID or a short prefix from memory hits. Without it, the bridge uses the topic's foreground session.
+
+`topic` must be an **exact** mapped title or `#threadId` (never placeholders like `…`). If only the session is known, omit `topic` — the bridge maps `session.cwd` → forum topic.
 
 ---
 

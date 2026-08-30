@@ -27,8 +27,9 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Capability | What it does |
 |---|---|
 | 🗂 **Projects** | `/projects` browses your folders and runs Grok in the one you pick. |
-| 🏷 **Forum project topics** | Optional forum supergroup: one topic per project, **AI Chat** workspace, exact-name bind, `/forum_setup`. See **[docs/GROUP.md](./docs/GROUP.md)**. |
-| 🌉 **Telegram bridge** | Agent can `create_topic`, `set_path`, `send_prompt` across topics, `search_memory`, and call allowlisted sibling bots via JSON actions. |
+| 🏷 **Forum project topics** | Optional forum supergroup: **General** manager, **AI Chat** workspace, one topic per project, exact-name bind, `/forum_setup`. See **[docs/GROUP.md](./docs/GROUP.md)**. |
+| 🎛 **General manager** | Forum General is a chat-like orchestrator: memory-first, short replies, `send_prompt` into project topics, report-back when child work finishes. |
+| 🌉 **Telegram bridge** | Agent can `create_topic`, `set_path`, `send_prompt` (optional `session_id`), `notify`, `search_memory`, `list_topics` / `list_jobs`, and call allowlisted sibling bots via JSON actions. |
 | 🔖 **Prompt anchors** | Each user prompt is re-posted with a searchable `#prompt_…` tag; stream/Done messages reply to that anchor (media re-attached). |
 | 🆕 **New session** | `/new` or the bar **New** button starts a fresh session; forum topics keep New on the topic menu. |
 | 💡 **Post-turn suggestions** | After Done, 1–3 scored follow-ups as buttons; high-score items can auto-queue as one multi-step prompt. |
@@ -66,7 +67,8 @@ re-architected for the Grok Build CLI and extended into a full multi-session cli
 | Connect Grok CLI to Telegram (ACP) | ✅ | ✅ |
 | Switch between projects | ✅ | ❌ |
 | **Forum topics = projects** + AI Chat workspace | ✅ | ❌ |
-| **Cross-topic agent bridge** (create / bind / send_prompt) | ✅ | ❌ |
+| **General manager** (memory-first, dispatch + report-back) | ✅ | ❌ |
+| **Cross-topic agent bridge** (create / bind / send_prompt / session_id) | ✅ | ❌ |
 | Resume saved sessions | ✅ | ❌ |
 | Attach to **live** PC sessions (watch / fork) | ✅ | ❌ |
 | **Kill a session by PID** (or all at once) | ✅ | ❌ |

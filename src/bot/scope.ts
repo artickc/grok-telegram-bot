@@ -6,8 +6,11 @@ import type { Context } from "grammy";
 import type { BotDeps } from "./deps.js";
 import type { ChatController } from "./chat-controller.js";
 import type { SessionRuntime } from "./session-runtime.js";
-import { forumThreadId } from "../forum/thread.js";
-import { FORUM_GENERAL_THREAD_ID } from "../forum/thread.js";
+import {
+  forumThreadId,
+  FORUM_GENERAL_THREAD_ID,
+  outboundThreadExtra,
+} from "../forum/thread.js";
 
 export interface HandlerScope {
   chatId: number;
@@ -48,10 +51,6 @@ export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
   const chatId = ctx.chat!.id;
   const rawThread = threadIdFromContext(ctx);
   const isForum = Boolean(deps.forum?.isActiveForumChat(chatId));
-  const threadExtra =
-    isForum || rawThread !== undefined
-      ? { message_thread_id: isForum ? forumThreadId(rawThread) : rawThread }
-      : {};
 
   if (!isForum || !deps.forum) {
     const controller = deps.registry.controller(chatId);
@@ -61,7 +60,8 @@ export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
       settingsKey: settingsKeyFor(chatId),
       controller,
       rt: controller.foreground(),
-      threadExtra: rawThread !== undefined ? { message_thread_id: rawThread } : {},
+      // Private chats rarely have threads; still omit General-style id 1.
+      threadExtra: outboundThreadExtra(rawThread),
     };
   }
 
@@ -87,7 +87,8 @@ export function resolveScope(ctx: Context, deps: BotDeps): HandlerScope {
     settingsKey: settingsKeyFor(chatId, tid),
     controller,
     rt: controller.foreground(),
-    threadExtra: { message_thread_id: tid },
+    // Outbound: never pass message_thread_id=1 (General) — Telegram rejects it.
+    threadExtra: outboundThreadExtra(tid),
     projectPath: cwd,
     projectName,
   };

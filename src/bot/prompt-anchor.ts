@@ -15,6 +15,7 @@ import type { Api, Context } from "grammy";
 import { InputMediaBuilder } from "grammy";
 import { createLogger } from "../logger.js";
 import { tagSafe } from "../render/hashtags.js";
+import { outboundThreadExtra } from "../forum/thread.js";
 
 const log = createLogger("prompt-anchor");
 
@@ -123,10 +124,8 @@ export async function adoptUserPrompt(
   });
   const threadExtra: Record<string, unknown> = {
     disable_notification: true,
+    ...outboundThreadExtra(opts.messageThreadId),
   };
-  if (opts.messageThreadId !== undefined) {
-    threadExtra.message_thread_id = opts.messageThreadId;
-  }
 
   let replyTo: number;
   try {

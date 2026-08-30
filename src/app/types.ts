@@ -78,13 +78,37 @@ export interface PromptInput {
    * trigger another self-recheck — only real user prompts do (once each).
    */
   skipSelfRecheck?: boolean;
+  /**
+   * Manager dispatch metadata for this prompt only (General → project).
+   * Carried through the queue so concurrent send_prompt jobs do not steal
+   * each other's report-back. Shape matches bot/manager-jobs ReportBackMeta.
+   */
+  reportBack?: {
+    jobId: string;
+    originChatId: number;
+    originThreadId: number;
+    userAskPreview: string;
+    targetName: string;
+    targetPath: string;
+    dispatchPrompt: string;
+  };
+  /**
+   * Pre-posted status bubble (General: "Starting…") that the turn edits to
+   * "Thinking…" then streams the agent reply into.
+   */
+  seedMessageId?: number;
 }
 
 export function textPrompt(
   text: string,
   replyTo?: number,
   quotedText?: string,
-  opts?: { skipSelfRecheck?: boolean; promptId?: string },
+  opts?: {
+    skipSelfRecheck?: boolean;
+    promptId?: string;
+    reportBack?: PromptInput["reportBack"];
+    seedMessageId?: number;
+  },
 ): PromptInput {
   return {
     text,
@@ -94,5 +118,7 @@ export function textPrompt(
     promptId: opts?.promptId,
     quotedText,
     skipSelfRecheck: opts?.skipSelfRecheck,
+    reportBack: opts?.reportBack,
+    seedMessageId: opts?.seedMessageId,
   };
 }

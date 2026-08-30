@@ -112,7 +112,11 @@ async function denyUnauthorized(
   }
   if (!ctx.chat || isGroupChat(ctx)) return; // groups: ignore quietly
   const threadId = m && "message_thread_id" in m ? m.message_thread_id : undefined;
-  const extra = threadId !== undefined ? { message_thread_id: threadId as number } : {};
+  // Omit General (1) — Bot API rejects message_thread_id=1.
+  const extra =
+    threadId !== undefined && threadId !== 1
+      ? { message_thread_id: threadId as number }
+      : {};
   await ctx
     .reply("\u26D4 Not authorized. Ask the bot owner to add your Telegram ID to ALLOWED_USERS.", extra)
     .catch(() => {});
