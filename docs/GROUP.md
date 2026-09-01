@@ -33,6 +33,10 @@ TOPIC_GROUP_ID=-100xxxxxxxxxx
 # Default true: create one topic per catalog project (paced + 429-retried)
 TOPIC_AUTO_CREATE=true
 
+# While auto-create is on, poll PROJECT_ROOTS for new top-level folders and
+# create bound topics automatically (default 10s). No bot restart needed.
+# TOPIC_WATCH_INTERVAL_MS=10000
+
 # Display name for the workspace topic (default AI Chat)
 TOPIC_AI_CHAT_NAME=AI Chat
 
